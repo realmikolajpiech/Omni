@@ -415,6 +415,12 @@ class OmniWindow(QWidget):
             w = StandardItemWidget(data['orig_name'], icon_name=icon_path)
             self.add_list_item(w, data)
 
+        # Always add "Ask Omni" option at the end if there is a query
+        if query:
+            # Use the app logo for the Ask Omni action
+            w = StandardItemWidget(f"Ask Omni: {query}", icon_name=LOGO_PATH)
+            self.add_list_item(w, {"type": "ask_omni", "query": query})
+
         self.adjust_window_height(animate)
 
     def add_list_item(self, widget, data):
@@ -499,6 +505,8 @@ class OmniWindow(QWidget):
                     subprocess.Popen(data['cmd'], shell=True, start_new_session=True)
                     self.animate_close()
                 except: pass
+            elif data.get('type') == 'ask_omni':
+                self.perform_ai_query(data['query'])
         else:
             # Fallback
             query = self.input_field.text().strip()

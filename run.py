@@ -11,12 +11,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.app.brain import create_app
 from src.app.main import main as run_ui_main
 from src.core.logger import setup_logging
+from src.core.config import BRAIN_PORT
 
 def run_flask():
     """Runs the Flask API server."""
     app = create_app()
     # Run properly
-    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+    app.run(host='127.0.0.1', port=BRAIN_PORT, debug=False, use_reloader=False)
 
 def main():
     setup_logging("launcher")
