@@ -1,0 +1,9 @@
+flask
+requests
+simpleeval
+sentence_transformers
+lancedb
+memvid_sdk
+llama_cpp_python
+PyQt6
+Pillow
