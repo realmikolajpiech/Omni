@@ -284,16 +284,23 @@ class OmniWindow(QWidget):
         
         list_h = 0
         count = self.list_widget.count()
+        
         if count > 0:
+            self.divider.show()
+            self.list_widget.show()
             for i in range(count):
                 item = self.list_widget.item(i)
                 list_h += item.sizeHint().height()
             # Cap list height
             list_h = min(list_h, 600)
-        
-        base_h = 70 
-        new_h = base_h + list_h + 20 
-        
+            
+            base_h = 70 
+            new_h = base_h + list_h + 20 
+        else:
+            self.divider.hide()
+            self.list_widget.hide()
+            new_h = 70 # Just the input height
+
         if self.height() != new_h:
             if animate:
                 self.anim.stop()
@@ -341,7 +348,7 @@ class OmniWindow(QWidget):
             role = msg.get('role', 'user')
             content = msg.get('content', '')
             if role == 'user':
-                self.add_list_item(StandardItemWidget(f"You: {content}", icon_name="user-available"), "history_user")
+                continue # User requested to hide "You:" messages in results
             else:
                 self.add_list_item(AnswerWidget(content), "history_ai")
         
@@ -381,7 +388,11 @@ class OmniWindow(QWidget):
         super().closeEvent(event)
 
     def on_text_changed(self, text):
-        if self.is_history_mode: return # Don't auto-search in chat mode
+        if self.is_history_mode: 
+            # If user types in history mode, switch back to search immediately
+            self.is_history_mode = False
+            self.follow_up_widget.set_active(False)
+            # Do NOT return, proceed to search logic below
         
         if not text.strip():
             self.refresh_list("", animate=False)
@@ -393,35 +404,133 @@ class OmniWindow(QWidget):
         self.debounce_timer.start()
 
     def refresh_list(self, query, animate=True):
-        self.list_widget.clear()
-        
         if not query:
+            self.list_widget.clear()
             self.adjust_window_height(animate)
             return
 
+        # Calculate new items to display
+        new_items_data = [] # List of (key, data, widget_factory_func)
+
         # 1. Local Apps (Fast)
-        query = query.lower()
+        query_lower = query.lower()
         matches = []
         for name, data in self.apps.items():
-            if query in name:
+            if query_lower in name:
                 matches.append((name, data))
         
         # Sort matches: exact/prefix first
-        matches.sort(key=lambda x: 0 if x[0].startswith(query) else 1)
+        matches.sort(key=lambda x: 0 if x[0].startswith(query_lower) else 1)
         
         for name, data in matches[:5]:
-            # Use SmoothEntryWidget for animation
-            icon_path = data.get('icon') or name
-            w = StandardItemWidget(data['orig_name'], icon_name=icon_path)
-            self.add_list_item(w, data)
+            key = f"app:{data['orig_name']}"
+            
+            # Capture variables properly in lambda
+            def create_app_widget(d=data, n=name):
+                icon_path = d.get('icon') or n
+                return StandardItemWidget(d['orig_name'], icon_name=icon_path)
+            
+            new_items_data.append((key, data, create_app_widget))
 
         # Always add "Ask Omni" option at the end if there is a query
         if query:
-            # Use the app logo for the Ask Omni action
-            w = StandardItemWidget(f"Ask Omni: {query}", icon_name=LOGO_PATH)
-            self.add_list_item(w, {"type": "ask_omni", "query": query})
+            key = "ask_omni"
+            data = {"type": "ask_omni", "query": query}
+            
+            def create_omni_widget(q=query):
+                return StandardItemWidget(f"Ask Omni: {q}", icon_name=LOGO_PATH)
+            
+            new_items_data.append((key, data, create_omni_widget))
 
+        self.sync_list_items(new_items_data)
         self.adjust_window_height(animate)
+
+    def get_item_key(self, data):
+        if not isinstance(data, dict): return None
+        if data.get('type') == 'ask_omni': return 'ask_omni'
+        if 'orig_name' in data and 'cmd' in data: return f"app:{data['orig_name']}" # App
+        if data.get('type') == 'open_file': return f"file:{data.get('path')}"
+        if data.get('type') == 'link': return f"link:{data.get('url')}"
+        # Fallback for others
+        return str(data)
+
+    def sync_list_items(self, new_items_data):
+        # 1. Index existing items
+        existing = {} 
+        
+        # Snapshot current state
+        # We iterate backwards to safely identify removals, 
+        # but for indexing we can just walk once.
+        # However, multiple items might have same key? (Shouldn't happen with our logic)
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
+            if key:
+                existing[key] = item
+
+        # 2. Remove items not in new list
+        new_keys = set(k for k, _, _ in new_items_data)
+        
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
+            if key not in new_keys:
+                self.list_widget.takeItem(i)
+
+        # 3. Align items with new order
+        for i, (key, data, factory) in enumerate(new_items_data):
+            # Check item at current position i
+            current_item = self.list_widget.item(i)
+            current_key = self.get_item_key(current_item.data(Qt.ItemDataRole.UserRole)) if current_item else None
+            
+            if current_key == key:
+                # MATCH: Update content if needed
+                widget_container = self.list_widget.itemWidget(current_item)
+                if isinstance(widget_container, SmoothEntryWidget):
+                    real_widget = widget_container.content_widget
+                    if hasattr(real_widget, 'set_text'):
+                        # Specific logic for Ask Omni text update
+                        if key == "ask_omni":
+                            real_widget.set_text(f"Ask Omni: {data['query']}")
+                        # Apps usually don't change text
+                
+                # Update data just in case
+                current_item.setData(Qt.ItemDataRole.UserRole, data)
+                
+            else:
+                # MISMATCH
+                if key in existing:
+                    # Exists elsewhere: Move it here (Slide effect by skipping animation)
+                    old_item = existing[key]
+                    row = self.list_widget.row(old_item)
+                    self.list_widget.takeItem(row) # Remove from old pos
+                    
+                    # Re-insert at i
+                    new_item = QListWidgetItem()
+                    widget = factory() # Recreate widget
+                    new_item.setSizeHint(widget.sizeHint())
+                    new_item.setData(Qt.ItemDataRole.UserRole, data)
+                    
+                    self.list_widget.insertItem(i, new_item)
+                    
+                    # Wrap with NO animation
+                    anim_w = SmoothEntryWidget(widget, animate=False)
+                    self.list_widget.setItemWidget(new_item, anim_w)
+                    
+                    # Update map for future lookups in this loop?
+                    # No need, we are linear scan.
+                    
+                else:
+                    # New Item: Insert with Animation
+                    new_item = QListWidgetItem()
+                    widget = factory()
+                    new_item.setSizeHint(widget.sizeHint())
+                    new_item.setData(Qt.ItemDataRole.UserRole, data)
+                    
+                    self.list_widget.insertItem(i, new_item)
+                    
+                    anim_w = SmoothEntryWidget(widget, animate=True)
+                    self.list_widget.setItemWidget(new_item, anim_w)
 
     def add_list_item(self, widget, data):
         item = QListWidgetItem()

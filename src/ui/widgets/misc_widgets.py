@@ -39,46 +39,44 @@ class ThinkingWidget(QWidget):
         super().__init__(parent)
         self.is_expanded = False
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(24, 8, 24, 8)
-        self.main_layout.setSpacing(0)
+        self.main_layout.setContentsMargins(24, 12, 24, 12)
+        self.main_layout.setSpacing(8)
 
-        self.header = QLabel("Process")
+        self.header = QLabel("Thinking...")
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setFixedHeight(24)
-        self.header.setFont(QFont("Instrument Serif", 14, QFont.Weight.Normal))
+        self.header.setFont(QFont("Instrument Serif", 16, QFont.Weight.Normal))
         f = self.header.font(); f.setItalic(True); self.header.setFont(f)
 
         self.header.setStyleSheet("""
             QLabel {
                 background-color: transparent;
-                color: #BBBBBB;
-                padding-left: 12px;
+                color: #666666;
+                padding-left: 0px;
             }
-            QLabel:hover { color: #555555; }
+            QLabel:hover { color: #333333; }
         """)
         self.header.mousePressEvent = self.toggle_expand
 
         self.content_label = QLabel(text)
         self.content_label.setWordWrap(True)
         self.content_label.setFont(QFont("Manrope", 12))
-        self.content_label.setStyleSheet("color: #888888; padding: 8px 12px; font-style: italic; line-height: 1.4;")
+        self.content_label.setStyleSheet("color: #888888; padding: 4px 0px 4px 12px; border-left: 2px solid #E0E0E0;")
         self.content_label.setHidden(True)
 
         self.main_layout.addWidget(self.header)
         self.main_layout.addWidget(self.content_label)
-        self.setMinimumHeight(32)
 
     def sizeHint(self):
         w = 616
-        h = 32
+        h = 64 # Increased to prevent clipping of descenders
         if self.is_expanded: 
-            h += self.content_label.heightForWidth(580) + 20
+            h += self.content_label.heightForWidth(580) + 16
         return QSize(w, h)
 
     def toggle_expand(self, event):
         self.is_expanded = not self.is_expanded
         self.content_label.setHidden(not self.is_expanded)
-        self.header.setText("Process (Open)" if self.is_expanded else "Process")
+        self.header.setText("Thinking... (Click to collapse)" if self.is_expanded else "Thinking...")
         self.update_item_size()
 
     def update_item_size(self):
@@ -116,7 +114,7 @@ class SeparatorWidget(QWidget):
         painter.drawLine(40, y, self.width() - 40, y)
 
 class SmoothEntryWidget(QWidget):
-    def __init__(self, content_widget, parent=None):
+    def __init__(self, content_widget, parent=None, animate=True):
         super().__init__(parent)
         self.content_widget = content_widget
         layout = QVBoxLayout(self)
@@ -124,19 +122,22 @@ class SmoothEntryWidget(QWidget):
         layout.addWidget(content_widget)
         
         self.opacity_eff = QGraphicsOpacityEffect(self)
-        self.opacity_eff.setOpacity(0)
         self.setGraphicsEffect(self.opacity_eff)
         
-        self.anim_group = QParallelAnimationGroup()
-        
-        self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
-        self.op_anim.setStartValue(0)
-        self.op_anim.setEndValue(1)
-        self.op_anim.setDuration(400)
-        self.op_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
-        
-        self.anim_group.addAnimation(self.op_anim)
-        QTimer.singleShot(10, self.anim_group.start)
+        if animate:
+            self.opacity_eff.setOpacity(0)
+            self.anim_group = QParallelAnimationGroup()
+            
+            self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
+            self.op_anim.setStartValue(0)
+            self.op_anim.setEndValue(1)
+            self.op_anim.setDuration(400)
+            self.op_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+            
+            self.anim_group.addAnimation(self.op_anim)
+            QTimer.singleShot(10, self.anim_group.start)
+        else:
+            self.opacity_eff.setOpacity(1)
 
 class FollowUpWidget(QWidget):
     def __init__(self, parent=None):
@@ -246,18 +247,21 @@ class StandardItemWidget(QWidget):
             lbl_icon.setFixedSize(24, 24)
             layout.addWidget(lbl_icon)
 
-        lbl_text = QLabel(text)
-        if font: lbl_text.setFont(font)
-        else: lbl_text.setFont(QFont("Manrope", 15, QFont.Weight.Medium))
+        self.lbl_text = QLabel(text)
+        if font: self.lbl_text.setFont(font)
+        else: self.lbl_text.setFont(QFont("Manrope", 15, QFont.Weight.Medium))
         
-        if color: lbl_text.setStyleSheet(f"color: {color};")
-        else: lbl_text.setStyleSheet("color: #333333;")
+        if color: self.lbl_text.setStyleSheet(f"color: {color};")
+        else: self.lbl_text.setStyleSheet("color: #333333;")
         
-        layout.addWidget(lbl_text)
+        layout.addWidget(self.lbl_text)
         layout.addStretch()
         
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet("background: transparent;")
+
+    def set_text(self, text):
+        self.lbl_text.setText(text)
 
     def sizeHint(self):
         return QSize(660, 72)
