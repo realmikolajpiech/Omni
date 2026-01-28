@@ -3,7 +3,7 @@ import logging
 import threading
 import requests
 from src.core.config import (
-    FAST_MODEL_PATH, FAST_MODEL_FILENAME,
+    FAST_MODEL_PATH, FAST_MODEL_FILENAME, FAST_MODEL_URL,
     MAIN_MODEL_PATH, MAIN_MODEL_FILENAME, MAIN_MODEL_URL,
     MMPROJ_PATH, MMPROJ_URL, MMPROJ_FILENAME,
     DB_PATH
@@ -57,9 +57,11 @@ def ensure_fast_model():
     if not Llama: return
 
     if not os.path.exists(FAST_MODEL_PATH):
-        init_error = f"Fast model not found at {FAST_MODEL_PATH}"
-        logging.error(init_error)
-        return
+        logging.info("Fast model not found. Downloading...")
+        if not download_file(FAST_MODEL_URL, FAST_MODEL_PATH):
+            init_error = f"Failed to download fast model from {FAST_MODEL_URL}"
+            logging.error(init_error)
+            return
 
     with fast_lock:
         if fast_model: return

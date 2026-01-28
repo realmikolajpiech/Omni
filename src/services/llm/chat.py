@@ -6,7 +6,8 @@ import subprocess
 from simpleeval import SimpleEval
 from flask import jsonify
 
-from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_model, fast_lock, llm, main_lock, abort_fast_event
+from src.services.llm import model_manager
+from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_lock, main_lock, abort_fast_event
 from src.services.search.web_search import perform_web_search
 from src.services.search.local_search import perform_file_search, should_search_files
 from src.services.search.image_search import perform_image_search_with_fallback, should_search_images
@@ -63,9 +64,9 @@ def should_search(query):
     ]
     try:
         with fast_lock:
-            if hasattr(fast_model, 'reset'): fast_model.reset()
+            if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
             start_t = time.time()
-            out = fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
+            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
             end_t = time.time()
             dur = end_t - start_t
             tok_count = out.get('usage', {}).get('completion_tokens', 0)
@@ -113,8 +114,8 @@ def should_see_screen(query):
     ]
     try:
         with fast_lock:
-            if hasattr(fast_model, 'reset'): fast_model.reset()
-            out = fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
+            if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
         res = out['choices'][0]['message']['content'].strip().upper()
         logging.info(f"Screen Intent: {res} for '{query}'")
         return "YES" in res
@@ -175,7 +176,7 @@ def process_chat_request(query, history, screenshot_b64=None):
     abort_fast_event.set()
     ensure_main_model()
 
-    if not llm:
+    if not model_manager.llm:
         return {"answer": f"Error: Model failed to load."}
 
     # CHECK SCREEN INTENT
@@ -267,7 +268,7 @@ Context: {prev_ctx_msg}
 Input: {query}
 Output:"""
         with main_lock:
-             f_out = llm.create_chat_completion(
+             f_out = model_manager.llm.create_chat_completion(
                  messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
                  max_tokens=64, temperature=0.0
              )
@@ -422,7 +423,7 @@ Current Conversation:
                     click_x, click_y = localize_target_from_b64(
                         screenshot_b64,
                         target_description,
-                        llm,
+                        model_manager.llm,
                         max_iterations=5,
                         grid_size=3
                     )
@@ -474,8 +475,8 @@ Current Conversation:
     try:
         abort_fast_event.clear()
         with main_lock:
-            if hasattr(llm, 'reset'): llm.reset()
-            output = llm.create_chat_completion(
+            if hasattr(model_manager.llm, 'reset'): model_manager.llm.reset()
+            output = model_manager.llm.create_chat_completion(
                 messages=messages,
                 max_tokens=2048,
                 stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
