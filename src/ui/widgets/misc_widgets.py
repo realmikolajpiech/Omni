@@ -1,7 +1,65 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider)
-from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo
+from PyQt6.QtCore import (Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, 
+                          QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo,
+                          QThreadPool, QRunnable, QObject, pyqtSignal)
 from PyQt6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap, QPainterPath
+
+ICON_CACHE = {}
+
+class IconLoaderSignals(QObject):
+    icon_loaded = pyqtSignal(QIcon, str)
+
+class IconLoader(QRunnable):
+    def __init__(self, icon_name):
+        super().__init__()
+        self.icon_name = icon_name
+        self.signals = IconLoaderSignals()
+
+    def run(self):
+        icon = QIcon()
+        icon_name = self.icon_name
+        
+        try:
+            if os.path.isabs(icon_name) and os.path.exists(icon_name):
+                 # Try loading as standard image first
+                 icon = QIcon(icon_name)
+                 # If it fails or is a system file type (exe/lnk), use QFileIconProvider
+                 if icon.isNull() or icon_name.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                     provider = QFileIconProvider()
+                     icon = provider.icon(QFileInfo(icon_name))
+            else:
+                 icon = QIcon.fromTheme(icon_name)
+                 if icon.isNull():
+                     pixmap_path = f"/usr/share/pixmaps/{icon_name}.png"
+                     if os.path.exists(pixmap_path):
+                         icon = QIcon(pixmap_path)
+                     elif os.path.exists(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png"):
+                         icon = QIcon(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png")
+                     
+                     if icon.isNull():
+                         flatpak_dirs = [
+                             os.path.expanduser("~/.local/share/flatpak/exports/share/icons/hicolor"),
+                             "/var/lib/flatpak/exports/share/icons/hicolor"
+                         ]
+                         sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "512x512", "scalable"]
+                         
+                         for d in flatpak_dirs:
+                             if not icon.isNull(): break
+                             if not os.path.exists(d): continue
+                             for s in sizes:
+                                 p = os.path.join(d, s, "apps", f"{icon_name}.png")
+                                 if os.path.exists(p):
+                                     icon = QIcon(p)
+                                     break
+                                 p_svg = os.path.join(d, s, "apps", f"{icon_name}.svg")
+                                 if os.path.exists(p_svg):
+                                     icon = QIcon(p_svg)
+                                     break
+        except Exception:
+            pass
+        
+        self.signals.icon_loaded.emit(icon, self.icon_name)
 
 class ReplyActionWidget(QWidget):
     def __init__(self, title, content, parent=None):
@@ -204,48 +262,19 @@ class StandardItemWidget(QWidget):
         layout.setContentsMargins(24, 0, 24, 0)
         layout.setSpacing(4)
         
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setFixedSize(24, 24)
+        
         if icon_name:
-            lbl_icon = QLabel()
-            icon = QIcon()
-            if os.path.isabs(icon_name) and os.path.exists(icon_name):
-                 # Try loading as standard image first
-                 icon = QIcon(icon_name)
-                 # If it fails or is a system file type (exe/lnk), use QFileIconProvider
-                 if icon.isNull() or icon_name.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
-                     provider = QFileIconProvider()
-                     icon = provider.icon(QFileInfo(icon_name))
+            layout.addWidget(self.lbl_icon)
+            
+            if icon_name in ICON_CACHE:
+                self.lbl_icon.setPixmap(ICON_CACHE[icon_name].pixmap(24, 24))
             else:
-                 icon = QIcon.fromTheme(icon_name)
-                 if icon.isNull():
-                     pixmap_path = f"/usr/share/pixmaps/{icon_name}.png"
-                     if os.path.exists(pixmap_path):
-                         icon = QIcon(pixmap_path)
-                     elif os.path.exists(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png"):
-                         icon = QIcon(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png")
-                     
-                     if icon.isNull():
-                         flatpak_dirs = [
-                             os.path.expanduser("~/.local/share/flatpak/exports/share/icons/hicolor"),
-                             "/var/lib/flatpak/exports/share/icons/hicolor"
-                         ]
-                         sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "512x512", "scalable"]
-                         
-                         for d in flatpak_dirs:
-                             if not icon.isNull(): break
-                             if not os.path.exists(d): continue
-                             for s in sizes:
-                                 p = os.path.join(d, s, "apps", f"{icon_name}.png")
-                                 if os.path.exists(p):
-                                     icon = QIcon(p)
-                                     break
-                                 p_svg = os.path.join(d, s, "apps", f"{icon_name}.svg")
-                                 if os.path.exists(p_svg):
-                                     icon = QIcon(p_svg)
-                                     break
-
-            lbl_icon.setPixmap(icon.pixmap(24, 24))
-            lbl_icon.setFixedSize(24, 24)
-            layout.addWidget(lbl_icon)
+                # Load asynchronously
+                loader = IconLoader(icon_name)
+                loader.signals.icon_loaded.connect(self.on_icon_loaded)
+                QThreadPool.globalInstance().start(loader)
 
         self.lbl_text = QLabel(text)
         if font: self.lbl_text.setFont(font)
@@ -259,6 +288,11 @@ class StandardItemWidget(QWidget):
         
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet("background: transparent;")
+
+    def on_icon_loaded(self, icon, name):
+        if not icon.isNull():
+            ICON_CACHE[name] = icon
+            self.lbl_icon.setPixmap(icon.pixmap(24, 24))
 
     def set_text(self, text):
         self.lbl_text.setText(text)
