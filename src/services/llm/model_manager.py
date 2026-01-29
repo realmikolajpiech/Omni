@@ -63,13 +63,21 @@ def ensure_fast_model():
             logging.error(init_error)
             return
 
+    # Check if we should load (lazy loading optimization)
+    # If the user hasn't typed anything yet, maybe we delay?
+    # But current logic is "ensure_fast_model" is called by routes.
+    
     with fast_lock:
         if fast_model: return
         logging.info(f"Loading Fast Model: {FAST_MODEL_FILENAME}")
         try:
+            # Suppress stdout/stderr from llama.cpp
+            # This is tricky in python, but we can try setting verbose=False which we already do.
+            # We can also redirect C-level stdout if needed, but let's stick to verbose=False.
+            
             fast_model = Llama(
                 model_path=FAST_MODEL_PATH,
-                n_ctx=2048, # Smaller context for speed
+                n_ctx=8192, # Increased context to avoid warnings (model supports 32k)
                 n_threads=4,
                 n_gpu_layers=-1,
                 verbose=False

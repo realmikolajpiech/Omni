@@ -4,21 +4,51 @@ from src.core.config import SEARXNG_URL
 from src.services.system.location import get_system_location, get_ip_location
 
 def search_api(query, categories='general'):
+    """
+    Performs a search using SearXNG (Local + Fallbacks).
+    Returns a list of result dictionaries.
+    """
     loc = get_system_location()
-    try:
-        logging.info(f"Searching SearXNG for: '{query}' (Loc: {loc}, Cats: {categories})")
-        params = {
-            'q': query,
-            'format': 'json',
-            'categories': categories,
-            'language': loc
-        }    
-        resp = requests.get(SEARXNG_URL, params=params, timeout=5.0)
-        if resp.status_code == 200:
-            results = resp.json().get('results', [])
-            return results
-    except Exception as e:
-        logging.error(f"Search API Error: {e}")
+    
+    # List of SearXNG instances to try
+    # 1. Local (Priority)
+    # 2. Public Fallbacks (in case local is down/not installed)
+    urls = [SEARXNG_URL]
+    fallback_urls = [
+        "https://searx.be/search",
+        "https://searx.ng/search",
+        "https://search.ononoki.org/search"
+    ]
+    urls.extend(fallback_urls)
+
+    for url in urls:
+        try:
+            # Skip invalid URLs (e.g. if config is empty)
+            if not url or not url.startswith("http"): continue
+
+            logging.info(f"Searching {url} for: '{query}' (Loc: {loc}, Cats: {categories})")
+            params = {
+                'q': query,
+                'format': 'json',
+                'categories': categories,
+                'language': loc
+            }    
+            resp = requests.get(url, params=params, timeout=6.0)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get('results', [])
+                # If we got a valid response (even empty), we return it.
+                # But if it's empty, maybe we should try next mirror? 
+                # No, empty means no results found for query.
+                return results
+            else:
+                logging.warning(f"Search failed at {url} with status {resp.status_code}")
+        except Exception as e:
+            # Connection errors, timeouts, etc.
+            logging.error(f"Search API Error ({url}): {e}")
+            continue
+            
     return []
 
 def perform_web_search(query):
@@ -107,111 +137,103 @@ def perform_web_search(query):
 def get_navigation_result(query):
     try:
         # Fetch more results to allow ranking
-        params = {'q': query, 'format': 'json'}
-        resp = requests.get(SEARXNG_URL, params=params, timeout=5.0)
+        results = search_api(query, categories='general')
         
-        if resp.status_code == 200:
-            results = resp.json().get('results', [])
-            if not results: return None
+        if not results: return None
+        
+        # Ranking Logic
+        best_score = -1
+        best_res = None
+        
+        normalized_query = query.lower().strip()
+        
+        # penalize generic info sites unless explicitly asked for
+        info_sites = ["wikipedia.org", "wiktionary.org", "fandom.com", "dictionary.com", "britannica.com"]
+        is_info_query = any(x in normalized_query for x in ["wiki", "define", "meaning", "what is"])
+        
+        for res in results[:5]: # Check top 5
+            url = res.get('url', '').lower()
+            title = res.get('title', '').lower()
+            score = 0
             
-            # Ranking Logic
-            best_score = -1
-            best_res = None
+            # Base score: Position (earlier is better, but only slightly)
+            # We want relevance to override position
             
-            normalized_query = query.lower().strip()
+            # 1. Official Validation (Domain matches query)
+            # e.g. query "whatsapp" matches "whatsapp.com"
+            domain_match = False
+            if f"://{normalized_query}." in url or f".{normalized_query}." in url:
+                score += 50
+                domain_match = True
             
-            # penalize generic info sites unless explicitly asked for
-            info_sites = ["wikipedia.org", "wiktionary.org", "fandom.com", "dictionary.com", "britannica.com"]
-            is_info_query = any(x in normalized_query for x in ["wiki", "define", "meaning", "what is"])
+            # 2. Title Match
+            if res.get('title', '').lower().startswith(normalized_query):
+                score += 10
             
-            for res in results[:5]: # Check top 5
-                url = res.get('url', '').lower()
-                title = res.get('title', '').lower()
-                score = 0
+            # 3. Penalize Info Sites (if not asked for)
+            if not is_info_query and any(site in url for site in info_sites):
+                score -= 30
                 
-                # Base score: Position (earlier is better, but only slightly)
-                # We want relevance to override position
-                
-                # 1. Official Validation (Domain matches query)
-                # e.g. query "whatsapp" matches "whatsapp.com"
-                domain_match = False
-                if f"://{normalized_query}." in url or f".{normalized_query}." in url:
-                    score += 50
-                    domain_match = True
-                
-                # 2. Title Match
-                if res.get('title', '').lower().startswith(normalized_query):
-                    score += 10
-                
-                # 3. Penalize Info Sites (if not asked for)
-                if not is_info_query and any(site in url for site in info_sites):
-                    score -= 30
-                    
-                # 4. Boost "Home" or "Official" pages
-                if "official" in title or "home" in title:
-                    score += 5
-                
-                # Keep track of best
-                if score > best_score:
-                    best_score = score
-                    best_res = res
+            # 4. Boost "Home" or "Official" pages
+            if "official" in title or "home" in title:
+                score += 5
             
-            # Fallback to first if ranking didn't find a clear winner (or all negative)
-            if not best_res and results:
-                best_res = results[0]
+            # Keep track of best
+            if score > best_score:
+                best_score = score
+                best_res = res
+        
+        # Fallback to first if ranking didn't find a clear winner (or all negative)
+        if not best_res and results:
+            best_res = results[0]
+        
+        # Refined App Detection Logic:
+        # Merely matching domain is not enough (e.g. tesla.com).
+        # We need affirmative "software" signals in the title or snippet.
+        is_app = False
+        if best_score >= 20: # It is a relevant/official site
+            text = (best_res.get('title', '') + " " + best_res.get('content', '') + " " + best_res.get('snippet', '')).lower()
             
-            # Refined App Detection Logic:
-            # Merely matching domain is not enough (e.g. tesla.com).
-            # We need affirmative "software" signals in the title or snippet.
-            is_app = False
-            if best_score >= 20: # It is a relevant/official site
-                text = (best_res.get('title', '') + " " + best_res.get('content', '') + " " + best_res.get('snippet', '')).lower()
+            # Positive Signals
+            app_keywords = [
+                "download", "install", " get ", "software", "app", "desktop", "client", 
+                "browser", "messenger", "chat", "ide ", "editor", "player", "game", 
+                "protect", "antivirus", "vpn", "driver", "suite", "tool", "platform",
+                "terminal", "compiler", "runtime", "sdk", "cli "
+            ]
+            
+            # Weak Signals (require domain match)
+            if any(k in text for k in app_keywords):
+                is_app = True
+            
+            # Explicit exclusions for common non-app official sites
+            neg_keywords = ["car ", "vehicle", "energy", "recipe", "hotel", "bank ", "news", "university", "resort"]
+            if any(k in text for k in neg_keywords):
+                is_app = False
                 
-                # Positive Signals
-                app_keywords = [
-                    "download", "install", " get ", "software", "app", "desktop", "client", 
-                    "browser", "messenger", "chat", "ide ", "editor", "player", "game", 
-                    "protect", "antivirus", "vpn", "driver", "suite", "tool", "platform",
-                    "terminal", "compiler", "runtime", "sdk", "cli "
-                ]
-                
-                # Weak Signals (require domain match)
-                if any(k in text for k in app_keywords):
-                    is_app = True
-                
-                # Explicit exclusions for common non-app official sites
-                neg_keywords = ["car ", "vehicle", "energy", "recipe", "hotel", "bank ", "news", "university", "resort"]
-                if any(k in text for k in neg_keywords):
-                    is_app = False
-                    
-            return {
-                "url": best_res.get('url'),
-                "title": best_res.get('title', 'Link'),
-                "description": best_res.get('content') or best_res.get('snippet', ' '.strip()),
-                "is_likely_app": is_app
-            }
+        return {
+            "url": best_res.get('url'),
+            "title": best_res.get('title', 'Link'),
+            "description": best_res.get('content') or best_res.get('snippet', ' '.strip()),
+            "is_likely_app": is_app
+        }
     except Exception as e:
         logging.error(f"Nav Error: {e}")
     return None
 
 def get_person_result(name):
     try:
-        # Try SearXNG first
-        loc = get_system_location()
-        params = {'q': name, 'format': 'json', 'categories': 'general', 'language': loc}
-        resp = requests.get(SEARXNG_URL, params=params, timeout=4.0)
-
-        if resp.status_code == 200:
-            results = resp.json().get('results', [])
-            if results:
-                best = results[0]
-                return {
-                    "type": "person",
-                    "name": best.get('title', name),
-                    "description": best.get('content') or best.get('snippet', ''),
-                    "url": best.get('url'),
-                    "image": None
-                }
+        # Try SearXNG first (via search_api)
+        results = search_api(name, categories='general')
+        if results:
+            best = results[0]
+            return {
+                "type": "person",
+                "name": best.get('title', name),
+                "description": best.get('content') or best.get('snippet', ''),
+                "url": best.get('url'),
+                "image": None
+            }
     except Exception as e: pass
 
     # Fallback: Wikipedia API
@@ -235,20 +257,17 @@ def get_person_result(name):
 
 def get_place_result(query):
     try:
-        params = {'q': query, 'format': 'json', 'categories': 'map'}
-        resp = requests.get(SEARXNG_URL, params=params, timeout=4.0)
-        if resp.status_code == 200:
-            results = resp.json().get('results', [])
-            if results:
-                best = results[0]
-                return {
-                    "type": "place",
-                    "name": best.get('title', query),
-                    "address": best.get('content', '') or best.get('address', {}).get('road', ''),
-                    "latitude": best.get('latitude'),
-                    "longitude": best.get('longitude'),
-                    "url": best.get('url'),
-                    "image": None
-                }
+        results = search_api(query, categories='map')
+        if results:
+            best = results[0]
+            return {
+                "type": "place",
+                "name": best.get('title', query),
+                "address": best.get('content', '') or best.get('address', {}).get('road', ''),
+                "latitude": best.get('latitude'),
+                "longitude": best.get('longitude'),
+                "url": best.get('url'),
+                "image": None
+            }
     except: pass
     return None
