@@ -4,6 +4,7 @@ import logging
 import subprocess
 import json
 import time
+import ctypes
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
                              QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
@@ -214,6 +215,30 @@ class OmniWindow(QWidget):
         self.raise_()
         self.input_field.setFocus()
         
+        if sys.platform == "win32":
+            try:
+                hwnd = int(self.winId())
+                
+                fg_window = ctypes.windll.user32.GetForegroundWindow()
+                if fg_window == hwnd:
+                    return
+
+                foreground_thread = ctypes.windll.user32.GetWindowThreadProcessId(fg_window, None)
+                current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+                
+                if foreground_thread != current_thread:
+                    ctypes.windll.user32.AttachThreadInput(foreground_thread, current_thread, True)
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    ctypes.windll.user32.AttachThreadInput(foreground_thread, current_thread, False)
+                else:
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    
+                if ctypes.windll.user32.IsIconic(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
+                    
+            except Exception as e:
+                logging.error(f"Force focus failed: {e}")
+        
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.apply_kwin_blur()
@@ -270,9 +295,7 @@ class OmniWindow(QWidget):
         self.anim_group.addAnimation(anim_opa)
         self.anim_group.start()
         
-        self.input_field.setFocus()
-        self.activateWindow()
-        self.raise_()
+        self.force_focus()
 
     def adjust_window_height(self, animate=True):
         if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
@@ -282,6 +305,10 @@ class OmniWindow(QWidget):
             if hasattr(self, 'opacity_effect'):
                 self.setGraphicsEffect(None)
         
+        # Always stop any running geometry animation before calculating/setting new height
+        if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:
+            self.anim.stop()
+
         list_h = 0
         count = self.list_widget.count()
         
@@ -301,9 +328,12 @@ class OmniWindow(QWidget):
             self.list_widget.hide()
             new_h = 70 # Just the input height
 
+        # Force resize if we are shrinking to minimal (to fix the ghost overlay issue)
+        if new_h == 70:
+            animate = False
+
         if self.height() != new_h:
             if animate:
-                self.anim.stop()
                 self.anim.setStartValue(self.geometry())
                 self.anim.setEndValue(QRect(self.x(), self.y(), self.width(), new_h))
                 self.anim.start()
@@ -402,6 +432,7 @@ class OmniWindow(QWidget):
         self.frame.set_minimal_mode(True)
         self.refresh_list(text)
         self.debounce_timer.start()
+        # logging.info(f"Debounce timer started for: {text}") # Debug log
 
     def refresh_list(self, query, animate=True):
         if not query:
@@ -546,6 +577,8 @@ class OmniWindow(QWidget):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
 
+        # logging.info(f"Triggering async searches for: {query}") # Debug log
+
         # Start Workers
         if self.search_worker and self.search_worker.isRunning(): self.search_worker.terminate()
         self.search_worker = SearchWorker(query)
@@ -653,6 +686,14 @@ class OmniWindow(QWidget):
         self.install_worker.start()
 
     def perform_ai_query(self, query):
+        self.debounce_timer.stop() # Stop any pending async searches
+        
+        # Stop any running search/action workers to prevent race conditions
+        if self.search_worker and self.search_worker.isRunning(): 
+            self.search_worker.terminate()
+        if self.action_worker and self.action_worker.isRunning(): 
+            self.action_worker.terminate()
+
         self.list_widget.clear()
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
@@ -664,12 +705,8 @@ class OmniWindow(QWidget):
         
         # Screenshot?
         screenshot_b64 = None
-        # Logic to decide if we need screenshot is now in AIWorker or Brain
-        # But if we want to send it, we need to take it here.
-        # Let's take it if query implies it, OR always?
-        # Taking screenshot is expensive?
-        # Let's try taking it if "screen" keyword or similar is in query
-        if any(x in query.lower() for x in ["screen", "look", "see", "window", "display"]):
+        # Strict keyword check for explicit screenshot requests
+        if any(x in query.lower() for x in ["take screenshot", "capture screen", "look at screen", "read screen", "what is on screen"]):
             self.screenshot_worker = ScreenshotWorker()
             self.screenshot_worker.finished.connect(lambda b64: self.start_ai_worker(query, b64))
             self.screenshot_worker.failed.connect(lambda: self.start_ai_worker(query, None))

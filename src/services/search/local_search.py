@@ -37,7 +37,7 @@ def should_search_files(query):
     try:
         with fast_lock:
             if hasattr(fast_model, 'reset'): fast_model.reset()
-            out = fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
+            out = fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
         res = out['choices'][0]['message']['content'].strip().upper()
         return "YES" in res
     except: return False

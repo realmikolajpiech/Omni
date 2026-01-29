@@ -130,7 +130,7 @@ Query: {query}"""
             start_t = time.time()
             if hasattr(fast_model, 'reset'): fast_model.reset()
             out = fast_model.create_chat_completion(
-                messages=messages, max_tokens=64, temperature=0.1
+                messages=messages, max_tokens=256, temperature=0.1
             )
             end_t = time.time()
             dur = end_t - start_t
@@ -138,6 +138,10 @@ Query: {query}"""
             tps = tok_count / dur if dur > 0 else 0
             logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
             result_text = out['choices'][0]['message']['content'].strip()
+            
+            # Remove thinking blocks from Qwen
+            import re
+            result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
 
         actions = []
         for line in result_text.split('\n'):

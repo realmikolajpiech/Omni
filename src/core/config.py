@@ -12,9 +12,9 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Models
-FAST_MODEL_FILENAME = "gemma-3-1b-it-Q8_0.gguf"
+FAST_MODEL_FILENAME = "Qwen_Qwen3-0.6B-Q8_0.gguf"
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
-FAST_MODEL_URL = "https://huggingface.co/bartowski/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf"
+FAST_MODEL_URL = "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q8_0.gguf"
 
 MAIN_MODEL_FILENAME = "google_gemma-3-4b-it-Q4_K_M.gguf"
 MAIN_MODEL_PATH = os.path.join(MODEL_DIR, MAIN_MODEL_FILENAME)

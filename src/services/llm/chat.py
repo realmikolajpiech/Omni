@@ -37,7 +37,8 @@ def should_search(query):
         "address", "adres", "hours", "godziny", "email", "website",
         "video", "music", "song", "movie", "trailer", "youtube", 
         "listen", "watch", "clip", "how to", "recipe", "show me",
-        "find", "search", "show"
+        "find", "search", "show", "how much", "net worth", "price",
+        "cost", "today", "now", "news", "current", "weather", "pogoda"
     ]
     if any(pattern in query_lower for pattern in always_search_patterns):
         logging.info(f"Search Intent: YES (pattern match) for '{query}'")
@@ -66,13 +67,15 @@ def should_search(query):
         with fast_lock:
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
             start_t = time.time()
-            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
+            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
             end_t = time.time()
             dur = end_t - start_t
             tok_count = out.get('usage', {}).get('completion_tokens', 0)
             tps = tok_count / dur if dur > 0 else 0
             logging.info(f"FastModel (Intent): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
-        res = out['choices'][0]['message']['content'].strip().upper()
+        res = out['choices'][0]['message']['content'].strip()
+        # Clean up <THINK> blocks
+        res = re.sub(r'<THINK>.*?</THINK>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
         logging.info(f"Search Intent: {res} for '{query}'")
         return "YES" in res
     except Exception as e:
@@ -115,8 +118,10 @@ def should_see_screen(query):
     try:
         with fast_lock:
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
-            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=8, temperature=0.0)
-        res = out['choices'][0]['message']['content'].strip().upper()
+            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
+        res = out['choices'][0]['message']['content'].strip()
+        # Clean up <THINK> blocks
+        res = re.sub(r'<THINK>.*?</THINK>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
         logging.info(f"Screen Intent: {res} for '{query}'")
         return "YES" in res
     except Exception as e:
@@ -173,6 +178,7 @@ def extract_actions(text):
     return clean_text, actions
 
 def process_chat_request(query, history, screenshot_b64=None):
+    import sys # Ensure sys is available
     abort_fast_event.set()
     ensure_main_model()
 
@@ -397,7 +403,7 @@ Current Conversation:
     if screenshot_b64:
         try:
             temp_img_path = "/tmp/omni_context.png"
-            if "win" in sys.platform:
+            if sys.platform.startswith("win"):
                  import tempfile
                  temp_img_path = os.path.join(tempfile.gettempdir(), "omni_context.png")
             
@@ -532,7 +538,7 @@ Current Conversation:
                  try:
                      import subprocess
                      # Check platform
-                     if "win" in sys.platform:
+                     if sys.platform.startswith("win"):
                         os.startfile(url)
                      else:
                         subprocess.Popen(["xdg-open", url], start_new_session=True)
