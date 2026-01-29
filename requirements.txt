@@ -7,3 +7,4 @@ memvid_sdk
 llama_cpp_python
 PyQt6
 Pillow
+BlurWindow

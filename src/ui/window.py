@@ -8,7 +8,9 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
                              QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
 from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty
-from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen
+import ctypes
+from ctypes import c_int, byref
+from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap, QRegion
 
 from src.core.config import LOGO_PATH
 from src.ui.styles import STYLE_SHEET
@@ -29,6 +31,12 @@ from src.ui.workers.search_worker import SearchWorker
 from src.ui.workers.action_worker import ActionWorker
 from src.ui.workers.screenshot_worker import ScreenshotWorker
 from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker
+
+try:
+    from BlurWindow.blurWindow import blur
+except ImportError:
+    logging.warning("BlurWindow library not found. Blur effect disabled.")
+    blur = None
 
 class OmniWindow(QWidget):
     def setup_uinput(self):
@@ -179,34 +187,43 @@ class OmniWindow(QWidget):
         # Start IPC Listener
         start_ipc_listener(self)
 
+        # Apply initial blur
+        self.apply_blur()
+
     def load_apps(self):
         return get_app_cache()
 
-    def apply_kwin_blur(self):
-        # Force KWin Blur on X11 window
-        # Only for Linux
-        if sys.platform != "linux": return
-        try:
-            wid = self.winId()
-            if not wid: return
-            
-            rect_args = f"0, 0, {self.width()}, {self.height()}"
-            
-            cmd = [
-                "xprop", 
-                "-id", str(wid), 
-                "-f", "_KDE_NET_WM_BLUR_BEHIND_REGION", "32c", 
-                "-set", "_KDE_NET_WM_BLUR_BEHIND_REGION", 
-                rect_args
-            ]
-            
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            logging.error(f"KWin Blur Error: {e}")
+    def apply_blur(self):
+        # Apply blur effect based on platform
+        if sys.platform == "win32":
+            if blur:
+                try:
+                    blur(int(self.winId()))
+                except Exception as e:
+                    logging.error(f"BlurWindow Error: {e}")
+        elif sys.platform == "linux":
+            # Force KWin Blur on X11 window
+            try:
+                wid = self.winId()
+                if not wid: return
+                
+                rect_args = f"0, 0, {self.width()}, {self.height()}"
+                
+                cmd = [
+                    "xprop", 
+                    "-id", str(wid), 
+                    "-f", "_KDE_NET_WM_BLUR_BEHIND_REGION", "32c", 
+                    "-set", "_KDE_NET_WM_BLUR_BEHIND_REGION", 
+                    rect_args
+                ]
+                
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                logging.error(f"KWin Blur Error: {e}")
 
     def showEvent(self, event):
         super().showEvent(event)
-        QTimer.singleShot(100, self.apply_kwin_blur)
+        QTimer.singleShot(100, self.apply_blur)
         QTimer.singleShot(10, self.force_focus)
 
     def force_focus(self):
@@ -216,7 +233,24 @@ class OmniWindow(QWidget):
         
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.apply_kwin_blur()
+        self.apply_blur()
+        
+        # Clip window to rounded corners to fix corner artifacts using QBitmap
+        # This provides a 1-bit mask that clips the entire window surface, including blur
+        mask = QBitmap(self.size())
+        mask.fill(Qt.GlobalColor.color0) # Clear
+        
+        painter = QPainter(mask)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False) # Masks are 1-bit
+        painter.setBrush(Qt.GlobalColor.color1) # Opaque
+        painter.setPen(Qt.PenStyle.NoPen)
+        
+        # Draw the rounded rect for the mask
+        # Match border-radius of 24px from styles
+        painter.drawRoundedRect(self.rect(), 24, 24)
+        painter.end()
+        
+        self.setMask(mask)
                 
     def center(self):
         cursor_pos = QCursor.pos()
@@ -395,7 +429,7 @@ class OmniWindow(QWidget):
             # Do NOT return, proceed to search logic below
         
         if not text.strip():
-            self.refresh_list("", animate=False)
+            self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             return
 
@@ -406,6 +440,7 @@ class OmniWindow(QWidget):
     def refresh_list(self, query, animate=True):
         if not query:
             self.list_widget.clear()
+            QApplication.processEvents()
             self.adjust_window_height(animate)
             return
 

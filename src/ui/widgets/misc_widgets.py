@@ -414,7 +414,7 @@ class GradientBorderFrame(QFrame):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 24, 24)
 
-        base_alpha = 180
+        base_alpha = 125
         painter.fillPath(path, QColor(255, 255, 255, base_alpha)) 
         
         pen = painter.pen()
