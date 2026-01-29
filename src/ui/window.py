@@ -4,14 +4,11 @@ import logging
 import subprocess
 import json
 import time
-import ctypes
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
                              QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
 from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty
-import ctypes
-from ctypes import c_int, byref
-from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap, QRegion
+from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap
 
 from src.core.config import LOGO_PATH
 from src.ui.styles import STYLE_SHEET
@@ -221,45 +218,10 @@ class OmniWindow(QWidget):
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 logging.error(f"KWin Blur Error: {e}")
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        QTimer.singleShot(100, self.apply_blur)
-        QTimer.singleShot(10, self.force_focus)
-
-    def force_focus(self):
-        self.activateWindow()
-        self.raise_()
-        self.input_field.setFocus()
         
-        if sys.platform == "win32":
-            try:
-                hwnd = int(self.winId())
-                
-                fg_window = ctypes.windll.user32.GetForegroundWindow()
-                if fg_window == hwnd:
-                    return
+        self.update_mask()
 
-                foreground_thread = ctypes.windll.user32.GetWindowThreadProcessId(fg_window, None)
-                current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
-                
-                if foreground_thread != current_thread:
-                    ctypes.windll.user32.AttachThreadInput(foreground_thread, current_thread, True)
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    ctypes.windll.user32.AttachThreadInput(foreground_thread, current_thread, False)
-                else:
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    
-                if ctypes.windll.user32.IsIconic(hwnd):
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)
-                    
-            except Exception as e:
-                logging.error(f"Force focus failed: {e}")
-        
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.apply_blur()
-        
+    def update_mask(self):
         # Clip window to rounded corners to fix corner artifacts using QBitmap
         # This provides a 1-bit mask that clips the entire window surface, including blur
         mask = QBitmap(self.size())
@@ -276,6 +238,20 @@ class OmniWindow(QWidget):
         painter.end()
         
         self.setMask(mask)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(100, self.apply_blur)
+        QTimer.singleShot(10, self.force_focus)
+
+    def force_focus(self):
+        self.activateWindow()
+        self.raise_()
+        self.input_field.setFocus()
+        
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.apply_blur()
                 
     def center(self):
         cursor_pos = QCursor.pos()
@@ -329,7 +305,9 @@ class OmniWindow(QWidget):
         self.anim_group.addAnimation(anim_opa)
         self.anim_group.start()
         
-        self.force_focus()
+        self.input_field.setFocus()
+        self.activateWindow()
+        self.raise_()
 
     def adjust_window_height(self, animate=True):
         if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
@@ -339,10 +317,6 @@ class OmniWindow(QWidget):
             if hasattr(self, 'opacity_effect'):
                 self.setGraphicsEffect(None)
         
-        # Always stop any running geometry animation before calculating/setting new height
-        if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:
-            self.anim.stop()
-
         list_h = 0
         count = self.list_widget.count()
         
@@ -362,12 +336,9 @@ class OmniWindow(QWidget):
             self.list_widget.hide()
             new_h = 70 # Just the input height
 
-        # Force resize if we are shrinking to minimal (to fix the ghost overlay issue)
-        if new_h == 70:
-            animate = False
-
         if self.height() != new_h:
             if animate:
+                self.anim.stop()
                 self.anim.setStartValue(self.geometry())
                 self.anim.setEndValue(QRect(self.x(), self.y(), self.width(), new_h))
                 self.anim.start()
@@ -459,19 +430,17 @@ class OmniWindow(QWidget):
             # Do NOT return, proceed to search logic below
         
         if not text.strip():
-            self.refresh_list("", animate=True)
+            self.refresh_list("", animate=False)
             self.frame.set_minimal_mode(True)
             return
 
         self.frame.set_minimal_mode(True)
         self.refresh_list(text)
         self.debounce_timer.start()
-        # logging.info(f"Debounce timer started for: {text}") # Debug log
 
     def refresh_list(self, query, animate=True):
         if not query:
             self.list_widget.clear()
-            QApplication.processEvents()
             self.adjust_window_height(animate)
             return
 
@@ -612,8 +581,6 @@ class OmniWindow(QWidget):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
 
-        # logging.info(f"Triggering async searches for: {query}") # Debug log
-
         # Start Workers
         if self.search_worker and self.search_worker.isRunning(): self.search_worker.terminate()
         self.search_worker = SearchWorker(query)
@@ -721,14 +688,6 @@ class OmniWindow(QWidget):
         self.install_worker.start()
 
     def perform_ai_query(self, query):
-        self.debounce_timer.stop() # Stop any pending async searches
-        
-        # Stop any running search/action workers to prevent race conditions
-        if self.search_worker and self.search_worker.isRunning(): 
-            self.search_worker.terminate()
-        if self.action_worker and self.action_worker.isRunning(): 
-            self.action_worker.terminate()
-
         self.list_widget.clear()
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
@@ -740,8 +699,12 @@ class OmniWindow(QWidget):
         
         # Screenshot?
         screenshot_b64 = None
-        # Strict keyword check for explicit screenshot requests
-        if any(x in query.lower() for x in ["take screenshot", "capture screen", "look at screen", "read screen", "what is on screen"]):
+        # Logic to decide if we need screenshot is now in AIWorker or Brain
+        # But if we want to send it, we need to take it here.
+        # Let's take it if query implies it, OR always?
+        # Taking screenshot is expensive?
+        # Let's try taking it if "screen" keyword or similar is in query
+        if any(x in query.lower() for x in ["screen", "look", "see", "window", "display"]):
             self.screenshot_worker = ScreenshotWorker()
             self.screenshot_worker.finished.connect(lambda b64: self.start_ai_worker(query, b64))
             self.screenshot_worker.failed.connect(lambda: self.start_ai_worker(query, None))
