@@ -31,20 +31,119 @@ def main():
     window = OmniWindow()
     
     # Global Hotkey Setup
-    try:
-        def toggle_omni():
+    def toggle_omni():
+        try:
             # Emit signal to handle UI update on main thread
             window.toggle_requested.emit()
+        except Exception as e:
+            logging.error(f"Error in toggle_omni: {e}")
 
-        # Bind to 'left windows' key. 
-        # User requested to suppress default behavior (Start Menu)
-        # using on_press_key is often more reliable for single keys, especially modifiers like Win
-        keyboard.on_press_key('left windows', lambda _: toggle_omni(), suppress=True)
-        keyboard.on_press_key('right windows', lambda _: toggle_omni(), suppress=True)
+    # Smart Windows Key Handling: Suppress Start Menu, allow shortcuts
+    # Strategy: Use Low Level Hook (WH_KEYBOARD_LL) via ctypes to intercept the key.
+    hotkey_state = {'win_down': False, 'other_pressed': False}
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        import atexit
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        WM_SYSKEYDOWN = 0x0104
+        WM_SYSKEYUP = 0x0105
         
+        LLKHF_INJECTED = 0x00000010
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [("vkCode", wintypes.DWORD),
+                        ("scanCode", wintypes.DWORD),
+                        ("flags", wintypes.DWORD),
+                        ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_ulonglong)]
+
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int, wintypes.WPARAM, ctypes.POINTER(KBDLLHOOKSTRUCT))
+        
+        hook_id = None
+
+        def low_level_keyboard_handler(nCode, wParam, lParam):
+            if nCode == 0:
+                # Check if injected (prevent infinite loop and allow our synthetic events)
+                if lParam.contents.flags & LLKHF_INJECTED:
+                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+                vk_code = lParam.contents.vkCode
+                # VK_LWIN = 0x5B, VK_RWIN = 0x5C
+                is_win = (vk_code == 0x5B or vk_code == 0x5C)
+                
+                if is_win:
+                    if wParam == WM_KEYDOWN or wParam == WM_SYSKEYDOWN:
+                        if not hotkey_state['win_down']:
+                            hotkey_state['win_down'] = True
+                            hotkey_state['other_pressed'] = False
+                    
+                    elif wParam == WM_KEYUP or wParam == WM_SYSKEYUP:
+                        was_down = hotkey_state['win_down']
+                        hotkey_state['win_down'] = False
+                        
+                        # If it was a lone press, toggle Omni
+                        if was_down and not hotkey_state['other_pressed']:
+                            try:
+                                # 1. Toggle Omni
+                                toggle_omni()
+                                
+                                # 2. Prevent Start Menu
+                                # Suppress the original UP event so Start Menu doesn't trigger immediately.
+                                # But we must ensure the OS knows the key is up.
+                                # Wrap the synthetic Win Up in Ctrl to trick OS into thinking it was a shortcut.
+                                
+                                # 0x11 = VK_CONTROL
+                                # 0x02 = KEYEVENTF_KEYUP
+                                
+                                user32.keybd_event(0x11, 0, 0, 0) # Ctrl Down
+                                user32.keybd_event(vk_code, 0, 2, 0) # Win Up
+                                user32.keybd_event(0x11, 0, 2, 0) # Ctrl Up
+                                
+                                return 1 # Suppress original event
+                            except Exception as e:
+                                logging.error(f"Error in hook callback: {e}")
+                                # If error, fall through to default behavior
+                            
+                else:
+                    # Other key
+                    if wParam == WM_KEYDOWN or wParam == WM_SYSKEYDOWN:
+                        if hotkey_state['win_down']:
+                            hotkey_state['other_pressed'] = True
+            
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        # Keep reference to callback to prevent GC
+        pointer = HOOKPROC(low_level_keyboard_handler)
+
+        def install_hook():
+            global hook_id
+            hook_id = user32.SetWindowsHookExW(WH_KEYBOARD_LL, pointer, kernel32.GetModuleHandleW(None), 0)
+            if not hook_id:
+                logging.error("Failed to install low-level keyboard hook")
+        
+        def uninstall_hook():
+            if hook_id:
+                user32.UnhookWindowsHookEx(hook_id)
+
+        install_hook()
+        atexit.register(uninstall_hook)
+
+    else:
+        # Fallback for non-Windows
+        pass
+
+    try:
         # Add backup hotkey for testing
         keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
-        logging.info("Global hotkey 'left/right windows' registered (suppressed) via on_press_key. Added 'ctrl+space' as backup.")
+        logging.info("Global hotkey 'left/right windows' registered via Low Level Hook. Added 'ctrl+space' as backup.")
     except Exception as e:
         logging.error(f"Failed to register global hotkey: {e}")
 
@@ -56,39 +155,7 @@ def main():
                 logging.warning("App is NOT running as Administrator. 'Windows' key suppression might fail.")
         except: pass
 
-    # Window starts hidden/animates in if IPC triggers it, or we show it initially?
-    # Original main.py called `window.animate_entry()` at end of `__init__` if I recall correctly.
-    # Let's check window.py logic.
-    # Yes, `__init__` calls `self.animate_entry()`.
-    
-    # We should show it.
-    # window.show()
-    # BUT, if we are starting in background mode (via autostart), we might NOT want to show it immediately.
-    # However, since run.py handles the mode, if we are here, we are in "ui" mode.
-    # Does "ui" mode mean "show window" or "start ui process"?
-    # If the user runs "Omni.exe ui" from desktop shortcut, they expect to SEE it.
-    # If autostart runs "Omni.exe ui", we might want it hidden.
-    
-    # Current behavior of `OmniWindow` is that it hides itself on init? 
-    # Actually `OmniWindow.__init__` calls `self.animate_entry()` IF `window.show()` is called?
-    # No, `animate_entry` is called inside `toggle_visibility_safe` or manually.
-    # `__init__` calls `self.animate_entry()` at line 180.
-    
-    # If we want to start hidden, we should remove `self.animate_entry()` from `__init__` 
-    # OR we just don't call `window.show()`.
-    # PyQt widgets are hidden by default.
-    # But `OmniWindow.__init__` calls `self.animate_entry()` which does:
-    # `self.move(...)`
-    # `self.input_field.setFocus()`
-    # `self.activateWindow()`
-    # `self.raise_()`
-    
-    # So `__init__` DOES try to show/activate it.
-    # We should fix `__init__` to NOT do that automatically, or control it.
-    
-    # Let's Modify `OmniWindow` to NOT animate entry on init.
-    pass
-
+    # Start the application
     sys.exit(app.exec())
 
 if __name__ == "__main__":

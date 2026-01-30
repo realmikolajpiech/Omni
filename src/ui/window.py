@@ -7,7 +7,7 @@ import time
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
                              QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
-from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty, pyqtSignal, QThreadPool
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap
 
 from src.core.config import LOGO_PATH
@@ -21,7 +21,7 @@ from src.ui.widgets.install_widget import InstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, 
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
-                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget)
+                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 
 from src.ui.workers.ai_worker import AIWorker
@@ -104,12 +104,14 @@ class OmniWindow(QWidget):
         content_layout = QVBoxLayout(self.content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         frame_layout.addWidget(self.content_frame)
 
         self.input_container = QWidget()
+        self.input_container.setFixedHeight(84) # Increased height to prevent clipping
         input_layout = QHBoxLayout(self.input_container)
-        input_layout.setContentsMargins(20, 4, 12, 4)
+        input_layout.setContentsMargins(24, 4, 12, 4) # Increased left margin
         input_layout.setSpacing(4)
 
         self.logo_label = RotatingLabel()
@@ -163,7 +165,8 @@ class OmniWindow(QWidget):
 
         content_layout.addWidget(self.input_container)
         content_layout.addWidget(self.divider)
-        content_layout.addWidget(self.list_widget)
+        content_layout.addWidget(self.list_widget, 1) # Expand to fill available space
+        # content_layout.addStretch() # Removed to prevent squashing list
         main_layout.addWidget(self.frame)
 
         self.setStyleSheet(STYLE_SHEET)
@@ -190,6 +193,11 @@ class OmniWindow(QWidget):
 
         # Start IPC Listener
         start_ipc_listener(self)
+
+        # Warm up IconLoader (initializes QFileIconProvider/CoInitialize/etc)
+        # We use sys.executable to trigger the heavy path for EXE icons to prevent freeze on first type
+        warmup_loader = IconLoader(sys.executable)
+        QThreadPool.globalInstance().start(warmup_loader)
 
         # Apply initial blur
         self.apply_blur()
@@ -247,6 +255,10 @@ class OmniWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Ensure minimal size on show if in search mode
+        if not self.is_history_mode and not self.input_field.text():
+             self.resize(self.width(), 84)
+             
         QTimer.singleShot(100, self.apply_blur)
         QTimer.singleShot(10, self.force_focus)
 
@@ -272,6 +284,10 @@ class OmniWindow(QWidget):
             self.move(100, 100)
 
     def reset_to_search_mode(self, animate=True):
+        if hasattr(self, 'anim'): self.anim.stop()
+        if hasattr(self, 'anim_group'): self.anim_group.stop()
+        if hasattr(self, 'anim_close_group'): self.anim_close_group.stop()
+        
         self.is_history_mode = False
         self.follow_up_widget.set_active(False)
         self.frame.set_minimal_mode(True) # Minimal mode for search
@@ -279,6 +295,11 @@ class OmniWindow(QWidget):
         self.input_field.blockSignals(True)
         self.input_field.clear()
         self.input_field.blockSignals(False)
+        
+        # Force resize to minimal
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        self.resize(self.width(), 84)
         
         self.refresh_list("", animate=animate)
 
@@ -357,21 +378,24 @@ class OmniWindow(QWidget):
             # Cap list height
             list_h = min(list_h, 600)
             
-            base_h = 70 
-            new_h = base_h + list_h + 20 
+            base_h = 84 
+            # Add padding for list borders/margins (12px top + 12px bottom = 24px) + safety
+            new_h = base_h + list_h + 30 
         else:
             self.divider.hide()
             self.list_widget.hide()
-            new_h = 70 # Just the input height
+            new_h = 84 # Just the input height
 
-        if self.height() != new_h:
+        current_h = self.height()
+        
+        if current_h != new_h:
+            self.anim.stop() # Always stop existing animation
             if animate:
-                self.anim.stop()
                 self.anim.setStartValue(self.geometry())
                 self.anim.setEndValue(QRect(self.x(), self.y(), self.width(), new_h))
                 self.anim.start()
             else:
-                self.resize(self.width(), new_h)
+                self.setGeometry(self.x(), self.y(), self.width(), new_h)
 
     def eventFilter(self, obj, event):
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
@@ -421,6 +445,10 @@ class OmniWindow(QWidget):
     def animate_close(self):
         if self._is_closing: return
         
+        # Stop geometry animation if running
+        if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:
+            self.anim.stop()
+
         # Stop entry animation if running
         if hasattr(self, 'anim_group') and self.anim_group.state() == QPropertyAnimation.State.Running:
             self.anim_group.stop()

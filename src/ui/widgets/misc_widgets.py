@@ -17,6 +17,11 @@ class IconLoader(QRunnable):
         self.signals = IconLoaderSignals()
 
     def run(self):
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except: pass
+
         icon = QIcon()
         icon_name = self.icon_name
         
@@ -59,6 +64,11 @@ class IconLoader(QRunnable):
         except Exception:
             pass
         
+        try:
+            import pythoncom
+            pythoncom.CoUninitialize()
+        except: pass
+
         self.signals.icon_loaded.emit(icon, self.icon_name)
 
 class ReplyActionWidget(QWidget):
@@ -102,7 +112,7 @@ class ThinkingWidget(QWidget):
 
         self.header = QLabel("Thinking...")
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setFont(QFont("Instrument Serif", 16, QFont.Weight.Normal))
+        self.header.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal))
         f = self.header.font(); f.setItalic(True); self.header.setFont(f)
 
         self.header.setStyleSheet("""
@@ -126,7 +136,7 @@ class ThinkingWidget(QWidget):
 
     def sizeHint(self):
         w = 616
-        h = 64 # Increased to prevent clipping of descenders
+        h = 72 # Increased height for larger font
         if self.is_expanded: 
             h += self.content_label.heightForWidth(580) + 16
         return QSize(w, h)

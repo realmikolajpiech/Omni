@@ -25,7 +25,7 @@ QWidget#ContentFrame {
 QLineEdit {
     background-color: transparent;
     border: none;
-    padding: 18px 4px;
+    padding: 12px 16px;
     font-family: "Instrument Serif";
     font-style: italic;
     font-size: 34px;
