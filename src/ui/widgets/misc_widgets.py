@@ -105,7 +105,7 @@ class ReplyActionWidget(QWidget):
 class ThinkingWidget(QWidget):
     def __init__(self, text, parent=None):
         super().__init__(parent)
-        self.is_expanded = False
+        self.is_expanded = bool(text)
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(24, 12, 24, 12)
         self.main_layout.setSpacing(8)
@@ -125,11 +125,11 @@ class ThinkingWidget(QWidget):
         """)
         self.header.mousePressEvent = self.toggle_expand
 
-        self.content_label = QLabel(text)
+        self.content_label = QLabel(text if text else "")
         self.content_label.setWordWrap(True)
         self.content_label.setFont(QFont("Manrope", 12))
-        self.content_label.setStyleSheet("color: #888888; padding: 4px 0px 4px 12px; border-left: 2px solid #E0E0E0;")
-        self.content_label.setHidden(True)
+        self.content_label.setStyleSheet("color: #333333; padding: 4px 0px 4px 0px;")
+        self.content_label.setVisible(self.is_expanded)
 
         self.main_layout.addWidget(self.header)
         self.main_layout.addWidget(self.content_label)
@@ -233,13 +233,14 @@ class FollowUpWidget(QWidget):
             self.show()
         else:
             self.hint.setText("Press Tab to follow up")
+            self.hide()
 
 class UnscrollableTextEdit(QTextEdit):
     def wheelEvent(self, event):
         event.ignore()
 
 class AnswerWidget(QWidget):
-    def __init__(self, text, parent=None):
+    def __init__(self, text, query_text=None, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(24, 4, 24, 4)
@@ -259,11 +260,30 @@ class AnswerWidget(QWidget):
         self.text_edit.document().setTextWidth(660)
         
         self.layout.addWidget(self.text_edit)
+        
+        # Add small gray query label
+        self.query_label = QLabel(query_text if query_text else "")
+        self.query_label.setFont(QFont("Manrope", 12, QFont.Weight.Medium))
+        self.query_label.setStyleSheet("color: #666666; padding-top: 4px;")
+        self.query_label.setWordWrap(True)
+        self.query_label.setVisible(False) # Default hidden
+        
+        self.layout.addWidget(self.query_label)
+        
+        if query_text:
+            self.query_label.setText(query_text)
+
+    def set_query_visible(self, visible):
+        self.query_label.setVisible(visible)
 
     def sizeHint(self):
         self.text_edit.document().setTextWidth(660)
         h = self.text_edit.document().size().height()
-        return QSize(660, int(h) + 36)
+        
+        if self.query_label.isVisible():
+            h += self.query_label.heightForWidth(660) + 16 # Increased padding
+            
+        return QSize(660, int(h) + 48) # Increased bottom padding even more to prevent cutoff
 
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):

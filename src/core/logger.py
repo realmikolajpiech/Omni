@@ -12,6 +12,10 @@ def setup_logging(name="omni"):
         # Assuming typical user path from config
         pass
 
+    # Check if root logger already has handlers to prevent duplication
+    if logging.getLogger('').hasHandlers():
+        return logging.getLogger(name)
+
     logging.basicConfig(
         filename=log_file,
         level=logging.INFO,

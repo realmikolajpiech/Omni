@@ -426,19 +426,60 @@ class OmniWindow(QWidget):
         self.follow_up_widget.set_active(True)
         self.frame.set_minimal_mode(False) # Colorful mode for chat
         
-        # Clear list but keep history if we want to show it?
-        # Actually, if we just entered history mode, we might want to show previous chat
-        # For now, just clear visual list and let user type follow-up
+        self._rebuild_history_list()
+
+    def _rebuild_history_list(self):
         self.list_widget.clear()
+        first = True
         
-        # Re-populate with chat history if any?
-        for msg in self.chat_history:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            if role == 'user':
-                continue # User requested to hide "You:" messages in results
-            else:
-                self.add_list_item(AnswerWidget(content), "history_ai")
+        # Iterate backwards to get Newest first
+        for i in range(len(self.chat_history) - 1, -1, -1):
+            msg = self.chat_history[i]
+            if msg.get('role') == 'assistant':
+                content = msg.get('content', '')
+                user_query = ""
+                if i > 0 and self.chat_history[i-1].get('role') == 'user':
+                    user_query = self.chat_history[i-1].get('content', '')
+                
+                # Add Separator BEFORE adding the item (since we are building top-down with add_list_item)
+                # Wait, add_list_item appends.
+                # If we iterate backwards:
+                # 1. Newest Answer (first loop)
+                # 2. Separator
+                # 3. Older Answer
+                # This matches "Separator between followup answer and old answer"
+                
+                if not first:
+                     self.add_list_item(SeparatorWidget(), "separator")
+
+                w = AnswerWidget(content, query_text=user_query)
+                w.set_query_visible(True)
+                self.add_list_item(w, "history_ai")
+                
+                first = False
+        
+        self.adjust_window_height()
+
+    def _rebuild_history_list(self):
+        self.list_widget.clear()
+        first = True
+        
+        # Iterate backwards to get Newest first
+        for i in range(len(self.chat_history) - 1, -1, -1):
+            msg = self.chat_history[i]
+            if msg.get('role') == 'assistant':
+                content = msg.get('content', '')
+                user_query = ""
+                if i > 0 and self.chat_history[i-1].get('role') == 'user':
+                    user_query = self.chat_history[i-1].get('content', '')
+                
+                if not first:
+                    self.add_list_item(SeparatorWidget(), "separator")
+                
+                w = AnswerWidget(content, query_text=user_query)
+                w.set_query_visible(True)
+                self.add_list_item(w, "history_ai")
+                first = False
         
         self.adjust_window_height()
 
@@ -503,10 +544,10 @@ class OmniWindow(QWidget):
 
     def on_text_changed(self, text):
         if self.is_history_mode: 
-            # If user types in history mode, switch back to search immediately
-            self.is_history_mode = False
-            self.follow_up_widget.set_active(False)
-            # Do NOT return, proceed to search logic below
+            # If user types in history mode, allow modification without resetting state
+            # self.is_history_mode = False  <-- REMOVED
+            # self.follow_up_widget.set_active(False) <-- REMOVED
+            return
         
         if not text.strip():
             self.refresh_list("", animate=True)
@@ -656,6 +697,16 @@ class OmniWindow(QWidget):
         anim_w = SmoothEntryWidget(widget)
         self.list_widget.setItemWidget(item, anim_w)
 
+    def insert_list_item(self, index, widget, data):
+        item = QListWidgetItem()
+        item.setSizeHint(widget.sizeHint())
+        item.setData(Qt.ItemDataRole.UserRole, data)
+        self.list_widget.insertItem(index, item)
+        
+        # Wrap in SmoothEntryWidget for fade-in
+        anim_w = SmoothEntryWidget(widget)
+        self.list_widget.setItemWidget(item, anim_w)
+
     def trigger_async_searches(self):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
@@ -773,13 +824,38 @@ class OmniWindow(QWidget):
         self.install_worker.start()
 
     def perform_ai_query(self, query):
-        self.list_widget.clear()
+        is_followup = self.is_history_mode
+        
+        if not is_followup:
+            self.list_widget.clear()
+        
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
         
         # Add Thinking Widget
-        self.thinking_widget = ThinkingWidget(f"Thinking about '{query}'...")
-        self.add_list_item(self.thinking_widget, "thinking")
+        # Only show query text if it's a followup
+        thinking_text = query if is_followup else ""
+        self.thinking_widget = ThinkingWidget(thinking_text)
+        
+        if is_followup:
+            # For followup thinking, we want:
+            # [Thinking Widget]
+            # [Separator]
+            # [Old Answer]
+            # So insert Separator at 0, then Thinking at 0 (pushing Separator to 1).
+            
+            if self.list_widget.count() > 0:
+                self.insert_list_item(0, SeparatorWidget(), "separator")
+                
+            self.insert_list_item(0, self.thinking_widget, "thinking")
+            
+            # Ensure we scroll to top to see the new thinking widget
+            if self.list_widget.count() > 0:
+                self.list_widget.scrollToItem(self.list_widget.item(0))
+        else:
+            self.add_list_item(self.thinking_widget, "thinking")
+            # No separator for normal query
+
         self.adjust_window_height()
         
         # Screenshot?
@@ -805,10 +881,66 @@ class OmniWindow(QWidget):
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
         
-        # Remove thinking widget? Or update it?
-        # Let's clear list for the answer
-        self.list_widget.clear()
+        # Remove thinking widget and separator (iterate backwards)
+        # Note: In perform_ai_query we removed the separator for followup, 
+        # so there might not be one if it was a followup query.
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            role = item.data(Qt.ItemDataRole.UserRole)
+            if role in ["thinking", "separator"]:
+                # Only remove if it's the "thinking" separator, not a history separator
+                # We identify thinking separator by checking if it's adjacent to thinking widget?
+                # Or just rely on the role. We added it as "separator" in perform_ai_query.
+                # But wait, we add "separator" between history items too.
+                # We need to distinguish them.
+                # In perform_ai_query, we only added thinking widget for followup. No separator.
+                # So for followup, we only remove thinking.
+                # For normal query, we add thinking (and maybe separator if we kept it? No we removed it in prev turn).
+                # Wait, looking at perform_ai_query:
+                # if is_followup: insert(thinking); NO SEPARATOR.
+                # else: add(thinking); NO SEPARATOR.
+                # So we only need to remove "thinking".
+                # BUT, if there was a separator left over from previous logic bugs?
+                # Let's be safe: "thinking" role is unique.
+                # "separator" role is used for history separators too.
+                # So we should ONLY remove "thinking" items here.
+                pass
+
+        # Updated cleanup: Remove 'thinking' AND the specific 'separator' added during thinking phase
+        # The 'separator' added during perform_ai_query for followup is just below 'thinking'.
+        # We need to remove it too, because we are about to re-add a separator in the correct place 
+        # (between new answer and old answer).
+        # Actually, we can just REUSE it if it exists, or remove and re-add. 
+        # Simpler to remove and re-add to be consistent.
         
+        # We need to find the thinking widget index, and see if there is a separator below it.
+        thinking_idx = -1
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == "thinking":
+                thinking_idx = i
+                break
+        
+        if thinking_idx != -1:
+            # Check if next item is separator (thinking is at top/0 usually, so separator at 1)
+            # But we iterate backwards to remove safely.
+            
+            # First remove separator if it exists below thinking
+            if thinking_idx + 1 < self.list_widget.count():
+                next_item = self.list_widget.item(thinking_idx + 1)
+                if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
+                    self.list_widget.takeItem(thinking_idx + 1)
+            
+            # Then remove thinking
+            self.list_widget.takeItem(thinking_idx)
+            
+        # Fallback cleanup for any other thinking widgets
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            role = item.data(Qt.ItemDataRole.UserRole)
+            if role == "thinking":
+                 self.list_widget.takeItem(i)
+
         answer = data.get("answer", "")
         actions = data.get("actions", [])
         special = data.get("special_action")
@@ -820,27 +952,96 @@ class OmniWindow(QWidget):
             self.screenshot_worker.start()
             return
 
+        # Determine insertion method (Append vs Prepend)
+        # If we are already in history mode (before this response), we prepend to top.
+        # If this is the first response, we append (or prepend to empty list, same thing).
+        # Actually, if is_history_mode is True, we definitely prepend.
+        # If it is False, list was cleared, so appending is fine.
+        
+        prepend = self.is_history_mode
+        insert_idx = 0
+
+        # Helper to add item based on mode
+        def add_item(w, d):
+            nonlocal insert_idx
+            if prepend:
+                self.insert_list_item(insert_idx, w, d)
+                insert_idx += 1
+            else:
+                self.add_list_item(w, d)
+
+        # Update visibility of existing items if we are prepending (entering history)
+        if prepend:
+            # We are adding a new answer.
+            # Existing items (the old answer) should now show their query labels if they weren't already.
+            # Also, we need to insert a separator before the old answer (which is currently at index 0, before we insert new stuff).
+            
+            # Step 1: Insert Separator at top (pushing old answer down)
+            # Only if there is an old answer
+            # We want separator between NEW and OLD. 
+            # So if we insert new at 0, the separator should be at 1.
+            # But we are inserting separator NOW, before adding new item.
+            # So separator goes to index 0, pushing old items to 1.
+            # Then we insert new item at 0, pushing separator to 1, old items to 2.
+            
+            if self.list_widget.count() > 0:
+                self.insert_list_item(0, SeparatorWidget(), "separator")
+                # Do NOT increment insert_idx.
+                # We want the NEW answer (and subsequent actions) to be inserted AT 0,
+                # pushing the separator down to 1 (and old items to 2+).
+                # This ensures: [New Answer] [Separator] [Old Answer]
+                # insert_idx += 1  <-- REMOVED
+            
+            # Step 2: Iterate all existing items and set query visible
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                w = self.list_widget.itemWidget(item)
+                if isinstance(w, SmoothEntryWidget):
+                    w = w.content_widget
+                if isinstance(w, AnswerWidget):
+                    w.set_query_visible(True)
+
         # Add Answer
         if answer:
             self.chat_history.append({"role": "user", "content": self.input_field.text()})
             self.chat_history.append({"role": "assistant", "content": answer})
             
-            w = AnswerWidget(answer)
-            self.add_list_item(w, "answer")
+            # Pass query text to AnswerWidget
+            # If prepend (follow-up), we show it.
+            # If not prepend (first answer), we hide it (default is hidden in AnswerWidget, but we pass text).
+            # Wait, user said "they are not shown if it's not followup!".
+            # So if not prepend, visible=False.
+            # If prepend, visible=True.
+            
+            current_query = self.input_field.text()
+            w = AnswerWidget(answer, query_text=current_query)
+            if prepend:
+                w.set_query_visible(True)
+            
+            add_item(w, "answer")
         
         # Add Actions
         for act in actions:
             if isinstance(act, dict):
                 if act.get('type') == 'link':
                     w = LinkActionWidget(act['title'], act['url'], act['description'])
-                    self.add_list_item(w, act)
+                    add_item(w, act)
                 elif act.get('type') == 'install':
                     w = InstallActionWidget(act['name'], act.get('website'))
-                    self.add_list_item(w, act)
+                    add_item(w, act)
                 elif act.get('type') == 'status':
                     # Maybe just a small notification or standard item
                     w = StandardItemWidget(act['description'], icon_name="dialog-information")
-                    self.add_list_item(w, act)
+                    add_item(w, act)
         
-        self.enter_history_mode()
+        # Scroll to top if we prepended
+        if prepend and self.list_widget.count() > 0:
+            self.list_widget.scrollToItem(self.list_widget.item(0))
+
+        # Manually set history mode state without re-clearing list
+        if not self.is_history_mode:
+            self.is_history_mode = True
+            self.follow_up_widget.set_active(True)
+            self.frame.set_minimal_mode(False)
+            
         self.adjust_window_height()

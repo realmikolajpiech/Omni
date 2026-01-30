@@ -164,6 +164,11 @@ def extract_actions(text):
         try:
             parsed = json.loads(json_block)
             if isinstance(parsed, dict):
+                # Extract 'answer' if present in JSON
+                if "answer" in parsed and isinstance(parsed["answer"], str):
+                    if not clean_text.strip():
+                        clean_text = parsed["answer"]
+                
                 actions = parsed.get("actions", [])
                 if not actions and "type" in parsed:
                     actions = [parsed]
@@ -389,8 +394,9 @@ Instructions:
 11. REFUSAL OVERRIDE:
     - Never say "I can't assist with navigating". You CAN. You have the `computer_control` tool.
     - If the user says "click X", JUST DO IT.
-    - CRITICAL EXCEPTION: If the user asks "What do you see?", "Describe the screen", or "What is on the screen?", do NOT generate a computer_control action. Just describe it in text.
+    - CRITICAL EXCEPTION: If the user asks "What do you see?", "Describe the screen", "What is on the screen?", "What about you?", or "How are you?", do NOT generate a computer_control action. Just describe it in text.
     - ONLY use `computer_control` if the user EXPLICITLY asks you to perform an action (click, type, scroll, open, etc).
+    - NEVER use `computer_control` with action `describe`. There is no such action. Just write the description in the `answer` field.
 
 Current Conversation:
 """
