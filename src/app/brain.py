@@ -21,8 +21,8 @@ if __name__ == "__main__":
     app = create_app()
     logging.info(f"Starting Brain Service on {BRAIN_HOST}:{BRAIN_PORT}")
     
-    # Preload models in background?
-    # import threading
-    # threading.Thread(target=ensure_model_loaded).start()
+    # Preload models in background
+    import threading
+    threading.Thread(target=ensure_model_loaded).start()
     
     app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False)

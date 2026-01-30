@@ -278,12 +278,19 @@ Rules:
 Context: {prev_ctx_msg}
 Input: {query}
 Output:"""
-        with main_lock:
-             f_out = model_manager.llm.create_chat_completion(
+        
+        ensure_fast_model()
+        with fast_lock:
+             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+             f_out = model_manager.fast_model.create_chat_completion(
                  messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
                  max_tokens=64, temperature=0.0
              )
              f_res = f_out['choices'][0]['message']['content'].strip()
+             
+             # Clean up Qwen thinking blocks
+             f_res = re.sub(r'<think>.*?</think>', '', f_res, flags=re.DOTALL | re.IGNORECASE).strip()
+             
              logging.info(f"Memory Extraction RAW: {f_res}")
              
              if "FA:" in f_res:
@@ -401,9 +408,39 @@ Instructions:
 Current Conversation:
 """
     
+    messages = []
+    # Gemma 3 (and many others) prefer 'model' role over 'assistant'
+    # Also, strictly speaking Gemma doesn't always support 'system' role in the same way, 
+    # so merging system prompt into first user message is safer.
+    
+    first_user_msg_content = system_prompt
+    
+    if history:
+        # If there is history, we construct the list
+        # But we need to ensure the first message is User and contains the system prompt
+        pass
+    
+    # Re-construct messages with role mapping
+    # 1. System Prompt -> First User Message
+    # 2. History -> Map 'assistant' to 'model'
+    # 3. Current Query -> User Message
+    
+    # Let's flatten it carefully
+    
+    # Start with System Prompt text
+    base_content = system_prompt + "\n\n--- Conversation History ---\n"
+    
+    # We will build a new messages list
+    # Actually, let's keep it simple: System role is supported by llama.cpp for most models now,
+    # BUT the role name 'assistant' is definitely wrong for Gemma.
+    
     messages = [{"role": "system", "content": system_prompt}]
+    
     for msg in history:
-        messages.append({"role": msg.get('role', 'user'), "content": msg.get('content', '')})
+        role = msg.get('role', 'user')
+        if role == 'assistant': role = 'model' # Gemma uses 'model'
+        content = msg.get('content', '')
+        messages.append({"role": role, "content": content})
     
     # Handle Multimodal Input
     if screenshot_b64:

@@ -283,7 +283,7 @@ class OmniWindow(QWidget):
         else:
             self.move(100, 100)
 
-    def reset_to_search_mode(self, animate=True):
+    def reset_to_search_mode(self, animate=True, clear=True):
         if hasattr(self, 'anim'): self.anim.stop()
         if hasattr(self, 'anim_group'): self.anim_group.stop()
         if hasattr(self, 'anim_close_group'): self.anim_close_group.stop()
@@ -293,7 +293,8 @@ class OmniWindow(QWidget):
         self.frame.set_minimal_mode(True) # Minimal mode for search
         
         self.input_field.blockSignals(True)
-        self.input_field.clear()
+        if clear:
+            self.input_field.clear()
         self.input_field.blockSignals(False)
         
         # Force resize to minimal
@@ -301,7 +302,8 @@ class OmniWindow(QWidget):
         self.setMaximumHeight(16777215)
         self.resize(self.width(), 84)
         
-        self.refresh_list("", animate=animate)
+        text = self.input_field.text() if not clear else ""
+        self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self):
         logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}")
@@ -414,7 +416,7 @@ class OmniWindow(QWidget):
                 return True
             elif event.key() == Qt.Key.Key_Tab:
                 if self.is_history_mode:
-                    self.reset_to_search_mode()
+                    self.reset_to_search_mode(clear=False)
                 else:
                     self.enter_history_mode()
                 return True
