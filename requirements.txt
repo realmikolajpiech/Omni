@@ -4,7 +4,9 @@ simpleeval
 sentence_transformers
 lancedb
 memvid_sdk
+# For GPU support, run setup_cuda_env.bat or install with CMAKE_ARGS="-DGGML_CUDA=on"
 llama_cpp_python
 PyQt6
 Pillow
 BlurWindow
+keyboard

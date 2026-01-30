@@ -9,7 +9,7 @@ class ActionWorker(QThread):
         self.query = query
     def run(self):
         try:
-            r = requests.post(ACTION_URL, json={"query": self.query}, timeout=60)
+            r = requests.post(ACTION_URL, json={"query": self.query}, timeout=5)
             data = r.json()
             actions = data.get("actions", [])
             if not actions and data.get("action"): actions = [data.get("action")]

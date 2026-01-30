@@ -7,7 +7,7 @@ import time
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
                              QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
-from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty
+from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap
 
 from src.core.config import LOGO_PATH
@@ -37,6 +37,9 @@ except ImportError:
     blur = None
 
 class OmniWindow(QWidget):
+    # Signal for external triggers (e.g. global hotkey)
+    toggle_requested = pyqtSignal()
+
     def setup_uinput(self):
         # Linux only
         if sys.platform != "linux":
@@ -68,6 +71,9 @@ class OmniWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+        
+        self.toggle_requested.connect(self.toggle_visibility_safe)
+        
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("omni-search")
@@ -171,7 +177,7 @@ class OmniWindow(QWidget):
         self.refresh_list("", animate=False)
         self.center()  
 
-        self.animate_entry()
+        # self.animate_entry() # Don't auto-show on init. Let the caller decide or hotkey trigger it.
 
         self.search_worker = None
         self.action_worker = None
@@ -265,6 +271,29 @@ class OmniWindow(QWidget):
         else:
             self.move(100, 100)
 
+    def reset_to_search_mode(self, animate=True):
+        self.is_history_mode = False
+        self.follow_up_widget.set_active(False)
+        self.frame.set_minimal_mode(True) # Minimal mode for search
+        
+        self.input_field.blockSignals(True)
+        self.input_field.clear()
+        self.input_field.blockSignals(False)
+        
+        self.refresh_list("", animate=animate)
+
+    def toggle_visibility_safe(self):
+        logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}")
+        if self.isVisible():
+            self.animate_close()
+        else:
+            self.reset_to_search_mode(animate=False)
+            self.chat_history = [] # Start clean
+            self.show()
+            self.center()
+            self.animate_entry()
+            self.input_field.setFocus()
+
     def animate_entry(self):
         self.is_entry_animating = True
         self.frame.boost_speed()
@@ -281,22 +310,21 @@ class OmniWindow(QWidget):
         
         self.anim_group.finished.connect(on_finished)
         
+        # Slide Down from slightly above
         current_y = self.y()
-        start_y = current_y + 15 
-        end_y = current_y
+        target_y = current_y
+        start_y = target_y - 30 # Start higher
         
         self.move(self.x(), start_y)
         
-        self.entry_anim_group = QParallelAnimationGroup()
-        
         anim_pos = QPropertyAnimation(self, b"pos")
-        anim_pos.setDuration(300)
+        anim_pos.setDuration(350)
         anim_pos.setStartValue(QPoint(self.x(), start_y))
-        anim_pos.setEndValue(QPoint(self.x(), end_y))
+        anim_pos.setEndValue(QPoint(self.x(), target_y))
         anim_pos.setEasingCurve(QEasingCurve.Type.OutCubic)
         
         anim_opa = QPropertyAnimation(self.opacity_effect, b"opacity")
-        anim_opa.setDuration(300)
+        anim_opa.setDuration(350)
         anim_opa.setStartValue(0.0)
         anim_opa.setEndValue(1.0)
         anim_opa.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -354,6 +382,7 @@ class OmniWindow(QWidget):
                 self.list_widget.setCurrentRow(max(0, self.list_widget.currentRow()-1))
                 return True
             elif event.key() == Qt.Key.Key_Escape:
+                logging.info("Escape key pressed (Input Field)")
                 if self.is_history_mode:
                     self.reset_to_search_mode()
                 else:
@@ -389,33 +418,55 @@ class OmniWindow(QWidget):
         
         self.adjust_window_height()
 
-    def reset_to_search_mode(self):
-        self.is_history_mode = False
-        self.follow_up_widget.set_active(False)
-        self.frame.set_minimal_mode(True) # Minimal mode for search
-        self.input_field.clear()
-        self.refresh_list("")
-
-    def toggle_visibility_safe(self):
-        if self.isVisible():
-            self.animate_close()
-        else:
-            self.show()
-            self.center()
-            self.animate_entry()
-            self.input_field.setFocus()
-            self.input_field.selectAll()
-
     def animate_close(self):
         if self._is_closing: return
+        
+        # Stop entry animation if running
+        if hasattr(self, 'anim_group') and self.anim_group.state() == QPropertyAnimation.State.Running:
+            self.anim_group.stop()
+            
         self._is_closing = True
         
-        self.anim_close = QPropertyAnimation(self, b"windowOpacity")
-        self.anim_close.setDuration(200)
-        self.anim_close.setStartValue(1.0)
-        self.anim_close.setEndValue(0.0)
-        self.anim_close.finished.connect(self.close)
-        self.anim_close.start()
+        # Re-apply opacity effect for exit
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self.opacity_effect)
+        
+        self.anim_close_group = QParallelAnimationGroup()
+        
+        # Slide UP (Exit)
+        current_y = self.y()
+        target_y = current_y - 30 # Move up
+        
+        anim_pos = QPropertyAnimation(self, b"pos")
+        anim_pos.setDuration(250)
+        anim_pos.setStartValue(QPoint(self.x(), current_y))
+        anim_pos.setEndValue(QPoint(self.x(), target_y))
+        anim_pos.setEasingCurve(QEasingCurve.Type.InCubic)
+        
+        anim_opa = QPropertyAnimation(self.opacity_effect, b"opacity")
+        anim_opa.setDuration(250)
+        anim_opa.setStartValue(1.0)
+        anim_opa.setEndValue(0.0)
+        anim_opa.setEasingCurve(QEasingCurve.Type.InCubic)
+        
+        def on_close_finished():
+             self.close() # Or self.hide()
+             self.setGraphicsEffect(None) # Cleanup
+        
+        self.anim_close_group.finished.connect(on_close_finished)
+        self.anim_close_group.addAnimation(anim_pos)
+        self.anim_close_group.addAnimation(anim_opa)
+        self.anim_close_group.start()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            logging.info("Escape key pressed (Global)")
+            if self.is_history_mode:
+                self.reset_to_search_mode()
+            else:
+                self.animate_close()
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self._is_closing = False
@@ -430,7 +481,7 @@ class OmniWindow(QWidget):
             # Do NOT return, proceed to search logic below
         
         if not text.strip():
-            self.refresh_list("", animate=False)
+            self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             return
 
@@ -582,12 +633,18 @@ class OmniWindow(QWidget):
         if not query or self.is_history_mode: return
 
         # Start Workers
-        if self.search_worker and self.search_worker.isRunning(): self.search_worker.terminate()
+        if self.search_worker:
+            try: self.search_worker.results_found.disconnect()
+            except: pass
+        
         self.search_worker = SearchWorker(query)
         self.search_worker.results_found.connect(self.on_search_results)
         self.search_worker.start()
 
-        if self.action_worker and self.action_worker.isRunning(): self.action_worker.terminate()
+        if self.action_worker:
+            try: self.action_worker.action_found.disconnect()
+            except: pass
+
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
