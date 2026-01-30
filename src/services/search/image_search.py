@@ -109,7 +109,7 @@ def perform_image_search_with_fallback(query):
                         logging.info(f"Performing Keyword Search for '{v}'...")
                         try:
                             # Re-open table here as 'tbl' is not in scope
-                            img_tbl = db_conn.open_table("images")
+                            img_tbl = model_manager.db_conn.open_table("images")
                             matches = img_tbl.search().where(f"filename LIKE '%{v}%'").limit(5).to_pandas()
                             
                             for _, row in matches.iterrows():

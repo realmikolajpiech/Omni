@@ -30,11 +30,11 @@ Facts:
 resolved facts:"""
 
     try:
-        with main_lock:
-             if not llm:
+        with model_manager.main_lock:
+             if not model_manager.llm:
                  return "\n".join(unique_facts)
              # Using a lower temperature for logic
-             out = llm.create_chat_completion(
+             out = model_manager.llm.create_chat_completion(
                  messages=[{"role": "system", "content": "You are a logical consistency engine. Output ONLY the resolved facts list."}, {"role": "user", "content": prompt}],
                  max_tokens=256, temperature=0.0
              )

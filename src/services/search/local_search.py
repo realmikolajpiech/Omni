@@ -35,22 +35,22 @@ def should_search_files(query):
         {"role": "user", "content": f"Query: {query}"}
     ]
     try:
-        with fast_lock:
-            if hasattr(fast_model, 'reset'): fast_model.reset()
-            out = fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
+        with model_manager.fast_lock:
+            if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
         res = out['choices'][0]['message']['content'].strip().upper()
         return "YES" in res
     except: return False
 
 def perform_file_search(query):
     """Searches LanceDB and reads the content of matching files."""
-    ensure_main_model()
-    if not db_conn or not embed_model: return ""
+    model_manager.ensure_main_model()
+    if not model_manager.db_conn or not model_manager.embed_model: return ""
     
     try:
-        tbl = db_conn.open_table("files")
+        tbl = model_manager.db_conn.open_table("files")
         # Search for the query embedding
-        res = tbl.search(embed_model.encode(query)).limit(2).to_pandas()
+        res = tbl.search(model_manager.embed_model.encode(query)).limit(2).to_pandas()
         if res.empty: return ""
         
         file_contexts = []

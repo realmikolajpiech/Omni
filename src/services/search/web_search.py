@@ -16,6 +16,12 @@ def search_api(query, categories='general'):
     urls = [SEARXNG_URL]
     fallback_urls = [
         "https://searx.be/search",
+        "https://searx.daetalytica.io/search",
+        "https://searx.tuxcloud.ua/search",
+        "https://op.nx.is/search",
+        "https://searx.web.cern.ch/search",
+        "https://search.sapti.me/search",
+        "https://searx.prvcy.eu/search",
         "https://searx.ng/search",
         "https://search.ononoki.org/search"
     ]
@@ -32,8 +38,13 @@ def search_api(query, categories='general'):
                 'format': 'json',
                 'categories': categories,
                 'language': loc
-            }    
-            resp = requests.get(url, params=params, timeout=6.0)
+            }
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': url
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=6.0)
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -222,21 +233,7 @@ def get_navigation_result(query):
     return None
 
 def get_person_result(name):
-    try:
-        # Try SearXNG first (via search_api)
-        results = search_api(name, categories='general')
-        if results:
-            best = results[0]
-            return {
-                "type": "person",
-                "name": best.get('title', name),
-                "description": best.get('content') or best.get('snippet', ''),
-                "url": best.get('url'),
-                "image": None
-            }
-    except Exception as e: pass
-
-    # Fallback: Wikipedia API
+    # 1. Try Wikipedia API first (Better images/summaries)
     try:
         wiki_name = name.strip().replace(" ", "_")
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_name}"
@@ -245,6 +242,7 @@ def get_person_result(name):
         if r.status_code == 200:
             data = r.json()
             if data.get('type') == 'standard':
+                logging.info(f"Wikipedia found person: {data.get('title')}")
                 return {
                     "type": "person",
                     "name": data.get('title', name),
@@ -252,7 +250,26 @@ def get_person_result(name):
                     "url": data.get('content_urls', {}).get('desktop', {}).get('page', ''),
                     "image": data.get('thumbnail', {}).get('source')
                 }
-    except: pass
+    except Exception as e: 
+        logging.warning(f"Wiki Person Error: {e}")
+
+    # 2. Fallback: SearXNG
+    try:
+        results = search_api(name, categories='general')
+        if results:
+            best = results[0]
+            # Try to find an image in the result if possible
+            img = best.get('thumbnail') or best.get('img_src') or best.get('image')
+            
+            return {
+                "type": "person",
+                "name": best.get('title', name),
+                "description": best.get('content') or best.get('snippet', ''),
+                "url": best.get('url'),
+                "image": img
+            }
+    except Exception as e: pass
+
     return None
 
 def get_place_result(query):

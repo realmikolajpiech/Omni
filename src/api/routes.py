@@ -4,7 +4,7 @@ import logging
 from flask import Blueprint, request, jsonify
 
 from src.core.config import COMMON_SHORTCUTS
-from src.services.llm.model_manager import ensure_fast_model, ensure_main_model, fast_model, fast_lock, db_conn, embed_model
+from src.services.llm import model_manager
 from src.services.llm.chat import process_chat_request, perform_calculation
 from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
@@ -58,7 +58,7 @@ def search_endpoint():
 
 @api_bp.route('/action', methods=['POST'])
 def action_endpoint():
-    ensure_fast_model()
+    model_manager.ensure_fast_model()
 
     try: req = request.get_json(force=True)
     except: return jsonify({"actions": []}), 400
@@ -98,27 +98,47 @@ def action_endpoint():
         return jsonify({"actions": []})
 
     # 2. LLM Inference
-    system_prompt = """Classify INTENT. Output ONLY command: PERSON:[Name], PLACE:[Name], OPEN:[URL], OPEN_APP:[AppName], INSTALL:[App], CALC:[Expr], SEARCH:[Query], FORGET:[Fact], BRIGHTNESS:[Level].
-If the query is asking for a local file, image, or picture, output IGNORE.
-If the query is asking to click, type, scroll, or interact with the screen/UI, output IGNORE.
+    system_prompt = """You are a Command Extractor.
+Task: Convert the User Query into a SINGLE command from the list below.
 
-Ex:
-calculate 2+2 -> CALC:2+2
-install firefox -> INSTALL:firefox
-install firefox -> INSTALL:firefox
-open firefox -> OPEN_APP:firefox
-forget that I like pizza -> FORGET:I like pizza
-forget my name -> FORGET:My name
-run obs -> OPEN_APP:obs
-who is elon -> PERSON:Elon Musk
-open google -> OPEN:https://google.com
-search kittens -> SEARCH:kittens
-find my notes -> IGNORE
-picture of oskar -> IGNORE
-set brightness to 50% -> BRIGHTNESS:50
+Commands:
+- PERSON:[Name] -> Who is [Name]?
+- PLACE:[Name] -> Where is [Name]?
+- OPEN:[URL] -> Open website [URL]
+- OPEN_APP:[AppName] -> Open app [AppName]
+- INSTALL:[App] -> Install [App]
+- CALC:[Expr] -> Calculate [Expr]
+- SEARCH:[Query] -> Search for [Query]
+- FORGET:[Fact] -> Forget [Fact]
+- BRIGHTNESS:[Level] -> Set brightness to [Level]
+- IGNORE -> If query is chat, greeting, or unclear.
 
-Query: {query}"""
-    user_prompt = f"Query: {query}"
+Rules:
+1. Output ONLY the command. No thinking, no explanations.
+2. If the user asks to "open youtube", output "OPEN:https://youtube.com".
+3. If the user asks to "open google", output "OPEN:https://google.com".
+4. If unsure, default to SEARCH:[Query].
+
+Examples:
+Query: calculate 2+2
+CALC:2+2
+
+Query: install firefox
+INSTALL:firefox
+
+Query: open youtube
+OPEN:https://youtube.com
+
+Query: who is elon
+PERSON:Elon Musk
+
+Query: search kittens
+SEARCH:kittens
+
+Query: hello
+IGNORE
+"""
+    user_prompt = f"Query: {query}\nOutput:"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -126,10 +146,10 @@ Query: {query}"""
     ]
 
     try:
-        with fast_lock:
+        with model_manager.fast_lock:
             start_t = time.time()
-            if hasattr(fast_model, 'reset'): fast_model.reset()
-            out = fast_model.create_chat_completion(
+            if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+            out = model_manager.fast_model.create_chat_completion(
                 messages=messages, max_tokens=256, temperature=0.1
             )
             end_t = time.time()
@@ -142,6 +162,8 @@ Query: {query}"""
             # Remove thinking blocks from Qwen
             import re
             result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
+            
+            logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
 
         actions = []
         for line in result_text.split('\n'):
@@ -210,7 +232,14 @@ Query: {query}"""
 
             elif "OPEN:" in line:
                 url = line.split("OPEN:")[1].strip()
-                actions.append({"type": "link", "url": url, "title": "Link", "description": "Open Link"})
+                if "http" not in url: url = "https://" + url
+                
+                # Generate a better title
+                display_url = url.replace("https://", "").replace("http://", "").replace("www.", "")
+                if "/" in display_url: display_url = display_url.split('/')[0]
+                title = f"Open {display_url}"
+
+                actions.append({"type": "link", "url": url, "title": title, "description": "Open Website"})
 
             elif "OPEN_APP:" in line:
                 app = line.split("OPEN_APP:")[1].strip()

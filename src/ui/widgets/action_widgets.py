@@ -393,21 +393,32 @@ class PersonActionWidget(QWidget):
         self.avatar.setStyleSheet("background-color: #F7F7F7; color: #CCCCCC; font-family: 'Instrument Serif'; font-size: 56px; border-radius: 8px; border: 1px solid #EDEDED;")
 
         if self.image_url:
+            logging.info(f"Starting image download for {name}: {self.image_url}")
             threading.Thread(target=self._download_image, daemon=True).start()
 
     def _download_image(self):
         try:
             if self.image_url.startswith("data:"): return
-            headers = {"User-Agent": "Mozilla/5.0"}
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            logging.info(f"Requesting image: {self.image_url}")
             r = requests.get(self.image_url, headers=headers, timeout=10, verify=False)
-            if r.status_code == 200: self.image_downloaded.emit(r.content)
-        except: pass
+            logging.info(f"Image download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}, Size: {len(r.content)}")
+            if r.status_code == 200: 
+                self.image_downloaded.emit(r.content)
+            else:
+                logging.warning(f"Image download failed with status {r.status_code}")
+        except Exception as e:
+            logging.error(f"Image download exception: {e}")
 
     def update_image(self, data):
         try:
             if not self.avatar: return
             pixmap = QPixmap()
-            pixmap.loadFromData(data)
+            success = pixmap.loadFromData(data)
+            if not success:
+                logging.warning("Failed to load pixmap from data")
+                return
+            
             if not pixmap.isNull():
                 w, h = 110, 150
                 rounded = QPixmap(w, h)

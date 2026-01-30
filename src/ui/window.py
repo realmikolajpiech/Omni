@@ -744,19 +744,25 @@ class OmniWindow(QWidget):
     def on_action_found(self, actions, query):
         if self.input_field.text().strip() != query: return
         
+        # Insert actions at the top of the list (above apps/Omni)
+        insert_idx = 0
         for act in actions:
             if act.get('type') == 'link':
                 w = LinkActionWidget(act['title'], act['url'], act['description'])
-                self.add_list_item(w, act)
+                self.insert_list_item(insert_idx, w, act)
+                insert_idx += 1
             elif act.get('type') == 'install':
                 w = InstallActionWidget(act['name'], act.get('website'))
-                self.add_list_item(w, act)
+                self.insert_list_item(insert_idx, w, act)
+                insert_idx += 1
             elif act.get('type') == 'person':
                 w = PersonActionWidget(act['name'], act['description'], act.get('image'), act.get('url'))
-                self.add_list_item(w, act)
+                self.insert_list_item(insert_idx, w, act)
+                insert_idx += 1
             elif act.get('type') == 'place':
                 w = PlaceActionWidget(act['name'], act['address'], act.get('image'), act.get('url'), act.get('latitude'), act.get('longitude'))
-                self.add_list_item(w, act)
+                self.insert_list_item(insert_idx, w, act)
+                insert_idx += 1
         
         self.adjust_window_height()
 
