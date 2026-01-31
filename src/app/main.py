@@ -140,12 +140,38 @@ def main():
         # Fallback for non-Windows
         pass
 
-    try:
-        # Add backup hotkey for testing
-        keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
-        logging.info("Global hotkey 'left/right windows' registered via Low Level Hook. Added 'ctrl+space' as backup.")
-    except Exception as e:
-        logging.error(f"Failed to register global hotkey: {e}")
+    # Global Hotkey Registration
+    if sys.platform == "darwin":
+        # macOS: Use pynput for reliable global hotkeys
+        try:
+            from pynput import keyboard as pynput_keyboard
+            
+            def on_activate():
+                logging.info("Global hotkey <ctrl>+<space> activated (pynput)")
+                toggle_omni()
+
+            # Non-blocking listener
+            hotkey_listener = pynput_keyboard.GlobalHotKeys({
+                '<ctrl>+<space>': on_activate
+            })
+            hotkey_listener.start()
+            logging.info("Global hotkey 'ctrl+space' registered via pynput (macOS)")
+        except Exception as e:
+            logging.error(f"Failed to register pynput hotkey on macOS: {e}")
+            # Fallback to keyboard module if pynput fails
+            try:
+                keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
+            except Exception as e2:
+                logging.error(f"Fallback keyboard hotkey also failed: {e2}")
+
+    else:
+        # Windows / Linux: Use keyboard module
+        try:
+            # Add backup hotkey for testing
+            keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
+            logging.info("Global hotkey 'ctrl+space' registered via keyboard module")
+        except Exception as e:
+            logging.error(f"Failed to register global hotkey: {e}")
 
     # Check for Admin privileges on Windows
     if sys.platform == "win32":

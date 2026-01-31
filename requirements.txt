@@ -9,4 +9,4 @@ llama_cpp_python
 PyQt6
 Pillow
 BlurWindow
-keyboard
+keyboardpynput
