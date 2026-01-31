@@ -16,7 +16,7 @@ from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
 from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, FileActionWidget, 
-                                         PersonActionWidget, PlaceActionWidget)
+                                         PersonActionWidget, PlaceActionWidget, AppActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, 
@@ -755,6 +755,10 @@ class OmniWindow(QWidget):
                 w = InstallActionWidget(act['name'], act.get('website'))
                 self.insert_list_item(insert_idx, w, act)
                 insert_idx += 1
+            elif act.get('type') == 'open_app':
+                w = AppActionWidget(act['name'])
+                self.insert_list_item(insert_idx, w, act)
+                insert_idx += 1
             elif act.get('type') == 'person':
                 w = PersonActionWidget(act['name'], act['description'], act.get('image'), act.get('url'))
                 self.insert_list_item(insert_idx, w, act)
@@ -785,6 +789,12 @@ class OmniWindow(QWidget):
                 self.animate_close()
             elif data.get('type') == 'install':
                 self.start_install(data['name'])
+            elif data.get('type') == 'open_app':
+                # Launch App (from Regex Shortcut)
+                app_name = data.get('name')
+                success, msg = find_and_launch_app(app_name)
+                # We could show status, but typically we close or show notification
+                self.animate_close()
             elif data.get('type') == 'open_file':
                 QDesktopServices.openUrl(QUrl(f"file://{data['path']}"))
                 self.animate_close()
@@ -832,6 +842,24 @@ class OmniWindow(QWidget):
         self.install_worker.start()
 
     def perform_ai_query(self, query):
+        # Stop debounce timer to prevent new fast searches from starting
+        self.debounce_timer.stop()
+
+        # Cancel any pending fast search/action requests to prevent race conditions and save resources
+        if self.search_worker and self.search_worker.isRunning():
+            try: self.search_worker.results_found.disconnect()
+            except: pass
+            self.search_worker.terminate()
+            self.search_worker.wait()
+            self.search_worker = None
+            
+        if self.action_worker and self.action_worker.isRunning():
+            try: self.action_worker.action_found.disconnect()
+            except: pass
+            self.action_worker.terminate()
+            self.action_worker.wait()
+            self.action_worker = None
+
         is_followup = self.is_history_mode
         
         if not is_followup:

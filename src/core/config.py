@@ -12,17 +12,17 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Models
-FAST_MODEL_FILENAME = "Qwen_Qwen3-0.6B-Q8_0.gguf"
+FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
-FAST_MODEL_URL = "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q8_0.gguf"
+FAST_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 
-MAIN_MODEL_FILENAME = "google_gemma-3-4b-it-Q4_K_M.gguf"
+MAIN_MODEL_FILENAME = "Qwen3-VL-4B-Thinking-Q4_K_M.gguf"
 MAIN_MODEL_PATH = os.path.join(MODEL_DIR, MAIN_MODEL_FILENAME)
-MAIN_MODEL_URL = "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf"
+MAIN_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-VL-4B-Thinking-GGUF/resolve/main/Qwen3-VL-4B-Thinking-Q4_K_M.gguf"
 
-MMPROJ_FILENAME = "mmproj-google_gemma-3-4b-it-f16.gguf"
-MMPROJ_PATH = os.path.join(MODEL_DIR, MMPROJ_FILENAME)
-MMPROJ_URL = "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/mmproj-google_gemma-3-4b-it-f16.gguf"
+MMPROJ_FILENAME = None
+MMPROJ_PATH = None
+MMPROJ_URL = None
 
 # Voice Models
 VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"

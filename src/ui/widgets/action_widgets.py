@@ -123,6 +123,37 @@ class LinkActionWidget(QWidget):
             return self.layout().sizeHint()
         return super().sizeHint()
 
+class AppActionWidget(LinkActionWidget):
+    def __init__(self, name, parent=None):
+        # We don't have a URL, so pass None or empty
+        super().__init__(f"Open {name.title()}", "", "Application", parent)
+        
+        # Customize icons/text for App Launcher
+        self.action_label.setText("LAUNCH")
+        self.icon_label.setText("🚀")
+        self.icon_label.setStyleSheet("""
+            background-color: #333333; 
+            color: #FFFFFF; 
+            font-size: 12px; 
+            border-radius: 8px;
+        """)
+        
+        # Override layout for specific app styling if needed
+        # Re-using LinkActionWidget layout is fine, but let's customize the right side
+        
+        # We can add a visual cue like "Press Enter"
+        layout = self.card.layout() # It's a QVBoxLayout in LinkActionWidget
+        # We want to access the top row or just append to bottom?
+        # LinkActionWidget has:
+        # - Top Row (Icon + Label)
+        # - Title Label
+        
+        # Let's add a "Press Enter" hint at the bottom right?
+        # Or just rely on standard look.
+        
+        # Let's customize the title color to be more distinct
+        self.title_label.setStyleSheet("color: #111111; margin-top: 0px;")
+
 class InstallActionWidget(LinkActionWidget):
     def __init__(self, name, website_url, parent=None):
         url_for_icon = website_url if website_url else f"https://google.com/search?q={name}"

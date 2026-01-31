@@ -77,6 +77,7 @@ def ensure_fast_model():
             
             fast_model = Llama(
                 model_path=FAST_MODEL_PATH,
+                chat_format="chatml", # Force standard ChatML to bypass Qwen3 thinking
                 n_ctx=8192, # Increased context to avoid warnings (model supports 32k)
                 n_threads=4,
                 n_gpu_layers=-1,
@@ -118,52 +119,23 @@ def ensure_main_model():
             init_error = "Failed to download main model."
             return
 
-    if not os.path.exists(MMPROJ_PATH):
-        logging.info("Visual Projector not found. Downloading...")
-        download_file(MMPROJ_URL, MMPROJ_PATH)
-
+    # MMPROJ handling removed as requested
+    
     with main_lock:
         if llm: return
         logging.info(f"Loading Main Model: {MAIN_MODEL_FILENAME}")
         try:
             from llama_cpp import Llama
-            from llama_cpp.llama_chat_format import Llava15ChatHandler
-
-            class Gemma3ChatHandler(Llava15ChatHandler):
-                 CHAT_FORMAT = (
-                    "{% for message in messages %}"
-                    "<start_of_turn>{{ message['role'] }}\n"
-                    "{% if message['content'] is string %}"
-                    "{{ message['content'] }}"
-                    "{% else %}"
-                    "{% for content in message['content'] %}"
-                    "{% if content['type'] == 'image_url' %}"
-                    "{% if content.image_url is string %}"
-                    "{{ content.image_url }}"
-                    "{% else %}"
-                    "{{ content.image_url.url }}"
-                    "{% endif %}"
-                    "{% elif content['type'] == 'text' %}"
-                    "{{ content['text'] }}"
-                    "{% endif %}"
-                    "{% endfor %}"
-                    "{% endif %}"
-                    "<end_of_turn>\n"
-                    "{% endfor %}"
-                    "<start_of_turn>model\n"
-                 )
-
-            chat_handler = Gemma3ChatHandler(clip_model_path=MMPROJ_PATH)
             
             llm = Llama(
                 model_path=MAIN_MODEL_PATH,
-                chat_handler=chat_handler,
+                # chat_format="chatml", # Try explicit ChatML if Qwen3 defaults fail
                 n_ctx=8192,
                 n_threads=4,
                 n_gpu_layers=-1,
                 verbose=False
             )
-            logging.info("Main Model Loaded (Vision Enabled).")
+            logging.info("Main Model Loaded.")
         except Exception as e:
             logging.error(f"Main Model Load Error: {e}")
             init_error = str(e)

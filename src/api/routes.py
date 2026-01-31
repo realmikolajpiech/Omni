@@ -15,6 +15,9 @@ api_bp = Blueprint('api', __name__)
 
 @api_bp.route('/ask_llm', methods=['POST'])
 def ask_llm():
+    # Signal Fast Model to abort any ongoing operations
+    model_manager.abort_fast_event.set()
+    
     try: req = request.get_json(force=True)
     except: return jsonify({"answer": "Error: Bad JSON"}), 400
 
@@ -29,8 +32,8 @@ def ask_llm():
 
 @api_bp.route('/search', methods=['POST'])
 def search_endpoint():
-    ensure_main_model()
-    if not db_conn or not embed_model:
+    model_manager.ensure_main_model()
+    if not model_manager.db_conn or not model_manager.embed_model:
         return jsonify({"results": []})
 
     try: req = request.get_json(force=True)
@@ -41,8 +44,8 @@ def search_endpoint():
 
     results = []
     try:
-        tbl = db_conn.open_table("files")
-        res = tbl.search(embed_model.encode(query)).limit(3).to_pandas()
+        tbl = model_manager.db_conn.open_table("files")
+        res = tbl.search(model_manager.embed_model.encode(query)).limit(3).to_pandas()
         if not res.empty:
             for _, row in res.iterrows():
                 if row.get('_distance', 0) < 1.1:
@@ -58,6 +61,9 @@ def search_endpoint():
 
 @api_bp.route('/action', methods=['POST'])
 def action_endpoint():
+    # Reset abort event for this new request
+    model_manager.abort_fast_event.clear()
+    
     model_manager.ensure_fast_model()
 
     try: req = request.get_json(force=True)
@@ -97,46 +103,72 @@ def action_endpoint():
         logging.info("Computer Control keyword detected. Skipping Fast Model.")
         return jsonify({"actions": []})
 
+    # 1.7 Regex Shortcuts (Speed Optimization)
+    # Open App
+    open_match = re.search(r"^(?:open|run|launch|start)\s+(?!http|www)(.+)$", query, re.IGNORECASE)
+    if open_match:
+        app = open_match.group(1).strip()
+        # Check if it's a website in disguise
+        if "." in app and " " not in app:
+             pass # Let LLM handle it as OPEN:url
+        else:
+             logging.info(f"Regex Open App: {app}")
+             # We just RETURN the action, UI handles execution on Enter
+             return jsonify({"actions": [{"type": "open_app", "name": app}]})
+    
+    # Install
+    install_match = re.search(r"^install\s+(.+)$", query, re.IGNORECASE)
+    if install_match:
+        app = install_match.group(1).strip()
+        logging.info(f"Regex Install: {app}")
+        return jsonify({"actions": [{"type": "install", "name": app}]})
+
+    # Calculate
+    calc_match = re.search(r"^(?:calculate|calc|solve|what is)\s+([\d\+\-\*\/\(\)\.\s]+)$", query, re.IGNORECASE)
+    if calc_match:
+        expr = calc_match.group(1).strip()
+        res = perform_calculation(expr)
+        val = res.split("Result: ")[1].strip() if "Result: " in res else res
+        logging.info(f"Regex Calc: {expr} -> {val}")
+        return jsonify({"actions": [{"type": "calc", "content": val}]})
+        
+    # Open URL
+    url_match = re.search(r"^(?:open|go to|visit)\s+(https?://[^\s]+|www\.[^\s]+|[a-z0-9]+\.[a-z]{2,}[^\s]*)$", query, re.IGNORECASE)
+    if url_match:
+        url = url_match.group(1).strip()
+        if not url.startswith("http"): url = "https://" + url
+        logging.info(f"Regex URL: {url}")
+        title = url.replace("https://", "").replace("www.", "").split('/')[0]
+        return jsonify({"actions": [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]})
+
     # 2. LLM Inference
+    # Use "system" role to enforce NO thinking
     system_prompt = """You are a Command Extractor.
-Task: Convert the User Query into a SINGLE command from the list below.
+Task: Convert the User Query into a SINGLE command.
 
 Commands:
-- PERSON:[Name] -> Who is [Name]?
-- PLACE:[Name] -> Where is [Name]?
-- OPEN:[URL] -> Open website [URL]
-- OPEN_APP:[AppName] -> Open app [AppName]
-- INSTALL:[App] -> Install [App]
-- CALC:[Expr] -> Calculate [Expr]
-- SEARCH:[Query] -> Search for [Query]
-- FORGET:[Fact] -> Forget [Fact]
-- BRIGHTNESS:[Level] -> Set brightness to [Level]
-- IGNORE -> If query is chat, greeting, or unclear.
+- PERSON:[Name]
+- PLACE:[Name]
+- OPEN:[URL]
+- OPEN_APP:[AppName]
+- INSTALL:[App]
+- CALC:[Expr]
+- SEARCH:[Query]
+- FORGET:[Fact]
+- BRIGHTNESS:[Level]
+- IGNORE
 
 Rules:
-1. Output ONLY the command. No thinking, no explanations.
-2. If the user asks to "open youtube", output "OPEN:https://youtube.com".
-3. If the user asks to "open google", output "OPEN:https://google.com".
-4. If unsure, default to SEARCH:[Query].
+1. Output ONLY the command.
+2. DO NOT output any thinking, reasoning, or <think> tags.
+3. Default to SEARCH:[Query] if unsure.
 
 Examples:
-Query: calculate 2+2
-CALC:2+2
-
-Query: install firefox
-INSTALL:firefox
-
-Query: open youtube
-OPEN:https://youtube.com
-
-Query: who is elon
-PERSON:Elon Musk
-
-Query: search kittens
-SEARCH:kittens
-
-Query: hello
-IGNORE
+open youtube -> OPEN:https://youtube.com
+who is elon -> PERSON:Elon Musk
+install firefox -> INSTALL:firefox
+search kittens -> SEARCH:kittens
+hello -> IGNORE
 """
     user_prompt = f"Query: {query}\nOutput:"
 
@@ -150,7 +182,7 @@ IGNORE
             start_t = time.time()
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages, max_tokens=256, temperature=0.1
+                messages=messages, max_tokens=1024, temperature=0.0
             )
             end_t = time.time()
             dur = end_t - start_t
@@ -159,7 +191,7 @@ IGNORE
             logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
             result_text = out['choices'][0]['message']['content'].strip()
             
-            # Remove thinking blocks from Qwen
+            # Remove thinking blocks from Qwen (Fallback cleanup)
             import re
             result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
             
@@ -192,6 +224,10 @@ IGNORE
                 fact = line.split("FORGET:")[1].strip()
                 delete_memory(fact)
             elif "SEARCH:" in line:
+                if model_manager.abort_fast_event.is_set():
+                    logging.info("Fast Action Aborted (Main Model requested).")
+                    return jsonify({"actions": []})
+
                 q = line.split("SEARCH:")[1].strip()
                 nav = get_navigation_result(q)
                 if nav:
@@ -239,7 +275,9 @@ IGNORE
                 if "/" in display_url: display_url = display_url.split('/')[0]
                 title = f"Open {display_url}"
 
-                actions.append({"type": "link", "url": url, "title": title, "description": "Open Website"})
+                act = {"type": "link", "url": url, "title": title, "description": "Open Website"}
+                logging.info(f"Generated Action: {act}")
+                actions.append(act)
 
             elif "OPEN_APP:" in line:
                 app = line.split("OPEN_APP:")[1].strip()

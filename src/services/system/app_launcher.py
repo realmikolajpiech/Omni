@@ -152,6 +152,16 @@ def find_and_launch_app(query):
             logging.error(f"Failed to launch app: {e}")
             return False, f"Error: {e}"
             
+    # Fallback: Check if it's a known system executable (e.g. 'calc', 'notepad')
+    # This helps when the shortcut name is different from the executable name
+    if os.name == 'nt':
+        import shutil
+        if shutil.which(query):
+             try:
+                 subprocess.Popen(query, shell=True)
+                 return True, query
+             except: pass
+            
     return False, "App not found"
 
 def resolve_app_metadata(app_name):
