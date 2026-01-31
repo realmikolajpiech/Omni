@@ -27,6 +27,19 @@ def ask_llm():
 
     logging.info(f"Received /ask_llm request. Query: {query}")
     
+    # Ensure model is loaded before processing
+    try:
+        model_manager.ensure_main_model()
+    except Exception as e:
+        logging.error(f"Failed to ensure main model: {e}")
+        return jsonify({"answer": f"Model loading error: {str(e)}"}), 500
+
+    if model_manager.init_error:
+         return jsonify({"answer": f"Model Initialization Error: {model_manager.init_error}"}), 500
+    
+    if not model_manager.llm:
+         return jsonify({"answer": "The Omni AI hasn't loaded yet. Please try again in a moment."}), 503
+
     response = process_chat_request(query, history, screenshot_b64)
     return jsonify(response)
 

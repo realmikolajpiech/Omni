@@ -10,3 +10,5 @@ PyQt6
 Pillow
 BlurWindow
 keyboard
+huggingface_hub[hf_xet]
+bitsandbytes>=0.46.1
