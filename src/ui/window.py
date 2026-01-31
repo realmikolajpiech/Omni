@@ -33,8 +33,18 @@ from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker
 try:
     from BlurWindow.blurWindow import blur
 except ImportError:
-    logging.warning("BlurWindow library not found. Blur effect disabled.")
+    if sys.platform == "win32":
+        logging.warning("BlurWindow library not found. Blur effect disabled.")
     blur = None
+
+if sys.platform == "darwin":
+    try:
+        import objc
+        from AppKit import NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow, \
+                           NSVisualEffectMaterialHUDWindow, NSViewWidthSizable, NSViewHeightSizable, \
+                           NSColor
+    except ImportError:
+        logging.warning("PyObjC not found. MacOS blur disabled.")
 
 class OmniWindow(QWidget):
     # Signal for external triggers (e.g. global hotkey)
@@ -232,6 +242,57 @@ class OmniWindow(QWidget):
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 logging.error(f"KWin Blur Error: {e}")
+        elif sys.platform == "darwin":
+            try:
+                import ctypes
+                
+                # Get the NSView pointer
+                view_ptr = int(self.winId())
+                # objc.objc_object takes c_void_p argument
+                ns_view = objc.objc_object(c_void_p=ctypes.c_void_p(view_ptr))
+                
+                # Check if we already have a blur view attached
+                if not hasattr(self, 'mac_blur_view'):
+                    # Strategy: Add blur view as a SIBLING behind the Qt view.
+                    # This ensures it doesn't cover the Qt content (child covers parent)
+                    # and allows Qt to draw on top of it.
+                    
+                    superview = ns_view.superview()
+                    if superview:
+                        # Create Visual Effect View with same frame as Qt view
+                        self.mac_blur_view = NSVisualEffectView.alloc().initWithFrame_(ns_view.frame())
+                        
+                        # Configure
+                        # NSVisualEffectMaterialHUDWindow = 13 (Dark/Vibrant)
+                        self.mac_blur_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
+                        self.mac_blur_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+                        self.mac_blur_view.setState_(1) # Active
+                        self.mac_blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+                        
+                        # Apply rounded corners to the blur view's layer
+                        self.mac_blur_view.setWantsLayer_(True)
+                        self.mac_blur_view.layer().setCornerRadius_(24.0)
+                        self.mac_blur_view.layer().setMasksToBounds_(True)
+
+                        # Insert BEHIND the Qt view (-1 = NSWindowBelow)
+                        superview.addSubview_positioned_relativeTo_(self.mac_blur_view, -1, ns_view)
+                        
+                        logging.info("MacOS Blur applied via Sibling Strategy")
+                    else:
+                        # Fallback: If no superview (rare), try adding as subview but at bottom
+                        # Note: This might obscure content if Qt draws in drawRect
+                        logging.warning("MacOS Blur: No superview found. Falling back to subview (might obscure content).")
+                        
+                        self.mac_blur_view = NSVisualEffectView.alloc().initWithFrame_(ns_view.bounds())
+                        self.mac_blur_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
+                        self.mac_blur_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+                        self.mac_blur_view.setState_(1)
+                        self.mac_blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+                        
+                        ns_view.addSubview_positioned_relativeTo_(self.mac_blur_view, -1, None)
+                        
+            except Exception as e:
+                logging.error(f"MacOS Blur Error: {e}")
         
         self.update_mask()
 
