@@ -300,10 +300,34 @@ Examples:
                     return jsonify({"actions": []})
 
                 q = line.split("SEARCH:")[1].strip()
+                
+                # Try to classify: is this a PERSON or PLACE?
+                # Check for person indicators
+                person_indicators = ["who is", "biography", "born", "founder", "actor", "musician", "president"]
+                is_person_query = any(indicator in query.lower() for indicator in person_indicators)
+                
+                # Check for place indicators
+                place_indicators = ["where is", "location of", "find", "city", "country", "capital", "near"]
+                is_place_query = any(indicator in query.lower() for indicator in place_indicators)
+                
+                # Try person first if indicators match
+                if is_person_query:
+                    person_result = get_person_result(q)
+                    if person_result:
+                        actions.append(person_result)
+                        continue
+                
+                # Try place if indicators match
+                if is_place_query:
+                    place_result = get_place_result(q)
+                    if place_result:
+                        actions.append(place_result)
+                        continue
+                
+                # Fallback: treat as website search
                 nav = get_navigation_result(q, fast=True)
                 if nav:
-                    # For SEARCH actions, just return the link - don't auto-suggest install
-                    # Install suggestions should only come from explicit INSTALL: commands
+                    # For search results, just return the link
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
                 else:
                     url = f"https://duckduckgo.com/?q=!ducky+{q}"
