@@ -168,7 +168,7 @@ def ensure_fast_model():
                     request_id: Used to cancel old requests when new ones arrive
                     """
                     text = self.tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
+                        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
                     )
                     
                     logging.info(f"[DEBUG] Chat template input:\n{text[:200]}...")
@@ -342,7 +342,7 @@ def ensure_main_model():
                     def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, **kwargs):
                         # Convert messages to text/inputs
                         # This is a simplified wrapper.
-                        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
                         
                         # Handle images if present in messages (needs complex parsing)
                         # For now, let's assume text-only or simple image structure
