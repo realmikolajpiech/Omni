@@ -301,61 +301,63 @@ Examples:
 
                 q = line.split("SEARCH:")[1].strip()
                 
-                # Check query indicators for PERSON/PLACE
-                person_indicators = ["who is", "biography", "born", "founder", "actor", "musician", "president", "author"]
-                is_person_query = any(indicator in query.lower() for indicator in person_indicators)
-                
-                place_indicators = ["where is", "location of", "find", "city", "country", "capital", "near", "address"]
-                is_place_query = any(indicator in query.lower() for indicator in place_indicators)
-                
                 # Get search results to analyze
                 from src.services.search.web_search import search_api
                 results = search_api(q, categories='general', fast=True)
                 logging.info(f"[DEBUG] Got {len(results) if results else 0} raw search results for: '{q}'")
+                
                 if results:
-                    logging.info(f"[DEBUG] Top result: {results[0].get('url', 'N/A')[:100]} - {results[0].get('title', 'N/A')[:100]}")
-                
-                # Try person detection from query
-                if is_person_query:
-                    person_result = get_person_result(q)
-                    if person_result:
-                        logging.info(f"[DEBUG] Query indicator matched PERSON for: {q}")
-                        actions.append(person_result)
-                        continue
-                
-                # Try place detection from query
-                if is_place_query:
-                    place_result = get_place_result(q)
-                    if place_result:
-                        logging.info(f"[DEBUG] Query indicator matched PLACE for: {q}")
-                        actions.append(place_result)
-                        continue
-                
-                # Smart detection from search results
-                if results:
-                    first_result = results[0]
-                    url = first_result.get('url', '').lower()
-                    title = first_result.get('title', '').lower()
-                    snippet = first_result.get('content', '') + " " + first_result.get('snippet', '')
-                    snippet = snippet.lower()
+                    # Build context from top 3 results
+                    context = "Search results:\n"
+                    for i, res in enumerate(results[:3], 1):
+                        context += f"{i}. URL: {res.get('url', 'N/A')}\n"
+                        context += f"   Title: {res.get('title', 'N/A')}\n"
+                        context += f"   Content: {res.get('content', res.get('snippet', 'N/A'))[:200]}\n"
                     
-                    # Check if results suggest PERSON
-                    person_keywords = ["wikipedia.org/wiki/", "grokipedia.com", "biography", "born ", "died ", "author", "actor", "musician", "president"]
-                    if any(kw in url for kw in person_keywords) or any(kw in snippet for kw in ["was born", "biography of", "known for"]):
-                        logging.info(f"[DEBUG] Result analysis detected PERSON for: {q}")
-                        person_result = get_person_result(q)
-                        if person_result:
-                            actions.append(person_result)
-                            continue
+                    logging.info(f"[DEBUG] Sending search results to fast model for classification:\n{context[:300]}")
                     
-                    # Check if results suggest PLACE
-                    place_keywords = ["wikipedia.org/wiki/", "maps.google.com", "location", "city", "country", "address"]
-                    if any(kw in url for kw in place_keywords) or any(kw in snippet for kw in ["located in", "coordinates", "city in"]):
-                        logging.info(f"[DEBUG] Result analysis detected PLACE for: {q}")
-                        place_result = get_place_result(q)
-                        if place_result:
-                            actions.append(place_result)
-                            continue
+                    # Use fast model to classify the results
+                    classify_messages = [
+                        {
+                            "role": "system",
+                            "content": """Analyze the search results and classify what the query is about.
+Output ONE answer:
+- PERSON (for biographies, people, actors, musicians, historical figures)
+- PLACE (for locations, cities, countries, addresses, landmarks)  
+- SEARCH (for general topics, products, concepts, websites)
+
+Be strict: only use PERSON if clearly a biography/person, only PLACE if clearly a location."""
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Query: {query}\n\n{context}\n\nWhat type is this?"
+                        }
+                    ]
+                    
+                    try:
+                        classification = model_manager.fast_model.create_chat_completion(
+                            messages=classify_messages, max_tokens=16, temperature=0.0, request_id=request_id
+                        )
+                        classification_text = classification['choices'][0]['message']['content'].strip().upper()
+                        logging.info(f"[DEBUG] Fast model classification result: {classification_text}")
+                        
+                        # Act on classification
+                        if "PERSON" in classification_text:
+                            logging.info(f"[DEBUG] Classification: PERSON - getting person result for: {q}")
+                            person_result = get_person_result(q)
+                            if person_result:
+                                actions.append(person_result)
+                                continue
+                        
+                        elif "PLACE" in classification_text:
+                            logging.info(f"[DEBUG] Classification: PLACE - getting place result for: {q}")
+                            place_result = get_place_result(q)
+                            if place_result:
+                                actions.append(place_result)
+                                continue
+                    
+                    except Exception as e:
+                        logging.error(f"[DEBUG] Classification failed: {e}")
                 
                 # Fallback: treat as website search
                 nav = get_navigation_result(q, fast=True)
