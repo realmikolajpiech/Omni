@@ -29,17 +29,6 @@ COMMON_APPS = {
     'telegram': 'https://telegram.org',
     'slack': 'https://slack.com',
     'notion': 'https://notion.so',
-    'pornhub': 'https://pornhub.com',
-    'xvideos': 'https://xvideos.com',
-    'amazon': 'https://amazon.com',
-    'ebay': 'https://ebay.com',
-    'google': 'https://google.com',
-    'bing': 'https://bing.com',
-    'chat': 'https://chatgpt.com',
-    'chatgpt': 'https://chatgpt.com',
-    'claude': 'https://claude.ai',
-    'perplexity': 'https://perplexity.ai',
-    'wikipedia': 'https://wikipedia.org',
 }
 
 def _get_cache_key(query, fast=False):
@@ -89,11 +78,11 @@ def search_api(query, categories='general', fast=False):
     """
     Performs a search using SearXNG (Local + Fallbacks).
     Returns a list of result dictionaries.
-    When fast=True (action bar), uses parallel requests with very short timeout (0.8s).
+    When fast=True (action bar), uses parallel requests with very short timeout (1.2s).
     """
     loc = get_system_location()
-    # Much shorter timeout for fast mode - we try multiple sources in parallel
-    timeout = 0.8 if fast else 6.0
+    # For fast mode: 1.2s gives enough time for parallel requests without being too slow
+    timeout = 1.2 if fast else 6.0
 
     # List of SearXNG instances to try
     # 1. Local (Priority)
@@ -120,11 +109,11 @@ def search_api(query, categories='general', fast=False):
                 try:
                     results = future.result()
                     if results:
-                        if fast:
-                            logging.debug(f"Fast search got results for: '{query}'")
+                        logging.info(f"Fast search got {len(results)} results for: '{query}'")
                         return results
-                except:
-                    pass
+                except Exception as e:
+                    logging.debug(f"Fast search attempt failed: {e}")
+        logging.warning(f"Fast search failed for: '{query}' (all sources timed out or errored)")
         return []
 
     # Non-fast mode: sequential search (existing behavior)
@@ -278,6 +267,7 @@ def get_navigation_result(query, fast=False):
         results = search_api(query, categories='general', fast=fast)
         
         if not results:
+            logging.warning(f"No search results found for: '{query}' (fast={fast})")
             _set_cache_nav(query, None, fast)
             return None
         
@@ -357,6 +347,8 @@ def get_navigation_result(query, fast=False):
             "description": best_res.get('content') or best_res.get('snippet', ' '.strip()),
             "is_likely_app": is_app
         }
+        
+        logging.info(f"Navigation result for '{query}': {result['url']} (is_app={is_app}, fast={fast})")
         
         # Cache the result
         _set_cache_nav(query, result, fast)
