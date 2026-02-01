@@ -288,14 +288,9 @@ def action_endpoint():
                 q = line.split("SEARCH:")[1].strip()
                 nav = get_navigation_result(q, fast=True)
                 if nav:
+                    # For SEARCH actions, just return the link - don't auto-suggest install
+                    # Install suggestions should only come from explicit INSTALL: commands
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
-                    if nav.get('is_likely_app') and not "wiki" in q.lower():
-                         actions.append({
-                            "type": "install",
-                            "name": q,
-                            "website": nav['url'],
-                            "image": None 
-                        })
                 else:
                     url = f"https://duckduckgo.com/?q=!ducky+{q}"
                     actions.append({"type": "link", "url": url, "title": f"Search {q}", "description": "Web Search"})
