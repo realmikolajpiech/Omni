@@ -23,6 +23,7 @@ from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, Smooth
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
                                        RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
+from src.ui.widgets.settings_panel import SettingsPanel
 
 from src.ui.workers.ai_worker import AIWorker
 from src.ui.workers.search_worker import SearchWorker
@@ -118,6 +119,11 @@ class OmniWindow(QWidget):
         
         frame_layout.addWidget(self.content_frame)
 
+        self.settings_panel = SettingsPanel()
+        self.settings_panel.hide()
+        self.settings_panel.back_requested.connect(self.exit_settings_mode)
+        frame_layout.addWidget(self.settings_panel)
+
         self.input_container = QWidget()
         self.input_container.setFixedHeight(84) # Increased height to prevent clipping
         input_layout = QHBoxLayout(self.input_container)
@@ -126,6 +132,7 @@ class OmniWindow(QWidget):
 
         self.logo_label = RotatingLabel()
         self.logo_label.setFixedSize(50, 50)
+        self.logo_label.right_clicked.connect(self.enter_settings_mode)
         logo_pix = QPixmap(LOGO_PATH)
         if not logo_pix.isNull():
             self.logo_label.setPixmap(logo_pix.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -183,6 +190,7 @@ class OmniWindow(QWidget):
 
         self.chat_history = [] 
         self.is_history_mode = False
+        self.is_settings_mode = False
 
         self.apps = self.load_apps()
         self.is_entry_animating = False
@@ -436,6 +444,8 @@ class OmniWindow(QWidget):
         self.raise_()
 
     def adjust_window_height(self, animate=True):
+        if self.is_settings_mode: return
+
         if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
             if hasattr(self, 'anim_group') and self.anim_group:
                 self.anim_group.stop()
@@ -473,6 +483,76 @@ class OmniWindow(QWidget):
                 self.anim.start()
             else:
                 self.setGeometry(self.x(), self.y(), self.width(), new_h)
+
+    def enter_settings_mode(self):
+        if self.is_settings_mode: return
+        self.is_settings_mode = True
+        
+        # Stop any ongoing animations
+        if hasattr(self, 'anim'): self.anim.stop()
+        
+        # Fade out content
+        self.content_frame_effect = QGraphicsOpacityEffect(self.content_frame)
+        self.content_frame.setGraphicsEffect(self.content_frame_effect)
+        
+        self.anim_out = QPropertyAnimation(self.content_frame_effect, b"opacity")
+        self.anim_out.setDuration(200)
+        self.anim_out.setStartValue(1.0)
+        self.anim_out.setEndValue(0.0)
+        self.anim_out.finished.connect(self._switch_to_settings)
+        self.anim_out.start()
+
+    def _switch_to_settings(self):
+        self.content_frame.hide()
+        self.content_frame.setGraphicsEffect(None)
+        
+        self.settings_panel.show()
+        
+        # Resize for settings
+        target_h = 550
+        self.anim.setStartValue(self.geometry())
+        self.anim.setEndValue(QRect(self.x(), self.y(), self.width(), target_h))
+        self.anim.start()
+        
+        # Fade in settings
+        self.settings_effect = QGraphicsOpacityEffect(self.settings_panel)
+        self.settings_panel.setGraphicsEffect(self.settings_effect)
+        
+        self.anim_in = QPropertyAnimation(self.settings_effect, b"opacity")
+        self.anim_in.setDuration(300)
+        self.anim_in.setStartValue(0.0)
+        self.anim_in.setEndValue(1.0)
+        self.anim_in.start()
+
+    def exit_settings_mode(self):
+        # Reverse animation
+        self.settings_effect = QGraphicsOpacityEffect(self.settings_panel)
+        self.settings_panel.setGraphicsEffect(self.settings_effect)
+        
+        self.anim_out = QPropertyAnimation(self.settings_effect, b"opacity")
+        self.anim_out.setDuration(200)
+        self.anim_out.setStartValue(1.0)
+        self.anim_out.setEndValue(0.0)
+        self.anim_out.finished.connect(self._switch_to_content)
+        self.anim_out.start()
+        
+    def _switch_to_content(self):
+        self.settings_panel.hide()
+        self.settings_panel.setGraphicsEffect(None)
+        self.is_settings_mode = False
+        
+        self.content_frame.show()
+        self.adjust_window_height() # Reset height
+        
+        self.content_frame_effect = QGraphicsOpacityEffect(self.content_frame)
+        self.content_frame.setGraphicsEffect(self.content_frame_effect)
+        
+        self.anim_in = QPropertyAnimation(self.content_frame_effect, b"opacity")
+        self.anim_in.setDuration(300)
+        self.anim_in.setStartValue(0.0)
+        self.anim_in.setEndValue(1.0)
+        self.anim_in.finished.connect(lambda: self.content_frame.setGraphicsEffect(None))
+        self.anim_in.start()
 
     def eventFilter(self, obj, event):
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
