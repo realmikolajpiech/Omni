@@ -331,6 +331,8 @@ class StandardItemWidget(QWidget):
         return QSize(660, 72)
 
 class RotatingLabel(QLabel):
+    right_clicked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rotation = 0
@@ -339,6 +341,11 @@ class RotatingLabel(QLabel):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.animate)
         self.is_spinning = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.right_clicked.emit()
+        super().mousePressEvent(event)
 
     def animate(self):
         self._rotation += self.current_speed
