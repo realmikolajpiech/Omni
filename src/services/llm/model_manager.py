@@ -219,11 +219,17 @@ def ensure_fast_model():
                     output_ids = generated[0][input_len:]
                     logging.info(f"[DEBUG] Output token IDs (first 20): {output_ids[:20]}")
                     
+                    # First decode WITH special tokens to see what we got
+                    output_text_with_special = self.tokenizer.decode(
+                        output_ids, skip_special_tokens=False
+                    )
+                    logging.info(f"[DEBUG] Raw output WITH special tokens: {repr(output_text_with_special[:300])}")
+                    
                     output_text = self.tokenizer.decode(
                         output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
                     )
                     
-                    logging.info(f"[DEBUG] Raw decoded output: '{output_text[:200]}'")
+                    logging.info(f"[DEBUG] Raw decoded output (special filtered): '{output_text[:200]}'")
                     
                     completion_tokens = len(output_ids)
 

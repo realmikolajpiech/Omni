@@ -176,30 +176,9 @@ def action_endpoint():
         return jsonify({"actions": [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]})
 
     # 2. LLM Inference
-    # Use "system" role to enforce NO thinking
-    system_prompt = """You are a Command Extractor.
-Task: Convert User Query into ONE command.
-
-Commands:
-- PERSON:[Name]
-- PLACE:[Name]
-- OPEN:[URL]
-- OPEN_APP:[AppName]
-- INSTALL:[App]
-- SEARCH:[Query]
-- IGNORE
-
-Rules:
-1. Output ONLY the command. No thinking.
-2. Default to SEARCH:[Query].
-
-Examples:
-open youtube -> OPEN:https://youtube.com
-who is elon -> PERSON:Elon Musk
-install firefox -> INSTALL:firefox
-search kittens -> SEARCH:kittens
-"""
-    user_prompt = f"Query: {query}\nOutput:"
+    # Use simpler, more direct prompts for small models
+    system_prompt = "Extract command from query. Output only: PERSON:Name, PLACE:Name, OPEN:url, OPEN_APP:name, INSTALL:name, SEARCH:query, or IGNORE"
+    user_prompt = query
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -262,6 +241,11 @@ search kittens -> SEARCH:kittens
             logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
         finally:
             model_manager.fast_lock.release()
+
+        # Fallback: if output is empty, default to search
+        if not result_text or not result_text.strip():
+            logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
+            result_text = f"SEARCH:{query}"
 
         actions = []
         for line in result_text.split('\n'):
