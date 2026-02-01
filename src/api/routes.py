@@ -176,9 +176,9 @@ def action_endpoint():
         return jsonify({"actions": [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]})
 
     # 2. LLM Inference
-    # Use simpler, more direct prompts for small models
-    system_prompt = "Extract command from query. Output only: PERSON:Name, PLACE:Name, OPEN:url, OPEN_APP:name, INSTALL:name, SEARCH:query, or IGNORE"
-    user_prompt = query
+    # Use clearer, example-based prompts for small models
+    system_prompt = "You extract commands from user queries. Examples: 'youtube' → SEARCH:youtube, 'open google' → OPEN:google.com, 'install chrome' → INSTALL:chrome"
+    user_prompt = f"Query: {query}\nCommand:"
 
     messages = [
         {"role": "system", "content": system_prompt},
