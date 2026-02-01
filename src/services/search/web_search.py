@@ -3,10 +3,33 @@ import logging
 from src.core.config import SEARXNG_URL
 from src.services.system.location import get_system_location, get_ip_location
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Simple in-memory cache for navigation results (TTL: 5 minutes)
 _nav_cache = {}
 _cache_ttl = 300
+
+# Common app/service mappings for instant lookup
+COMMON_APPS = {
+    'spotify': 'https://spotify.com',
+    'youtube': 'https://youtube.com',
+    'netflix': 'https://netflix.com',
+    'instagram': 'https://instagram.com',
+    'facebook': 'https://facebook.com',
+    'twitter': 'https://twitter.com',
+    'x': 'https://x.com',
+    'tiktok': 'https://tiktok.com',
+    'discord': 'https://discord.com',
+    'twitch': 'https://twitch.tv',
+    'reddit': 'https://reddit.com',
+    'gmail': 'https://gmail.com',
+    'github': 'https://github.com',
+    'linkedin': 'https://linkedin.com',
+    'whatsapp': 'https://whatsapp.com',
+    'telegram': 'https://telegram.org',
+    'slack': 'https://slack.com',
+    'notion': 'https://notion.so',
+}
 
 def _get_cache_key(query, fast=False):
     return f"{query.lower()}_{fast}"
@@ -28,14 +51,38 @@ def _set_cache_nav(query, result, fast=False):
     key = _get_cache_key(query, fast)
     _nav_cache[key] = (result, time.time())
 
+def _search_single_url(url, query, timeout, location='en'):
+    """Search a single URL and return results."""
+    try:
+        if not url or not url.startswith("http"):
+            return None
+        
+        params = {
+            'q': query,
+            'format': 'json',
+            'categories': 'general',
+            'language': location
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        }
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get('results', [])
+    except:
+        pass
+    return None
+
 def search_api(query, categories='general', fast=False):
     """
     Performs a search using SearXNG (Local + Fallbacks).
     Returns a list of result dictionaries.
-    When fast=True (action bar), tries only local + 1 fallback with short timeout.
+    When fast=True (action bar), uses parallel requests with very short timeout (0.8s).
     """
     loc = get_system_location()
-    timeout = 2.0 if fast else 6.0
+    # Much shorter timeout for fast mode - we try multiple sources in parallel
+    timeout = 0.8 if fast else 6.0
 
     # List of SearXNG instances to try
     # 1. Local (Priority)
@@ -54,8 +101,22 @@ def search_api(query, categories='general', fast=False):
     ]
     urls.extend(fallback_urls)
     if fast:
-        urls = urls[:2]  # local + 1 fallback only
+        urls = urls[:3]  # Try local + 2 fallbacks in parallel
+        # Use ThreadPoolExecutor to try multiple sources in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(_search_single_url, url, query, timeout, loc) for url in urls]
+            for future in as_completed(futures):
+                try:
+                    results = future.result()
+                    if results:
+                        if fast:
+                            logging.debug(f"Fast search got results for: '{query}'")
+                        return results
+                except:
+                    pass
+        return []
 
+    # Non-fast mode: sequential search (existing behavior)
     for url in urls:
         try:
             # Skip invalid URLs (e.g. if config is empty)
@@ -183,7 +244,20 @@ def perform_web_search(query):
         return f"Search failed: {str(e)}"
 
 def get_navigation_result(query, fast=False):
-    # Check cache first
+    # Check for common apps first (instant!)
+    query_lower = query.lower().strip()
+    if query_lower in COMMON_APPS:
+        result = {
+            "url": COMMON_APPS[query_lower],
+            "title": query.title(),
+            "description": f"Official {query.title()} website",
+            "is_likely_app": True
+        }
+        logging.info(f"Found common app: {query}")
+        _set_cache_nav(query, result, fast)
+        return result
+    
+    # Check cache next
     cached = _get_cached_nav(query, fast)
     if cached is not None:
         return cached
