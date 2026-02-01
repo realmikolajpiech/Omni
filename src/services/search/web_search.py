@@ -2,6 +2,31 @@ import requests
 import logging
 from src.core.config import SEARXNG_URL
 from src.services.system.location import get_system_location, get_ip_location
+import time
+
+# Simple in-memory cache for navigation results (TTL: 5 minutes)
+_nav_cache = {}
+_cache_ttl = 300
+
+def _get_cache_key(query, fast=False):
+    return f"{query.lower()}_{fast}"
+
+def _get_cached_nav(query, fast=False):
+    """Get cached navigation result if available and not expired."""
+    key = _get_cache_key(query, fast)
+    if key in _nav_cache:
+        cached_data, timestamp = _nav_cache[key]
+        if time.time() - timestamp < _cache_ttl:
+            logging.debug(f"Returning cached nav result for: '{query}'")
+            return cached_data
+        else:
+            del _nav_cache[key]  # Expired
+    return None
+
+def _set_cache_nav(query, result, fast=False):
+    """Cache navigation result."""
+    key = _get_cache_key(query, fast)
+    _nav_cache[key] = (result, time.time())
 
 def search_api(query, categories='general', fast=False):
     """
@@ -158,11 +183,18 @@ def perform_web_search(query):
         return f"Search failed: {str(e)}"
 
 def get_navigation_result(query, fast=False):
+    # Check cache first
+    cached = _get_cached_nav(query, fast)
+    if cached is not None:
+        return cached
+    
     try:
         # Fetch more results to allow ranking. fast=True: short timeout, few URLs (for action bar).
         results = search_api(query, categories='general', fast=fast)
         
-        if not results: return None
+        if not results:
+            _set_cache_nav(query, None, fast)
+            return None
         
         # Ranking Logic
         best_score = -1
@@ -234,14 +266,21 @@ def get_navigation_result(query, fast=False):
             if any(k in text for k in neg_keywords):
                 is_app = False
                 
-        return {
+        result = {
             "url": best_res.get('url'),
             "title": best_res.get('title', 'Link'),
             "description": best_res.get('content') or best_res.get('snippet', ' '.strip()),
             "is_likely_app": is_app
         }
+        
+        # Cache the result
+        _set_cache_nav(query, result, fast)
+        return result
     except Exception as e:
         logging.error(f"Nav Error: {e}")
+    
+    # Cache the None result too
+    _set_cache_nav(query, None, fast)
     return None
 
 def get_person_result(name):
