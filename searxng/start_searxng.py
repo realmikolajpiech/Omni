@@ -37,8 +37,12 @@ def main():
         env['SEARXNG_SETTINGS_PATH'] = settings_path
         print(f"Using settings file: {settings_path}")
     
-    # Command to start the webapp with explicit host and port
-    cmd = [sys.executable, '-m', 'searx.webapp', '--host', '127.0.0.1', '--port', '8080']
+    # Command to start the webapp
+    cmd = [sys.executable, '-m', 'searx.webapp']
+    
+    # Set environment variables for SearXNG
+    env['SEARXNG_PORT'] = '8080'
+    env['SEARXNG_BIND_ADDRESS'] = '127.0.0.1'
     
     print("Starting SearXNG locally...")
     print(f"Command: {' '.join(cmd)}")
