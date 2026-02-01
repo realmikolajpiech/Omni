@@ -75,8 +75,21 @@ def search_endpoint():
 
 @api_bp.route('/action', methods=['POST'])
 def action_endpoint():
-    # Reset abort event for this new request
-    model_manager.abort_fast_event.clear()
+    # Create a unique request ID
+    import uuid
+    request_id = str(uuid.uuid4())
+    
+    global current_fast_request_id
+    
+    # Set this as the current request and signal any old requests to abort
+    with model_manager.fast_queue_lock:
+        old_request_id = model_manager.current_fast_request_id
+        model_manager.current_fast_request_id = request_id
+        
+        # Signal the old request to abort
+        if old_request_id is not None:
+            logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
+            model_manager.abort_fast_event.set()
     
     model_manager.ensure_fast_model()
 
@@ -86,7 +99,7 @@ def action_endpoint():
     query = req.get('query', "").strip()
     if not query: return jsonify({"actions": []})
 
-    logging.info(f"Action endpoint received query: '{query}'")
+    logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
     
     # 1. Shortcuts
     if query.lower() in COMMON_SHORTCUTS:
@@ -190,7 +203,7 @@ search kittens -> SEARCH:kittens
     ]
 
     try:
-        logging.info(f"Starting Fast Model inference for: '{query}'")
+        logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
         # Use a timeout for the lock to prevent permanent deadlocks
         # If we can't get the lock in 5 seconds, it's likely stuck or very busy.
         if not model_manager.fast_lock.acquire(timeout=5.0):
@@ -198,6 +211,11 @@ search kittens -> SEARCH:kittens
              return jsonify({"actions": [], "error": "Fast model busy"})
 
         try:
+            # Check if this request was already cancelled
+            if model_manager.current_fast_request_id != request_id:
+                logging.info(f"Request {request_id} was cancelled before starting")
+                return jsonify({"actions": []})
+            
             if not model_manager.fast_model:
                  logging.error("Fast model is not loaded after ensure_fast_model() call.")
                  return jsonify({"actions": [], "error": "Fast model not loaded"})
@@ -215,11 +233,16 @@ search kittens -> SEARCH:kittens
             except: pass
 
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages, max_tokens=256, temperature=0.0
+                messages=messages, max_tokens=64, temperature=0.0, request_id=request_id
             )
             
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            
+            # Check if this request was cancelled during inference
+            if model_manager.current_fast_request_id != request_id:
+                logging.info(f"Request {request_id} was cancelled during inference")
+                return jsonify({"actions": []})
             
             end_t = time.time()
             dur = end_t - start_t
@@ -263,8 +286,8 @@ search kittens -> SEARCH:kittens
                 fact = line.split("FORGET:")[1].strip()
                 delete_memory(fact)
             elif "SEARCH:" in line:
-                if model_manager.abort_fast_event.is_set():
-                    logging.info("Fast Action Aborted (Main Model requested).")
+                if model_manager.current_fast_request_id != request_id:
+                    logging.info(f"Fast Action Aborted (request {request_id} cancelled by newer request).")
                     return jsonify({"actions": []})
 
                 q = line.split("SEARCH:")[1].strip()

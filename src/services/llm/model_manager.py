@@ -29,6 +29,11 @@ main_lock = threading.Lock()
 fast_lock = threading.Lock()
 abort_fast_event = threading.Event()
 
+# Fast model request queue for cancellation
+current_fast_request_id = None
+fast_request_queue = []
+fast_queue_lock = threading.Lock()
+
 def download_file(url, dest_path):
     logging.info(f"Downloading {url} to {dest_path}...")
     try:
@@ -68,8 +73,7 @@ def ensure_fast_model():
             if cuda_ok:
                 logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
 
-            # Use bfloat16 for Ampere+ GPUs (RTX 30 series) for better stability/speed
-            # Fallback to float16 for older GPUs or float32 for CPU
+            # Use bfloat16 for Ampere+ GPUs (RTX 30 series) for best speed
             if cuda_ok:
                 props = torch.cuda.get_device_properties(0)
                 if props.major >= 8: # Ampere or newer
@@ -92,7 +96,7 @@ def ensure_fast_model():
                     torch.backends.cuda.matmul.allow_tf32 = True
                     torch.backends.cudnn.allow_tf32 = True
 
-                # Use device_map="cuda:0" for better integration with transformers
+                # Try flash_attention_2 first for maximum speed
                 try:
                     model = AutoModelForCausalLM.from_pretrained(
                         FAST_MODEL_HF_ID,
@@ -114,33 +118,19 @@ def ensure_fast_model():
                         low_cpu_mem_usage=True
                     )
                 
-                # Force conversion to dtype to avoid "float != struct c10::BFloat16" errors
-                # some components (like rotary embeddings) might stay in float32
+                # Force conversion to dtype
                 if cuda_ok:
                     model = model.to(dtype=dtype, device="cuda:0")
                 
-                model.eval() # Ensure eval mode
-                
-                # Enable gradient checkpointing to reduce memory but keep speed for inference
-                # (actually skip this for inference since we don't need gradients)
-                
-                # Try to compile the model for faster inference (torch 2.0+)
-                try:
-                    if cuda_ok and hasattr(torch, 'compile'):
-                        logging.info("Compiling fast model with torch.compile()...")
-                        model = torch.compile(model, mode="reduce-overhead")
-                        logging.info("Fast model compiled successfully.")
-                except Exception as compile_err:
-                    logging.warning(f"torch.compile failed: {compile_err}")
+                model.eval()
                 
                 # Warmup inference to initialize CUDA kernels
                 if cuda_ok:
                     logging.info("Warming up fast model...")
-                    # Ensure the warmup input matches the model's device
-                    warmup_input = tokenizer("Warmup", return_tensors="pt").to("cuda:0")
+                    warmup_input = tokenizer("Hi", return_tensors="pt").to("cuda:0")
                     with torch.inference_mode():
-                        model.generate(**warmup_input, max_new_tokens=5)
-                    torch.cuda.synchronize()  # Ensure CUDA operations complete
+                        model.generate(**warmup_input, max_new_tokens=2)
+                    torch.cuda.synchronize()
                     logging.info("Fast model warmup complete.")
             except Exception as oom:
                 if cuda_ok and "out of memory" in str(oom).lower():
@@ -172,7 +162,11 @@ def ensure_fast_model():
                 def reset(self):
                     pass
 
-                def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, **kwargs):
+                def create_chat_completion(self, messages, max_tokens=128, temperature=0.0, request_id=None, **kwargs):
+                    """
+                    Create chat completion. Will check abort_fast_event frequently to allow cancellation.
+                    request_id: Used to cancel old requests when new ones arrive
+                    """
                     text = self.tokenizer.apply_chat_template(
                         messages, tokenize=False, add_generation_prompt=True
                     )
@@ -181,31 +175,37 @@ def ensure_fast_model():
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
                     input_len = inputs.input_ids.shape[1]
 
-                    # Greedy when temperature=0 for speed; otherwise sample
+                    # Always use greedy decoding for speed when temperature is 0
                     do_sample = temperature > 0
                     
-                    # Abortion support via StoppingCriteria
+                    # Abortion support via StoppingCriteria - checks on every token
                     from transformers import StoppingCriteria, StoppingCriteriaList
                     class AbortCriteria(StoppingCriteria):
+                        def __init__(self, request_id):
+                            self.request_id = request_id
+                            self.check_count = 0
+                        
                         def __call__(self, input_ids, scores, **kwargs):
-                            return abort_fast_event.is_set()
+                            self.check_count += 1
+                            # Check abort every token
+                            if abort_fast_event.is_set():
+                                return True
+                            # Also check if this request is still current
+                            global current_fast_request_id
+                            if self.request_id is not None and current_fast_request_id != self.request_id:
+                                return True
+                            return False
 
                     gen_kw = dict(
                         max_new_tokens=max_tokens,
                         do_sample=do_sample,
                         pad_token_id=self.tokenizer.eos_token_id,
-                        use_cache=True,  # Explicitly enable KV cache
-                        stopping_criteria=StoppingCriteriaList([AbortCriteria()]),
+                        use_cache=True,  # KV cache for speed
+                        stopping_criteria=StoppingCriteriaList([AbortCriteria(request_id)]),
                     )
                     
-                    # Only add sampling parameters if do_sample is True
                     if do_sample:
                         gen_kw["temperature"] = temperature
-                        # top_k and top_p are often not supported by all models
-                        # gen_kw["top_p"] = 0.95
-                    else:
-                        # Use greedy decoding for deterministic output
-                        gen_kw["num_beams"] = 1
 
                     with torch.inference_mode():
                         generated = self.model.generate(**inputs, **gen_kw)
@@ -218,7 +218,7 @@ def ensure_fast_model():
 
                     # Strip input echo if present
                     if output_text.startswith(text[: min(80, len(text))]):
-                        pass  # full echo unlikely at input_len; decoded part is reply
+                        pass
                     if "assistant\n" in output_text:
                         output_text = output_text.split("assistant\n", 1)[-1].strip()
 
@@ -230,7 +230,7 @@ def ensure_fast_model():
                     }
 
             fast_model = FastTransformersWrapper(model, tokenizer)
-            init_error = None # Clear any previous error on success
+            init_error = None
             logging.info("Fast Model Loaded (Transformers).")
         except Exception as e:
             logging.error(f"Fast Model Load Error: {e}")
