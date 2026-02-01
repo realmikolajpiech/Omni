@@ -42,7 +42,7 @@ FIND_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/find_package"
 PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"
 VERIFY_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/verify_package"
 
-SEARXNG_URL = "http://127.0.0.1:8888/search"
+SEARXNG_URL = "http://127.0.0.1:8080/search"
 
 # IPC
 IPC_PORT = 5556
