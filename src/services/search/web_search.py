@@ -29,6 +29,17 @@ COMMON_APPS = {
     'telegram': 'https://telegram.org',
     'slack': 'https://slack.com',
     'notion': 'https://notion.so',
+    'pornhub': 'https://pornhub.com',
+    'xvideos': 'https://xvideos.com',
+    'amazon': 'https://amazon.com',
+    'ebay': 'https://ebay.com',
+    'google': 'https://google.com',
+    'bing': 'https://bing.com',
+    'chat': 'https://chatgpt.com',
+    'chatgpt': 'https://chatgpt.com',
+    'claude': 'https://claude.ai',
+    'perplexity': 'https://perplexity.ai',
+    'wikipedia': 'https://wikipedia.org',
 }
 
 def _get_cache_key(query, fast=False):
