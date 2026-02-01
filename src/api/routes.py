@@ -91,6 +91,10 @@ def action_endpoint():
             logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
             model_manager.abort_fast_event.set()
     
+    # Clear abort event for this new request to proceed
+    # (set() was only for cancelling the old request)
+    model_manager.abort_fast_event.clear()
+    
     model_manager.ensure_fast_model()
 
     try: req = request.get_json(force=True)
