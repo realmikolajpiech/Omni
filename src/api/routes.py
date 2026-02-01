@@ -344,11 +344,70 @@ Examples:
                         
                         # Act on model decision only - no keyword overrides
                         if first_word == "PERSON":
-                            logging.info(f"[DEBUG] Model chose PERSON for: {q}")
-                            person_result = get_person_result(q)
-                            if person_result:
-                                actions.append(person_result)
+                            logging.info(f"[DEBUG] Model chose PERSON - fast model will write the card from search results")
+                            # Have fast model write the card (name + description) from search results, not raw copy-paste
+                            write_messages = [
+                                {
+                                    "role": "system",
+                                    "content": "Based on the search results, write a short person card. Output exactly two lines:\nNAME: [person's full name only, nothing else]\nDESCRIPTION: [1-2 sentences summarizing who they are, in the same language as the results. No URLs, no 'source:', no raw snippets.]"
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Search results about: {query}\n\n{context}\n\nWrite the person card:"
+                                }
+                            ]
+                            try:
+                                write_out = model_manager.fast_model.create_chat_completion(
+                                    messages=write_messages, max_tokens=120, temperature=0.3, request_id=request_id
+                                )
+                                card_text = write_out['choices'][0]['message']['content'].strip()
+                                logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
+                                # Parse NAME: and DESCRIPTION:
+                                person_name = q
+                                person_desc = ""
+                                for part in card_text.split("\n"):
+                                    part = part.strip()
+                                    if not part:
+                                        continue
+                                    if part.upper().startswith("NAME:"):
+                                        person_name = part.split(":", 1)[1].strip()
+                                    elif part.upper().startswith("DESCRIPTION:"):
+                                        person_desc = part.split(":", 1)[1].strip()
+                                if not person_desc:
+                                    # Fallback: use rest of card as description (skip first line if it looks like name)
+                                    lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                                    if len(lines) >= 2:
+                                        person_desc = " ".join(lines[1:])
+                                    elif lines:
+                                        person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
+                                if not person_name or person_name == q:
+                                    # Use first result title to extract name if model didn't
+                                    first_title = results[0].get('title', '')
+                                    person_name = first_title.split('|')[0].split('–')[0].strip() or q
+                                # URL from first result
+                                first_url = results[0].get('url', '')
+                                # Optional: get image
+                                img_url = None
+                                try:
+                                    img_results = search_api(person_name, categories='images')
+                                    if img_results:
+                                        img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
+                                except Exception:
+                                    pass
+                                actions.append({
+                                    "type": "person",
+                                    "name": person_name or q,
+                                    "description": person_desc or results[0].get('content', results[0].get('snippet', ''))[:200],
+                                    "url": first_url,
+                                    "image": img_url
+                                })
                                 continue
+                            except Exception as e:
+                                logging.error(f"[DEBUG] Person card generation failed: {e}, falling back to get_person_result")
+                                person_result = get_person_result(q)
+                                if person_result:
+                                    actions.append(person_result)
+                                    continue
                         
                         elif first_word == "PLACE":
                             logging.info(f"[DEBUG] Model chose PLACE for: {q}")
