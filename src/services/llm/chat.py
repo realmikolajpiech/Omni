@@ -284,7 +284,7 @@ Output:"""
              if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
              f_out = model_manager.fast_model.create_chat_completion(
                  messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
-                 max_tokens=64, temperature=0.0
+                 max_tokens=256, temperature=0.0
              )
              f_res = f_out['choices'][0]['message']['content'].strip()
              

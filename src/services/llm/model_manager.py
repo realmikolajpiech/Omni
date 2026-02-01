@@ -171,9 +171,13 @@ def ensure_fast_model():
                         messages, tokenize=False, add_generation_prompt=True
                     )
                     
+                    logging.info(f"[DEBUG] Chat template input:\n{text[:200]}...")
+                    
                     # Ensure inputs are on the same device as the model
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
                     input_len = inputs.input_ids.shape[1]
+                    
+                    logging.info(f"[DEBUG] Input tokens: {input_len}, device: {inputs.input_ids.device}")
 
                     # Always use greedy decoding for speed when temperature is 0
                     do_sample = temperature > 0
@@ -210,10 +214,17 @@ def ensure_fast_model():
                     with torch.inference_mode():
                         generated = self.model.generate(**inputs, **gen_kw)
                     
+                    logging.info(f"[DEBUG] Generated shape: {generated.shape}")
+                    
                     output_ids = generated[0][input_len:]
+                    logging.info(f"[DEBUG] Output token IDs (first 20): {output_ids[:20]}")
+                    
                     output_text = self.tokenizer.decode(
                         output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
                     )
+                    
+                    logging.info(f"[DEBUG] Raw decoded output: '{output_text[:200]}'")
+                    
                     completion_tokens = len(output_ids)
 
                     # Strip input echo if present
@@ -221,6 +232,8 @@ def ensure_fast_model():
                         pass
                     if "assistant\n" in output_text:
                         output_text = output_text.split("assistant\n", 1)[-1].strip()
+                    
+                    logging.info(f"[DEBUG] Final output after processing: '{output_text[:200]}'")
 
                     return {
                         "choices": [{
