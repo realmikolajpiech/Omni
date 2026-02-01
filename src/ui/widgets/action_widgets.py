@@ -1,5 +1,6 @@
 import os
 import threading
+import logging
 import requests
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
