@@ -3,13 +3,15 @@ import logging
 from src.core.config import SEARXNG_URL
 from src.services.system.location import get_system_location, get_ip_location
 
-def search_api(query, categories='general'):
+def search_api(query, categories='general', fast=False):
     """
     Performs a search using SearXNG (Local + Fallbacks).
     Returns a list of result dictionaries.
+    When fast=True (action bar), tries only local + 1 fallback with short timeout.
     """
     loc = get_system_location()
-    
+    timeout = 2.0 if fast else 6.0
+
     # List of SearXNG instances to try
     # 1. Local (Priority)
     # 2. Public Fallbacks (in case local is down/not installed)
@@ -26,13 +28,18 @@ def search_api(query, categories='general'):
         "https://search.ononoki.org/search"
     ]
     urls.extend(fallback_urls)
+    if fast:
+        urls = urls[:2]  # local + 1 fallback only
 
     for url in urls:
         try:
             # Skip invalid URLs (e.g. if config is empty)
             if not url or not url.startswith("http"): continue
 
-            logging.info(f"Searching {url} for: '{query}' (Loc: {loc}, Cats: {categories})")
+            if fast:
+                logging.debug(f"Searching {url} for: '{query}' (fast)")
+            else:
+                logging.info(f"Searching {url} for: '{query}' (Loc: {loc}, Cats: {categories})")
             params = {
                 'q': query,
                 'format': 'json',
@@ -44,7 +51,7 @@ def search_api(query, categories='general'):
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': url
             }
-            resp = requests.get(url, params=params, headers=headers, timeout=6.0)
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -54,10 +61,15 @@ def search_api(query, categories='general'):
                 # No, empty means no results found for query.
                 return results
             else:
-                logging.warning(f"Search failed at {url} with status {resp.status_code}")
+                if fast:
+                    logging.debug(f"Search failed at {url} with status {resp.status_code}")
+                else:
+                    logging.warning(f"Search failed at {url} with status {resp.status_code}")
         except Exception as e:
-            # Connection errors, timeouts, etc.
-            logging.error(f"Search API Error ({url}): {e}")
+            if fast:
+                logging.debug(f"Search API Error ({url}): {e}")
+            else:
+                logging.error(f"Search API Error ({url}): {e}")
             continue
             
     return []
@@ -145,10 +157,10 @@ def perform_web_search(query):
     except Exception as e:
         return f"Search failed: {str(e)}"
 
-def get_navigation_result(query):
+def get_navigation_result(query, fast=False):
     try:
-        # Fetch more results to allow ranking
-        results = search_api(query, categories='general')
+        # Fetch more results to allow ranking. fast=True: short timeout, few URLs (for action bar).
+        results = search_api(query, categories='general', fast=fast)
         
         if not results: return None
         

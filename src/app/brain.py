@@ -25,4 +25,4 @@ if __name__ == "__main__":
     import threading
     threading.Thread(target=ensure_model_loaded).start()
     
-    app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False)
+    app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)

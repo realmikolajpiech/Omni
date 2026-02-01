@@ -12,7 +12,9 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Models
-FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"
+# Fast model: transformers (HF) for low-latency intents/actions
+FAST_MODEL_HF_ID = "Qwen/Qwen3-0.6B"
+FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"  # legacy / fallback
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
 FAST_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 
@@ -53,6 +55,7 @@ LOGO_PATH = os.path.join(PROJECT_ROOT, "assets", "omni.png")
 # Shortcuts
 COMMON_SHORTCUTS = {
     "yt": "https://www.youtube.com",
+    "youtube": "https://www.youtube.com",
     "gh": "https://github.com",
     "x": "https://x.com",
     "red": "https://reddit.com",

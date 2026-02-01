@@ -196,9 +196,12 @@ class OmniWindow(QWidget):
         self.action_worker = None
         self.ai_worker = None
 
+        self.external_actions = []
+        self.external_search_results = []
+
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
-        self.debounce_timer.setInterval(400)
+        self.debounce_timer.setInterval(650)
         self.debounce_timer.timeout.connect(self.trigger_async_searches)
 
         # Start IPC Listener
@@ -613,10 +616,16 @@ class OmniWindow(QWidget):
             return
         
         if not text.strip():
+            self.external_actions = []
+            self.external_search_results = []
             self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             return
 
+        # Query changed, clear external results until new ones arrive
+        self.external_actions = []
+        self.external_search_results = []
+        
         self.frame.set_minimal_mode(True)
         self.refresh_list(text)
         self.debounce_timer.start()
@@ -624,13 +633,37 @@ class OmniWindow(QWidget):
     def refresh_list(self, query, animate=True):
         if not query:
             self.list_widget.clear()
+            self.external_actions = []
+            self.external_search_results = []
             self.adjust_window_height(animate)
             return
 
         # Calculate new items to display
         new_items_data = [] # List of (key, data, widget_factory_func)
 
-        # 1. Local Apps (Fast)
+        # 1. External Actions (from LLM/Fast Search)
+        for act in self.external_actions:
+            key = self.get_item_key(act)
+            if not key: continue
+            
+            def create_act_widget(a=act):
+                if a.get('type') == 'link':
+                    return LinkActionWidget(a['title'], a['url'], a['description'])
+                elif a.get('type') == 'install':
+                    return InstallActionWidget(a['name'], a.get('website'))
+                elif a.get('type') == 'open_app':
+                    return AppActionWidget(a['name'])
+                elif a.get('type') == 'person':
+                    return PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
+                elif a.get('type') == 'place':
+                    return PlaceActionWidget(a['name'], a['address'], a.get('image'), a.get('url'), a.get('latitude'), a.get('longitude'))
+                elif a.get('type') == 'status':
+                    return StandardItemWidget(a['description'], icon_name="dialog-information")
+                return StandardItemWidget(str(a))
+            
+            new_items_data.append((key, act, create_act_widget))
+
+        # 2. Local Apps (Fast)
         query_lower = query.lower()
         matches = []
         for name, data in self.apps.items():
@@ -649,6 +682,17 @@ class OmniWindow(QWidget):
                 return StandardItemWidget(d['orig_name'], icon_name=icon_path)
             
             new_items_data.append((key, data, create_app_widget))
+
+        # 3. External Search Results (Files)
+        for res in self.external_search_results:
+            if res.get('type') == 'file':
+                data = {"type": "open_file", "path": res['path'], "name": res['name']}
+                key = self.get_item_key(data)
+                
+                def create_file_widget(r=res):
+                    return FileActionWidget(r['name'], r['path'])
+                
+                new_items_data.append((key, data, create_file_widget))
 
         # Always add "Ask Omni" option at the end if there is a query
         if query:
@@ -774,19 +818,20 @@ class OmniWindow(QWidget):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
 
-        # Start Workers
+        # Start Search Worker
         if self.search_worker:
             try: self.search_worker.results_found.disconnect()
             except: pass
-        
+        # DO NOT terminate() - it can cause deadlocks if the worker holds a lock
         self.search_worker = SearchWorker(query)
         self.search_worker.results_found.connect(self.on_search_results)
         self.search_worker.start()
 
+        # Start Action Worker
         if self.action_worker:
             try: self.action_worker.action_found.disconnect()
             except: pass
-
+        # Disconnect any previous workers still running to ignore their results
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
@@ -794,42 +839,14 @@ class OmniWindow(QWidget):
     def on_search_results(self, results, query):
         if self.input_field.text().strip() != query: return
         
-        # Append results
-        for res in results:
-            if res.get('type') == 'file':
-                w = FileActionWidget(res['name'], res['path'])
-                self.add_list_item(w, {"type": "open_file", "path": res['path']})
-        
-        self.adjust_window_height()
+        self.external_search_results = results
+        self.refresh_list(query, animate=False)
 
     def on_action_found(self, actions, query):
         if self.input_field.text().strip() != query: return
         
-        # Insert actions at the top of the list (above apps/Omni)
-        insert_idx = 0
-        for act in actions:
-            if act.get('type') == 'link':
-                w = LinkActionWidget(act['title'], act['url'], act['description'])
-                self.insert_list_item(insert_idx, w, act)
-                insert_idx += 1
-            elif act.get('type') == 'install':
-                w = InstallActionWidget(act['name'], act.get('website'))
-                self.insert_list_item(insert_idx, w, act)
-                insert_idx += 1
-            elif act.get('type') == 'open_app':
-                w = AppActionWidget(act['name'])
-                self.insert_list_item(insert_idx, w, act)
-                insert_idx += 1
-            elif act.get('type') == 'person':
-                w = PersonActionWidget(act['name'], act['description'], act.get('image'), act.get('url'))
-                self.insert_list_item(insert_idx, w, act)
-                insert_idx += 1
-            elif act.get('type') == 'place':
-                w = PlaceActionWidget(act['name'], act['address'], act.get('image'), act.get('url'), act.get('latitude'), act.get('longitude'))
-                self.insert_list_item(insert_idx, w, act)
-                insert_idx += 1
-        
-        self.adjust_window_height()
+        self.external_actions = actions
+        self.refresh_list(query, animate=False)
 
     def on_entered(self, item=None):
         if not item:
@@ -907,19 +924,17 @@ class OmniWindow(QWidget):
         self.debounce_timer.stop()
 
         # Cancel any pending fast search/action requests to prevent race conditions and save resources
-        if self.search_worker and self.search_worker.isRunning():
+        if self.search_worker:
             try: self.search_worker.results_found.disconnect()
             except: pass
-            self.search_worker.terminate()
-            self.search_worker.wait()
-            self.search_worker = None
             
-        if self.action_worker and self.action_worker.isRunning():
+        if self.action_worker:
             try: self.action_worker.action_found.disconnect()
             except: pass
-            self.action_worker.terminate()
-            self.action_worker.wait()
-            self.action_worker = None
+        
+        # Signal workers to abort if they support it
+        import src.services.llm.model_manager as mm
+        mm.abort_fast_event.set()
 
         is_followup = self.is_history_mode
         

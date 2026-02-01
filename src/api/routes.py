@@ -1,6 +1,7 @@
 import time
 import json
 import logging
+import torch
 from flask import Blueprint, request, jsonify
 
 from src.core.config import COMMON_SHORTCUTS
@@ -85,6 +86,8 @@ def action_endpoint():
     query = req.get('query', "").strip()
     if not query: return jsonify({"actions": []})
 
+    logging.info(f"Action endpoint received query: '{query}'")
+    
     # 1. Shortcuts
     if query.lower() in COMMON_SHORTCUTS:
         url = COMMON_SHORTCUTS[query.lower()]
@@ -94,6 +97,7 @@ def action_endpoint():
                 "title": url.replace("https://", "").replace("www.", "").split('/')[0].title(),
                 "description": f"Direct Shortcut"
             }
+        logging.info(f"Shortcut match: {url}")
         return jsonify({"action": act, "actions": [act]})
 
     # 1.5 Brightness Regex
@@ -157,7 +161,7 @@ def action_endpoint():
     # 2. LLM Inference
     # Use "system" role to enforce NO thinking
     system_prompt = """You are a Command Extractor.
-Task: Convert the User Query into a SINGLE command.
+Task: Convert User Query into ONE command.
 
 Commands:
 - PERSON:[Name]
@@ -165,23 +169,18 @@ Commands:
 - OPEN:[URL]
 - OPEN_APP:[AppName]
 - INSTALL:[App]
-- CALC:[Expr]
 - SEARCH:[Query]
-- FORGET:[Fact]
-- BRIGHTNESS:[Level]
 - IGNORE
 
 Rules:
-1. Output ONLY the command.
-2. DO NOT output any thinking, reasoning, or <think> tags.
-3. Default to SEARCH:[Query] if unsure.
+1. Output ONLY the command. No thinking.
+2. Default to SEARCH:[Query].
 
 Examples:
 open youtube -> OPEN:https://youtube.com
 who is elon -> PERSON:Elon Musk
 install firefox -> INSTALL:firefox
 search kittens -> SEARCH:kittens
-hello -> IGNORE
 """
     user_prompt = f"Query: {query}\nOutput:"
 
@@ -191,12 +190,37 @@ hello -> IGNORE
     ]
 
     try:
-        with model_manager.fast_lock:
+        logging.info(f"Starting Fast Model inference for: '{query}'")
+        # Use a timeout for the lock to prevent permanent deadlocks
+        # If we can't get the lock in 5 seconds, it's likely stuck or very busy.
+        if not model_manager.fast_lock.acquire(timeout=5.0):
+             logging.error("Failed to acquire fast_lock after 5 seconds.")
+             return jsonify({"actions": [], "error": "Fast model busy"})
+
+        try:
+            if not model_manager.fast_model:
+                 logging.error("Fast model is not loaded after ensure_fast_model() call.")
+                 return jsonify({"actions": [], "error": "Fast model not loaded"})
+
             start_t = time.time()
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+            
+            # Debug: Check device and ensure GPU
+            try:
+                dev = model_manager.fast_model.model.device
+                if "cpu" in str(dev).lower() and torch.cuda.is_available():
+                    logging.warning(f"Fast model is on CPU ({dev})! Attempting to move to GPU...")
+                    model_manager.fast_model.model.to("cuda:0")
+                    torch.cuda.synchronize()
+            except: pass
+
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages, max_tokens=1024, temperature=0.0
+                messages=messages, max_tokens=256, temperature=0.0
             )
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
             end_t = time.time()
             dur = end_t - start_t
             tok_count = out.get('usage', {}).get('completion_tokens', 0)
@@ -204,11 +228,13 @@ hello -> IGNORE
             logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
             result_text = out['choices'][0]['message']['content'].strip()
             
-            # Remove thinking blocks from Qwen (Fallback cleanup)
+            # Remove thinking blocks from Qwen (Handle unclosed tags too)
             import re
-            result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
+            result_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
             
             logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
+        finally:
+            model_manager.fast_lock.release()
 
         actions = []
         for line in result_text.split('\n'):
@@ -242,7 +268,7 @@ hello -> IGNORE
                     return jsonify({"actions": []})
 
                 q = line.split("SEARCH:")[1].strip()
-                nav = get_navigation_result(q)
+                nav = get_navigation_result(q, fast=True)
                 if nav:
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
                     if nav.get('is_likely_app') and not "wiki" in q.lower():
@@ -315,6 +341,7 @@ hello -> IGNORE
         return jsonify({"actions": actions, "action": actions[0] if actions else None})
 
     except Exception as e:
+        logging.error(f"Error in action_endpoint: {e}")
         return jsonify({"actions": [], "error": str(e)})
 
 @api_bp.route('/install_plan', methods=['POST'])

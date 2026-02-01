@@ -23,7 +23,7 @@ def run_flask():
     """Runs the Flask API server."""
     app = create_app()
     # Run properly
-    app.run(host='127.0.0.1', port=BRAIN_PORT, debug=False, use_reloader=False)
+    app.run(host='127.0.0.1', port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)
 
 def main():
     setup_logging("launcher")

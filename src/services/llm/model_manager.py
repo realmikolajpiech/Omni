@@ -2,8 +2,15 @@ import os
 import logging
 import threading
 import requests
+import torch
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
+except ImportError:
+    logging.warning("transformers not fully installed, some models may not load.")
+
 from src.core.config import (
     FAST_MODEL_PATH, FAST_MODEL_FILENAME, FAST_MODEL_URL,
+    FAST_MODEL_HF_ID,
     MAIN_MODEL_PATH, MAIN_MODEL_FILENAME, MAIN_MODEL_URL,
     MMPROJ_PATH, MMPROJ_URL, MMPROJ_FILENAME,
     DB_PATH
@@ -49,41 +56,182 @@ def ensure_imports():
         return None
 
 def ensure_fast_model():
-    """Loads the smaller, faster model for actions."""
+    """Loads the smaller, faster model for actions (transformers)."""
     global fast_model, init_error
     if fast_model: return
 
-    Llama = ensure_imports()
-    if not Llama: return
-
-    if not os.path.exists(FAST_MODEL_PATH):
-        logging.info("Fast model not found. Downloading...")
-        if not download_file(FAST_MODEL_URL, FAST_MODEL_PATH):
-            init_error = f"Failed to download fast model from {FAST_MODEL_URL}"
-            logging.error(init_error)
-            return
-
-    # Check if we should load (lazy loading optimization)
-    # If the user hasn't typed anything yet, maybe we delay?
-    # But current logic is "ensure_fast_model" is called by routes.
-    
     with fast_lock:
         if fast_model: return
-        logging.info(f"Loading Fast Model: {FAST_MODEL_FILENAME}")
+        logging.info(f"Loading Fast Model (Transformers): {FAST_MODEL_HF_ID}")
         try:
-            # Suppress stdout/stderr from llama.cpp
-            # This is tricky in python, but we can try setting verbose=False which we already do.
-            # We can also redirect C-level stdout if needed, but let's stick to verbose=False.
+            cuda_ok = torch.cuda.is_available()
+            if cuda_ok:
+                logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+
+            # Use bfloat16 for Ampere+ GPUs (RTX 30 series) for better stability/speed
+            # Fallback to float16 for older GPUs or float32 for CPU
+            if cuda_ok:
+                props = torch.cuda.get_device_properties(0)
+                if props.major >= 8: # Ampere or newer
+                    dtype = torch.bfloat16
+                else:
+                    dtype = torch.float16
+            else:
+                dtype = torch.float32
+                
+            logging.info(f"Using dtype: {dtype}")
             
-            fast_model = Llama(
-                model_path=FAST_MODEL_PATH,
-                chat_format="chatml", # Force standard ChatML to bypass Qwen3 thinking
-                n_ctx=8192, # Increased context to avoid warnings (model supports 32k)
-                n_threads=4,
-                n_gpu_layers=-1,
-                verbose=False
-            )
-            logging.info("Fast Model Loaded.")
+            # Use flash_attention_2 if available (fastest), fallback to sdpa
+            attn_implementation = "flash_attention_2" if cuda_ok else "eager"
+            
+            tokenizer = AutoTokenizer.from_pretrained(FAST_MODEL_HF_ID, trust_remote_code=True)
+
+            try:
+                # Enable TF32 for better performance on Ampere (RTX 3060)
+                if cuda_ok:
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+
+                # Use device_map="cuda:0" for better integration with transformers
+                try:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        FAST_MODEL_HF_ID,
+                        torch_dtype=dtype,
+                        device_map="cuda:0" if cuda_ok else "cpu",
+                        trust_remote_code=True,
+                        attn_implementation=attn_implementation,
+                        low_cpu_mem_usage=True
+                    )
+                except Exception as attn_err:
+                    # Fallback to sdpa if flash_attention_2 fails
+                    logging.warning(f"flash_attention_2 failed ({attn_err}), falling back to sdpa")
+                    model = AutoModelForCausalLM.from_pretrained(
+                        FAST_MODEL_HF_ID,
+                        torch_dtype=dtype,
+                        device_map="cuda:0" if cuda_ok else "cpu",
+                        trust_remote_code=True,
+                        attn_implementation="sdpa",
+                        low_cpu_mem_usage=True
+                    )
+                
+                # Force conversion to dtype to avoid "float != struct c10::BFloat16" errors
+                # some components (like rotary embeddings) might stay in float32
+                if cuda_ok:
+                    model = model.to(dtype=dtype, device="cuda:0")
+                
+                model.eval() # Ensure eval mode
+                
+                # Enable gradient checkpointing to reduce memory but keep speed for inference
+                # (actually skip this for inference since we don't need gradients)
+                
+                # Try to compile the model for faster inference (torch 2.0+)
+                try:
+                    if cuda_ok and hasattr(torch, 'compile'):
+                        logging.info("Compiling fast model with torch.compile()...")
+                        model = torch.compile(model, mode="reduce-overhead")
+                        logging.info("Fast model compiled successfully.")
+                except Exception as compile_err:
+                    logging.warning(f"torch.compile failed: {compile_err}")
+                
+                # Warmup inference to initialize CUDA kernels
+                if cuda_ok:
+                    logging.info("Warming up fast model...")
+                    # Ensure the warmup input matches the model's device
+                    warmup_input = tokenizer("Warmup", return_tensors="pt").to("cuda:0")
+                    with torch.inference_mode():
+                        model.generate(**warmup_input, max_new_tokens=5)
+                    torch.cuda.synchronize()  # Ensure CUDA operations complete
+                    logging.info("Fast model warmup complete.")
+            except Exception as oom:
+                if cuda_ok and "out of memory" in str(oom).lower():
+                    logging.warning("Fast model OOM on GPU, falling back to device_map=auto")
+                    torch.cuda.empty_cache()
+                    model = AutoModelForCausalLM.from_pretrained(
+                        FAST_MODEL_HF_ID,
+                        torch_dtype=dtype,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True,
+                    )
+                    model.eval()
+                else:
+                    raise
+
+            # Log where the model actually ended up
+            try:
+                where = next(model.parameters()).device
+                logging.info(f"Fast model device: {where} (dtype: {model.dtype})")
+            except Exception:
+                pass
+
+            class FastTransformersWrapper:
+                def __init__(self, model, tokenizer):
+                    self.model = model
+                    self.tokenizer = tokenizer
+
+                def reset(self):
+                    pass
+
+                def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, **kwargs):
+                    text = self.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                    
+                    # Ensure inputs are on the same device as the model
+                    inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+                    input_len = inputs.input_ids.shape[1]
+
+                    # Greedy when temperature=0 for speed; otherwise sample
+                    do_sample = temperature > 0
+                    
+                    # Abortion support via StoppingCriteria
+                    from transformers import StoppingCriteria, StoppingCriteriaList
+                    class AbortCriteria(StoppingCriteria):
+                        def __call__(self, input_ids, scores, **kwargs):
+                            return abort_fast_event.is_set()
+
+                    gen_kw = dict(
+                        max_new_tokens=max_tokens,
+                        do_sample=do_sample,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        use_cache=True,  # Explicitly enable KV cache
+                        stopping_criteria=StoppingCriteriaList([AbortCriteria()]),
+                    )
+                    
+                    # Only add sampling parameters if do_sample is True
+                    if do_sample:
+                        gen_kw["temperature"] = temperature
+                        # top_k and top_p are often not supported by all models
+                        # gen_kw["top_p"] = 0.95
+                    else:
+                        # Use greedy decoding for deterministic output
+                        gen_kw["num_beams"] = 1
+
+                    with torch.inference_mode():
+                        generated = self.model.generate(**inputs, **gen_kw)
+                    
+                    output_ids = generated[0][input_len:]
+                    output_text = self.tokenizer.decode(
+                        output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                    )
+                    completion_tokens = len(output_ids)
+
+                    # Strip input echo if present
+                    if output_text.startswith(text[: min(80, len(text))]):
+                        pass  # full echo unlikely at input_len; decoded part is reply
+                    if "assistant\n" in output_text:
+                        output_text = output_text.split("assistant\n", 1)[-1].strip()
+
+                    return {
+                        "choices": [{
+                            "message": {"role": "assistant", "content": output_text}
+                        }],
+                        "usage": {"completion_tokens": completion_tokens},
+                    }
+
+            fast_model = FastTransformersWrapper(model, tokenizer)
+            init_error = None # Clear any previous error on success
+            logging.info("Fast Model Loaded (Transformers).")
         except Exception as e:
             logging.error(f"Fast Model Load Error: {e}")
             init_error = str(e)
@@ -113,18 +261,7 @@ def ensure_main_model():
     Llama = ensure_imports()
     if not Llama: return
 
-    if not os.path.exists(MAIN_MODEL_PATH):
-        # ... download logic ...
-        pass
-
-    # TRANSFORMERS PATH (If user requests Hugging Face native loading)
-    # We will try to detect if we should use Transformers based on filename/config
-    # But for now, let's keep GGUF as default unless it fails or is explicitly requested.
-    # However, the user specifically asked for Transformers implementation for Qwen3-VL-4B.
-    
     # Check if we are using the "Transformers" model (based on config variable name or content)
-    # Since we can't easily change the global structure, we'll add a branch here.
-    
     USE_TRANSFORMERS = "Qwen3-VL-4B-Instruct" in MAIN_MODEL_FILENAME and "gguf" not in MAIN_MODEL_FILENAME.lower()
     
     if USE_TRANSFORMERS:
@@ -132,9 +269,10 @@ def ensure_main_model():
             if llm: return
             logging.info(f"Loading Main Model via Transformers: {MAIN_MODEL_FILENAME}")
             try:
-                from transformers import AutoProcessor
-                import torch
-                
+                # Clear cache before loading a large model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
                 # Check for bitsandbytes
                 try:
                     import bitsandbytes
@@ -150,12 +288,16 @@ def ensure_main_model():
                     ModelClass = Qwen3VLForConditionalGeneration
                 except ImportError:
                     # Fallback to Qwen2_5_VL if Qwen3 specific class not found
-                    from transformers import Qwen2_5_VLForConditionalGeneration
-                    ModelClass = Qwen2_5_VLForConditionalGeneration
+                    try:
+                        from transformers import Qwen2_5_VLForConditionalGeneration
+                        ModelClass = Qwen2_5_VLForConditionalGeneration
+                    except ImportError:
+                        # Generic fallback
+                        from transformers import AutoModelForVision2Seq
+                        ModelClass = AutoModelForVision2Seq
 
                 # Define quantization config for 4-bit loading (similar to GGUF Q4)
                 # This drastically reduces VRAM usage (from ~8GB to ~3GB for 4B model)
-                from transformers import BitsAndBytesConfig
                 quantization_config = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_compute_dtype=torch.bfloat16,
