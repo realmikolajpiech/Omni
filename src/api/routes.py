@@ -246,6 +246,13 @@ def action_endpoint():
         if not result_text or not result_text.strip():
             logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
             result_text = f"SEARCH:{query}"
+        
+        # Also check if output contains only special tokens or is just newlines/spaces
+        # by looking for actual keyword patterns
+        has_command = any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "SEARCH:", "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:"])
+        if not has_command:
+            logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
+            result_text = f"SEARCH:{query}"
 
         actions = []
         for line in result_text.split('\n'):
