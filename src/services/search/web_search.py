@@ -341,10 +341,10 @@ def get_person_result(name):
                 "image": None
             }
             
-            # Try to get image from image search
-            logging.info(f"Searching for image of: {name_clean}")
+            # Try to get image from image search (use original query, not long title)
+            logging.info(f"Searching for image of: {name}")
             try:
-                img_results = search_api(name_clean, categories='images')
+                img_results = search_api(name, categories='images')
                 if img_results:
                     img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
                     if img_url:

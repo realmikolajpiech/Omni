@@ -320,36 +320,39 @@ Examples:
                     classify_messages = [
                         {
                             "role": "system",
-                            "content": """Analyze the search results and classify what the query is about.
-Output ONE answer:
-- PERSON (for biographies, people, actors, musicians, historical figures)
-- PLACE (for locations, cities, countries, addresses, landmarks)  
-- SEARCH (for general topics, products, concepts, websites)
-
-Be strict: only use PERSON if clearly a biography/person, only PLACE if clearly a location."""
+                            "content": "Analyze the search results. Reply with exactly ONE word: PERSON (only for real people/biographies), PLACE (only for locations), or SEARCH (for companies, products, websites, anything else)."
                         },
                         {
                             "role": "user",
-                            "content": f"Query: {query}\n\n{context}\n\nWhat type is this?"
+                            "content": f"Query: {query}\n\n{context}\n\nOne word:"
                         }
                     ]
                     
                     try:
                         classification = model_manager.fast_model.create_chat_completion(
-                            messages=classify_messages, max_tokens=16, temperature=0.0, request_id=request_id
+                            messages=classify_messages, max_tokens=8, temperature=0.0, request_id=request_id
                         )
                         classification_text = classification['choices'][0]['message']['content'].strip().upper()
-                        logging.info(f"[DEBUG] Fast model classification result: {classification_text}")
+                        # Take only the first word (model might add extra text)
+                        first_word = classification_text.split()[0] if classification_text else ""
+                        logging.info(f"[DEBUG] Fast model classification result: '{classification_text}' -> first_word: '{first_word}'")
                         
-                        # Act on classification
-                        if "PERSON" in classification_text:
+                        # Act on classification - require exact match to avoid false positives
+                        if first_word == "PERSON":
                             logging.info(f"[DEBUG] Classification: PERSON - getting person result for: {q}")
                             person_result = get_person_result(q)
                             if person_result:
-                                actions.append(person_result)
-                                continue
+                                # Validate: don't show as person if it looks like a company
+                                name = person_result.get('name', '')
+                                company_keywords = ['labs', 'inc', 'llc', 'company', 'corp', 'group', 'agency', 'studio', 'solutions', 'technologies', 'systems', 'services']
+                                if any(kw in name.lower() for kw in company_keywords):
+                                    logging.info(f"[DEBUG] Person result looks like company '{name}', showing as link instead")
+                                    person_result = None
+                                else:
+                                    actions.append(person_result)
+                                    continue
                         
-                        elif "PLACE" in classification_text:
+                        elif first_word == "PLACE":
                             logging.info(f"[DEBUG] Classification: PLACE - getting place result for: {q}")
                             place_result = get_place_result(q)
                             if place_result:
