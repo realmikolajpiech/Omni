@@ -310,29 +310,52 @@ def get_person_result(name):
                 return {
                     "type": "person",
                     "name": data.get('title', name),
-                    "description": data.get('extract', ' '),
+                    "description": data.get('extract', '').strip()[:300],  # Clean description
                     "url": data.get('content_urls', {}).get('desktop', {}).get('page', ''),
                     "image": data.get('thumbnail', {}).get('source')
                 }
     except Exception as e: 
         logging.warning(f"Wiki Person Error: {e}")
 
-    # 2. Fallback: SearXNG
+    # 2. Fallback: SearXNG general search
     try:
         results = search_api(name, categories='general')
         if results:
             best = results[0]
-            # Try to find an image in the result if possible
-            img = best.get('thumbnail') or best.get('img_src') or best.get('image')
+            # Extract name - remove common suffixes
+            title = best.get('title', name)
+            # Clean up title - remove " - Wikipedia", " | ...", etc.
+            name_clean = title.split(' - ')[0].split(' | ')[0].split('(')[0].strip()
             
-            return {
+            # Clean description - remove trailing "..."
+            description = (best.get('content') or best.get('snippet', '')).strip()
+            if description.endswith('...'):
+                description = description[:-3].strip()
+            description = description[:300]  # Limit length
+            
+            result = {
                 "type": "person",
-                "name": best.get('title', name),
-                "description": best.get('content') or best.get('snippet', ''),
+                "name": name_clean or name,
+                "description": description,
                 "url": best.get('url'),
-                "image": img
+                "image": None
             }
-    except Exception as e: pass
+            
+            # Try to get image from image search
+            logging.info(f"Searching for image of: {name_clean}")
+            try:
+                img_results = search_api(name_clean, categories='images')
+                if img_results:
+                    img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
+                    if img_url:
+                        result['image'] = img_url
+                        logging.info(f"Found image for {name_clean}: {img_url[:80]}")
+            except:
+                pass
+            
+            return result
+    except Exception as e: 
+        logging.warning(f"Person search error: {e}")
 
     return None
 
