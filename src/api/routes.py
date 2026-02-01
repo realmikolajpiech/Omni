@@ -14,6 +14,21 @@ from src.services.system.installer import generate_install_plan, log_debug
 
 api_bp = Blueprint('api', __name__)
 
+
+def _sanitize_search_query(extracted: str, original: str) -> str:
+    """Use extracted search term only if it looks valid; otherwise use original query."""
+    if not extracted or not extracted.strip():
+        return original.strip()
+    s = extracted.strip()
+    if len(s) > 200:
+        return original.strip()
+    # Reject if mostly non-alphanumeric (garbage like '::::))) person))')
+    alnum_or_space = sum(1 for c in s if c.isalnum() or c.isspace())
+    if alnum_or_space < len(s) * 0.5:
+        return original.strip()
+    return s
+
+
 @api_bp.route('/ask_llm', methods=['POST'])
 def ask_llm():
     # Signal Fast Model to abort any ongoing operations
@@ -299,7 +314,10 @@ Examples:
                     logging.info(f"Fast Action Aborted (request {request_id} cancelled by newer request).")
                     return jsonify({"actions": []})
 
-                q = line.split("SEARCH:")[1].strip()
+                raw_q = line.split("SEARCH:")[1].strip()
+                q = _sanitize_search_query(raw_q, query)
+                if q != raw_q:
+                    logging.info(f"Fast model SEARCH query sanitized: '{raw_q[:80]}' -> '{q}'")
                 
                 # Get search results to analyze
                 from src.services.search.web_search import search_api
@@ -309,7 +327,7 @@ Examples:
                 if results:
                     # Build rich context from top 5 results - full descriptions for model to decide
                     context = "Search results:\n"
-                    for i, res in enumerate(results[:5], 1):
+                    for i, res in enumerate(results[:3], 1):
                         title = res.get('title', 'N/A')
                         content = (res.get('content') or res.get('snippet', '') or 'N/A')
                         if len(content) > 400:
@@ -326,11 +344,21 @@ Examples:
                     classify_messages = [
                         {
                             "role": "system",
-                            "content": "You read search result titles and descriptions. Decide what the user is looking for. Reply with exactly ONE word: PERSON (only if the results are clearly about a real person, biography, individual), PLACE (only if the results are clearly about a location, city, address, landmark), or SEARCH (companies, products, brands, websites, topics, or anything else). Base your answer only on what the descriptions say."
+                            "content": """Analyze search results and classify what the user is looking for.
+
+Reply with ONLY ONE WORD: PERSON, PLACE, or SEARCH
+
+PERSON: Real people, biography, historical figure, celebrity (e.g., "Albert Einstein", "Napoleon")
+PLACE: Cities, countries, landmarks, addresses, geographic locations (e.g., "Paris", "Tokyo Tower", "France")
+SEARCH: Companies, products, websites, brands, topics, services (e.g., "YouTube", "Spotify", "how to cook")
+
+Look at the result titles and descriptions to decide. If results mention "city", "capital", "country", "address", "landmark", "monument", it's PLACE. If they mention a real person's life/biography, it's PERSON. Otherwise SEARCH.
+
+Output exactly one word."""
                         },
                         {
                             "role": "user",
-                            "content": f"User query: {query}\n\n{context}\n\nOne word (PERSON, PLACE, or SEARCH):"
+                            "content": f"User query: {query}\n\n{context}\n\nAnswer with one word only: PERSON, PLACE, or SEARCH"
                         }
                     ]
                     
@@ -339,10 +367,19 @@ Examples:
                             messages=classify_messages, max_tokens=8, temperature=0.0, request_id=request_id
                         )
                         classification_text = classification['choices'][0]['message']['content'].strip().upper()
-                        first_word = classification_text.split()[0] if classification_text else ""
-                        logging.info(f"[DEBUG] Fast model classification: '{classification_text}' -> '{first_word}'")
+                        # Strip non-ASCII (Qwen can emit Chinese/garbage when confused); then match PERSON/PLACE/SEARCH
+                        import re
+                        normalized = re.sub(r'[^A-Za-z]', '', classification_text)
+                        first_word = ""
+                        if normalized.startswith('PERSON'):
+                            first_word = "PERSON"
+                        elif normalized.startswith('PLACE'):
+                            first_word = "PLACE"
+                        elif normalized.startswith('SEARCH'):
+                            first_word = "SEARCH"
+                        logging.info(f"[DEBUG] Fast model classification: '{classification_text[:60]}' -> normalized '{normalized[:20]}' -> '{first_word}'")
                         
-                        # Act on model decision only - no keyword overrides
+                        # Act on model decision only - let the model decide
                         if first_word == "PERSON":
                             logging.info(f"[DEBUG] Model chose PERSON - fast model will write the card from search results")
                             # Have fast model write the card (name + description) from search results, not raw copy-paste
@@ -380,7 +417,8 @@ Examples:
                                         person_desc = " ".join(lines[1:])
                                     elif lines:
                                         person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
-                                if not person_name or person_name == q:
+                                # Treat garbage (e.g. "::.") or non-name as missing
+                                if not person_name or person_name == q or len(person_name.strip()) < 2 or not any(c.isalpha() for c in person_name):
                                     # Use first result title to extract name if model didn't
                                     first_title = results[0].get('title', '')
                                     person_name = first_title.split('|')[0].split('–')[0].strip() or q

@@ -91,14 +91,13 @@ def ensure_fast_model():
                     use_quant = False
                     logging.warning("bitsandbytes not installed; fast model will load in bfloat16 (slower).")
 
+                # 8-bit quantization (better quality than 4-bit for small models, still efficient)
+                # 4-bit NF4 can be too aggressive for 0.6B model, causing garbage/Chinese output
                 if use_quant:
                     quantization_config = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=dtype,
-                        bnb_4bit_use_double_quant=True,
-                        bnb_4bit_quant_type="nf4"
+                        load_in_8bit=True,
                     )
-                    logging.info("Loading fast model with 4-bit quantization (NF4)...")
+                    logging.info("Loading fast model with 8-bit quantization...")
                     model = AutoModelForCausalLM.from_pretrained(
                         FAST_MODEL_HF_ID,
                         quantization_config=quantization_config,
@@ -191,8 +190,10 @@ def ensure_fast_model():
                     
                     logging.info(f"[DEBUG] Input tokens: {input_len}, device: {inputs.input_ids.device}")
 
-                    # Always use greedy decoding for speed when temperature is 0
-                    do_sample = temperature > 0
+                    # Use light sampling for fast model to avoid repetition/garbage (Qwen3 4-bit tends to loop with greedy)
+                    # When caller passes 0, use 0.5 so we still get diverse short outputs without loops
+                    eff_temp = temperature if temperature > 0 else 0.5
+                    do_sample = eff_temp > 0
                     
                     # Abortion support via StoppingCriteria - checks on every token
                     from transformers import StoppingCriteria, StoppingCriteriaList
@@ -218,10 +219,13 @@ def ensure_fast_model():
                         pad_token_id=self.tokenizer.eos_token_id,
                         use_cache=True,  # KV cache for speed
                         stopping_criteria=StoppingCriteriaList([AbortCriteria(request_id)]),
+                        repetition_penalty=1.2,  # Reduce repetition/garbage from 4-bit fast model
                     )
                     
                     if do_sample:
-                        gen_kw["temperature"] = temperature
+                        gen_kw["temperature"] = eff_temp
+                        gen_kw["top_p"] = 0.8
+                        gen_kw["top_k"] = 20
 
                     with torch.inference_mode():
                         generated = self.model.generate(**inputs, **gen_kw)

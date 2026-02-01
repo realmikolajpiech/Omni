@@ -87,7 +87,7 @@ def search_api(query, categories='general', fast=False):
             return []
     
     except requests.Timeout:
-        logging.error(f"SearXNG TIMEOUT for: '{query}' (timeout={timeout}s) - ensure SearXNG is running on port 8888")
+        logging.error(f"SearXNG TIMEOUT for: '{query}' (timeout={timeout}s) - ensure SearXNG is running on port 8080")
         return []
     except ConnectionError as e:
         logging.error(f"Cannot connect to local SearXNG at {SEARXNG_URL} - is it running? Error: {e}")
