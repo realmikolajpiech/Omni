@@ -29,7 +29,9 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     window = OmniWindow()
-    
+    window.show()
+    window.center()
+
     # Global Hotkey Setup
     def toggle_omni():
         try:

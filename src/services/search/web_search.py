@@ -3,7 +3,6 @@ import logging
 from src.core.config import SEARXNG_URL
 from src.services.system.location import get_system_location, get_ip_location
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Simple in-memory cache for navigation results (TTL: 5 minutes)
 _nav_cache = {}
@@ -51,114 +50,51 @@ def _set_cache_nav(query, result, fast=False):
     key = _get_cache_key(query, fast)
     _nav_cache[key] = (result, time.time())
 
-def _search_single_url(url, query, timeout, location='en'):
-    """Search a single URL and return results."""
+def search_api(query, categories='general', fast=False):
+    """
+    Performs a search using ONLY local SearXNG.
+    When fast=True (action bar), uses shorter timeout but still reliable.
+    """
+    loc = get_system_location()
+    # Give local SearXNG adequate time to respond
+    timeout = 3.0 if fast else 6.0
+
     try:
-        if not url or not url.startswith("http"):
-            return None
+        if fast:
+            logging.info(f"Fast search: '{query}' (timeout={timeout}s)")
+        else:
+            logging.info(f"Standard search: '{query}' (Loc: {loc})")
         
         params = {
             'q': query,
             'format': 'json',
-            'categories': 'general',
-            'language': location
+            'categories': categories,
+            'language': loc
         }
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         }
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        
+        # Only try local SearXNG
+        r = requests.get(SEARXNG_URL, params=params, headers=headers, timeout=timeout)
         if r.status_code == 200:
             data = r.json()
-            return data.get('results', [])
-    except:
-        pass
-    return None
-
-def search_api(query, categories='general', fast=False):
-    """
-    Performs a search using SearXNG (Local + Fallbacks).
-    Returns a list of result dictionaries.
-    When fast=True (action bar), uses parallel requests with very short timeout (1.2s).
-    """
-    loc = get_system_location()
-    # For fast mode: 1.2s gives enough time for parallel requests without being too slow
-    timeout = 1.2 if fast else 6.0
-
-    # List of SearXNG instances to try
-    # 1. Local (Priority)
-    # 2. Public Fallbacks (in case local is down/not installed)
-    urls = [SEARXNG_URL]
-    fallback_urls = [
-        "https://searx.be/search",
-        "https://searx.daetalytica.io/search",
-        "https://searx.tuxcloud.ua/search",
-        "https://op.nx.is/search",
-        "https://searx.web.cern.ch/search",
-        "https://search.sapti.me/search",
-        "https://searx.prvcy.eu/search",
-        "https://searx.ng/search",
-        "https://search.ononoki.org/search"
-    ]
-    urls.extend(fallback_urls)
-    if fast:
-        urls = urls[:3]  # Try local + 2 fallbacks in parallel
-        # Use ThreadPoolExecutor to try multiple sources in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(_search_single_url, url, query, timeout, loc) for url in urls]
-            for future in as_completed(futures):
-                try:
-                    results = future.result()
-                    if results:
-                        logging.info(f"Fast search got {len(results)} results for: '{query}'")
-                        return results
-                except Exception as e:
-                    logging.debug(f"Fast search attempt failed: {e}")
-        logging.warning(f"Fast search failed for: '{query}' (all sources timed out or errored)")
+            results = data.get('results', [])
+            logging.info(f"Search got {len(results)} results for: '{query}'")
+            return results
+        else:
+            logging.error(f"SearXNG returned status {r.status_code} for: '{query}'")
+            return []
+    
+    except requests.Timeout:
+        logging.error(f"SearXNG TIMEOUT for: '{query}' (timeout={timeout}s) - ensure SearXNG is running on port 8888")
         return []
-
-    # Non-fast mode: sequential search (existing behavior)
-    for url in urls:
-        try:
-            # Skip invalid URLs (e.g. if config is empty)
-            if not url or not url.startswith("http"): continue
-
-            if fast:
-                logging.debug(f"Searching {url} for: '{query}' (fast)")
-            else:
-                logging.info(f"Searching {url} for: '{query}' (Loc: {loc}, Cats: {categories})")
-            params = {
-                'q': query,
-                'format': 'json',
-                'categories': categories,
-                'language': loc
-            }
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': url
-            }
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                results = data.get('results', [])
-                # If we got a valid response (even empty), we return it.
-                # But if it's empty, maybe we should try next mirror? 
-                # No, empty means no results found for query.
-                return results
-            else:
-                if fast:
-                    logging.debug(f"Search failed at {url} with status {resp.status_code}")
-                else:
-                    logging.warning(f"Search failed at {url} with status {resp.status_code}")
-        except Exception as e:
-            if fast:
-                logging.debug(f"Search API Error ({url}): {e}")
-            else:
-                logging.error(f"Search API Error ({url}): {e}")
-            continue
-            
-    return []
+    except ConnectionError as e:
+        logging.error(f"Cannot connect to local SearXNG at {SEARXNG_URL} - is it running? Error: {e}")
+        return []
+    except Exception as e:
+        logging.error(f"Search Error: {e}")
+        return []
 
 def perform_web_search(query):
     logging.info(f"Performing SearXNG Search for: {query}")
@@ -263,26 +199,11 @@ def get_navigation_result(query, fast=False):
         return cached
     
     try:
-        # Fetch more results to allow ranking. fast=True: short timeout, few URLs (for action bar).
+        # Fetch results from LOCAL SearXNG only
         results = search_api(query, categories='general', fast=fast)
         
         if not results:
-            logging.warning(f"No search results found for: '{query}' (fast={fast}), trying URL fallback")
-            # Smart fallback: construct URL from query
-            # Try common domain patterns: query.com, query.org, query.io
-            fallback_url = None
-            for tld in ['com', 'org', 'io', 'net', 'co']:
-                url = f"https://{query_lower}.{tld}"
-                fallback_result = {
-                    "url": url,
-                    "title": query.title(),
-                    "description": f"Search result for {query.title()}",
-                    "is_likely_app": True
-                }
-                logging.info(f"Using URL fallback for '{query}': {url}")
-                _set_cache_nav(query, fallback_result, fast)
-                return fallback_result
-            
+            logging.error(f"No search results found for: '{query}' - SearXNG may not be running")
             _set_cache_nav(query, None, fast)
             return None
         

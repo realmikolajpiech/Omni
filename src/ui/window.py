@@ -324,11 +324,22 @@ class OmniWindow(QWidget):
              self.resize(self.width(), 84)
              
         QTimer.singleShot(100, self.apply_blur)
-        QTimer.singleShot(10, self.force_focus)
+        # Focus immediately and again after a short delay (Windows often needs both)
+        self.force_focus()
+        QTimer.singleShot(50, self.force_focus)
+        QTimer.singleShot(200, self.force_focus)
 
     def force_focus(self):
         self.activateWindow()
         self.raise_()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                if hwnd:
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception as e:
+                logging.debug(f"SetForegroundWindow failed: {e}")
         self.input_field.setFocus()
         
     def resizeEvent(self, event):
