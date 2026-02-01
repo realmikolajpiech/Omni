@@ -1,7 +1,7 @@
 import requests
 import logging
 from src.core.config import SEARXNG_URL
-from src.services.system.location import get_system_location, get_ip_location
+from src.services.system.location import get_system_location, get_ip_location, get_search_locale
 import time
 
 # Simple in-memory cache for navigation results (TTL: 5 minutes)
@@ -55,13 +55,13 @@ def search_api(query, categories='general', fast=False):
     Performs a search using ONLY local SearXNG.
     When fast=True (action bar), uses shorter timeout but still reliable.
     """
-    loc = get_system_location()
+    loc = get_search_locale()
     # Give local SearXNG adequate time to respond
     timeout = 3.0 if fast else 6.0
 
     try:
         if fast:
-            logging.info(f"Fast search: '{query}' (timeout={timeout}s)")
+            logging.info(f"Fast search: '{query}' (timeout={timeout}s, Loc: {loc})")
         else:
             logging.info(f"Standard search: '{query}' (Loc: {loc})")
         

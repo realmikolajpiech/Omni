@@ -320,7 +320,7 @@ Examples:
                         context += f"Description: {content}\n"
                         context += f"URL: {url}\n"
                     
-                    logging.info(f"[DEBUG] Sending search results to fast model for classification ({len(context)} chars)")
+                    logging.info(f"[DEBUG] Search results sent to fast model ({len(context)} chars):\n{context}")
                     
                     # Use fast model to classify based on the descriptions only
                     classify_messages = [

@@ -4,25 +4,51 @@ import os
 
 # Cache for IP Location
 _ip_location_cache = None
+_ip_country_code_cache = None
+
+# Country code -> language code for search locale (e.g. PL -> pl, US -> en)
+_COUNTRY_TO_LANG = {
+    'US': 'en', 'GB': 'en', 'AU': 'en', 'CA': 'en', 'NZ': 'en', 'IE': 'en',
+    'PL': 'pl', 'DE': 'de', 'FR': 'fr', 'ES': 'es', 'IT': 'it', 'PT': 'pt',
+    'NL': 'nl', 'BE': 'nl', 'RU': 'ru', 'JP': 'ja', 'CN': 'zh', 'IN': 'en',
+    'BR': 'pt', 'MX': 'es', 'AR': 'es', 'KR': 'ko', 'SE': 'sv', 'NO': 'no',
+    'FI': 'fi', 'DK': 'da', 'TR': 'tr', 'GR': 'el', 'IL': 'he', 'UA': 'uk',
+    'CZ': 'cs', 'HU': 'hu', 'RO': 'ro', 'CH': 'de', 'AT': 'de'
+}
 
 def get_ip_location():
-    global _ip_location_cache
+    global _ip_location_cache, _ip_country_code_cache
     if _ip_location_cache: return _ip_location_cache
 
     try:
-        # 3 second timeout to avoid blocking startup too long
-        resp = requests.get("http://ip-api.com/json/", timeout=3)
+        resp = requests.get("http://ip-api.com/json/?fields=status,country,countryCode,city,regionName", timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             if data.get('status') == 'success':
                 loc_str = f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
                 _ip_location_cache = loc_str
-                logging.info(f"IP Location: {loc_str}")
+                _ip_country_code_cache = data.get('countryCode')  # e.g. PL, US
+                logging.info(f"IP Location: {loc_str} (countryCode: {_ip_country_code_cache})")
                 return loc_str
     except Exception as e:
         logging.error(f"IP Loc Failed: {e}")
     
     return "Unknown Location"
+
+def get_search_locale():
+    """Locale for search (e.g. pl-PL, en-US). Prefer user's location: system locale, then IP-based."""
+    # 1. Try system locale (user's OS language)
+    loc = get_system_location()
+    if loc and loc != "en-US":
+        return loc
+    # 2. If system is en-US, use IP country so e.g. user in Poland gets pl-PL
+    global _ip_country_code_cache
+    if _ip_country_code_cache is None:
+        get_ip_location()  # populate cache
+    if _ip_country_code_cache:
+        lang = _COUNTRY_TO_LANG.get(_ip_country_code_cache.upper(), 'en')
+        return f"{lang}-{_ip_country_code_cache.upper()}"
+    return loc or "en-US"
 
 def get_system_location():
     if os.name == 'nt':
