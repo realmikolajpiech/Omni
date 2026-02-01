@@ -61,43 +61,54 @@ def ensure_imports():
         return None
 
 def ensure_fast_model():
-    """Loads the smaller, faster model for actions (transformers)."""
+    """Loads the smaller, faster model for actions (transformers), quantized in-code for speed."""
     global fast_model, init_error
     if fast_model: return
 
     with fast_lock:
         if fast_model: return
-        logging.info(f"Loading Fast Model (Transformers): {FAST_MODEL_HF_ID}")
+        logging.info(f"Loading Fast Model (Transformers, 4-bit quantized): {FAST_MODEL_HF_ID}")
         try:
             cuda_ok = torch.cuda.is_available()
             if cuda_ok:
                 logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
 
-            # Use bfloat16 for Ampere+ GPUs (RTX 30 series) for best speed
-            if cuda_ok:
-                props = torch.cuda.get_device_properties(0)
-                if props.major >= 8: # Ampere or newer
-                    dtype = torch.bfloat16
-                else:
-                    dtype = torch.float16
-            else:
-                dtype = torch.float32
-                
-            logging.info(f"Using dtype: {dtype}")
-            
-            # Use flash_attention_2 if available (fastest), fallback to sdpa
-            attn_implementation = "flash_attention_2" if cuda_ok else "eager"
+            dtype = torch.bfloat16 if cuda_ok else torch.float32
+            attn_implementation = "sdpa"  # sdpa is reliable with quantized models
             
             tokenizer = AutoTokenizer.from_pretrained(FAST_MODEL_HF_ID, trust_remote_code=True)
 
             try:
-                # Enable TF32 for better performance on Ampere (RTX 3060)
                 if cuda_ok:
                     torch.backends.cuda.matmul.allow_tf32 = True
                     torch.backends.cudnn.allow_tf32 = True
 
-                # Try flash_attention_2 first for maximum speed
+                # 4-bit quantization in-code (faster inference, less VRAM than bf16)
+                use_quant = cuda_ok
                 try:
+                    import bitsandbytes
+                except ImportError:
+                    use_quant = False
+                    logging.warning("bitsandbytes not installed; fast model will load in bfloat16 (slower).")
+
+                if use_quant:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=dtype,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4"
+                    )
+                    logging.info("Loading fast model with 4-bit quantization (NF4)...")
+                    model = AutoModelForCausalLM.from_pretrained(
+                        FAST_MODEL_HF_ID,
+                        quantization_config=quantization_config,
+                        device_map="cuda:0",
+                        trust_remote_code=True,
+                        attn_implementation=attn_implementation,
+                        low_cpu_mem_usage=True
+                    )
+                    # Quantized model: do not call .to(dtype=...) 
+                else:
                     model = AutoModelForCausalLM.from_pretrained(
                         FAST_MODEL_HF_ID,
                         torch_dtype=dtype,
@@ -106,44 +117,45 @@ def ensure_fast_model():
                         attn_implementation=attn_implementation,
                         low_cpu_mem_usage=True
                     )
-                except Exception as attn_err:
-                    # Fallback to sdpa if flash_attention_2 fails
-                    logging.warning(f"flash_attention_2 failed ({attn_err}), falling back to sdpa")
-                    model = AutoModelForCausalLM.from_pretrained(
-                        FAST_MODEL_HF_ID,
-                        torch_dtype=dtype,
-                        device_map="cuda:0" if cuda_ok else "cpu",
-                        trust_remote_code=True,
-                        attn_implementation="sdpa",
-                        low_cpu_mem_usage=True
-                    )
-                
-                # Force conversion to dtype
-                if cuda_ok:
-                    model = model.to(dtype=dtype, device="cuda:0")
+                    if cuda_ok:
+                        model = model.to(dtype=dtype, device="cuda:0")
                 
                 model.eval()
                 
-                # Warmup inference to initialize CUDA kernels
                 if cuda_ok:
                     logging.info("Warming up fast model...")
-                    warmup_input = tokenizer("Hi", return_tensors="pt").to("cuda:0")
+                    warmup_input = tokenizer("Hi", return_tensors="pt").to(model.device)
                     with torch.inference_mode():
                         model.generate(**warmup_input, max_new_tokens=2)
                     torch.cuda.synchronize()
                     logging.info("Fast model warmup complete.")
             except Exception as oom:
                 if cuda_ok and "out of memory" in str(oom).lower():
-                    logging.warning("Fast model OOM on GPU, falling back to device_map=auto")
+                    logging.warning("Fast model OOM, falling back to 8-bit or unquantized")
                     torch.cuda.empty_cache()
-                    model = AutoModelForCausalLM.from_pretrained(
-                        FAST_MODEL_HF_ID,
-                        torch_dtype=dtype,
-                        device_map="auto",
-                        trust_remote_code=True,
-                        low_cpu_mem_usage=True,
-                    )
-                    model.eval()
+                    try:
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_8bit=True,
+                            bnb_8bit_compute_dtype=dtype
+                        )
+                        model = AutoModelForCausalLM.from_pretrained(
+                            FAST_MODEL_HF_ID,
+                            quantization_config=quantization_config,
+                            device_map="auto",
+                            trust_remote_code=True,
+                            attn_implementation="sdpa",
+                            low_cpu_mem_usage=True
+                        )
+                        model.eval()
+                    except Exception:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            FAST_MODEL_HF_ID,
+                            torch_dtype=dtype,
+                            device_map="auto",
+                            trust_remote_code=True,
+                            low_cpu_mem_usage=True
+                        )
+                        model.eval()
                 else:
                     raise
 
