@@ -301,33 +301,66 @@ Examples:
 
                 q = line.split("SEARCH:")[1].strip()
                 
-                # Try to classify: is this a PERSON or PLACE?
-                # Check for person indicators
-                person_indicators = ["who is", "biography", "born", "founder", "actor", "musician", "president"]
+                # Check query indicators for PERSON/PLACE
+                person_indicators = ["who is", "biography", "born", "founder", "actor", "musician", "president", "author"]
                 is_person_query = any(indicator in query.lower() for indicator in person_indicators)
                 
-                # Check for place indicators
-                place_indicators = ["where is", "location of", "find", "city", "country", "capital", "near"]
+                place_indicators = ["where is", "location of", "find", "city", "country", "capital", "near", "address"]
                 is_place_query = any(indicator in query.lower() for indicator in place_indicators)
                 
-                # Try person first if indicators match
+                # Get search results to analyze
+                from src.services.search.web_search import search_api
+                results = search_api(q, categories='general', fast=True)
+                logging.info(f"[DEBUG] Got {len(results) if results else 0} raw search results for: '{q}'")
+                if results:
+                    logging.info(f"[DEBUG] Top result: {results[0].get('url', 'N/A')[:100]} - {results[0].get('title', 'N/A')[:100]}")
+                
+                # Try person detection from query
                 if is_person_query:
                     person_result = get_person_result(q)
                     if person_result:
+                        logging.info(f"[DEBUG] Query indicator matched PERSON for: {q}")
                         actions.append(person_result)
                         continue
                 
-                # Try place if indicators match
+                # Try place detection from query
                 if is_place_query:
                     place_result = get_place_result(q)
                     if place_result:
+                        logging.info(f"[DEBUG] Query indicator matched PLACE for: {q}")
                         actions.append(place_result)
                         continue
+                
+                # Smart detection from search results
+                if results:
+                    first_result = results[0]
+                    url = first_result.get('url', '').lower()
+                    title = first_result.get('title', '').lower()
+                    snippet = first_result.get('content', '') + " " + first_result.get('snippet', '')
+                    snippet = snippet.lower()
+                    
+                    # Check if results suggest PERSON
+                    person_keywords = ["wikipedia.org/wiki/", "grokipedia.com", "biography", "born ", "died ", "author", "actor", "musician", "president"]
+                    if any(kw in url for kw in person_keywords) or any(kw in snippet for kw in ["was born", "biography of", "known for"]):
+                        logging.info(f"[DEBUG] Result analysis detected PERSON for: {q}")
+                        person_result = get_person_result(q)
+                        if person_result:
+                            actions.append(person_result)
+                            continue
+                    
+                    # Check if results suggest PLACE
+                    place_keywords = ["wikipedia.org/wiki/", "maps.google.com", "location", "city", "country", "address"]
+                    if any(kw in url for kw in place_keywords) or any(kw in snippet for kw in ["located in", "coordinates", "city in"]):
+                        logging.info(f"[DEBUG] Result analysis detected PLACE for: {q}")
+                        place_result = get_place_result(q)
+                        if place_result:
+                            actions.append(place_result)
+                            continue
                 
                 # Fallback: treat as website search
                 nav = get_navigation_result(q, fast=True)
                 if nav:
-                    # For search results, just return the link
+                    logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
                 else:
                     url = f"https://duckduckgo.com/?q=!ducky+{q}"
