@@ -307,24 +307,30 @@ Examples:
                 logging.info(f"[DEBUG] Got {len(results) if results else 0} raw search results for: '{q}'")
                 
                 if results:
-                    # Build context from top 3 results
+                    # Build rich context from top 5 results - full descriptions for model to decide
                     context = "Search results:\n"
-                    for i, res in enumerate(results[:3], 1):
-                        context += f"{i}. URL: {res.get('url', 'N/A')}\n"
-                        context += f"   Title: {res.get('title', 'N/A')}\n"
-                        context += f"   Content: {res.get('content', res.get('snippet', 'N/A'))[:200]}\n"
+                    for i, res in enumerate(results[:5], 1):
+                        title = res.get('title', 'N/A')
+                        content = (res.get('content') or res.get('snippet', '') or 'N/A')
+                        if len(content) > 400:
+                            content = content[:400] + "..."
+                        url = res.get('url', 'N/A')
+                        context += f"\n--- Result {i} ---\n"
+                        context += f"Title: {title}\n"
+                        context += f"Description: {content}\n"
+                        context += f"URL: {url}\n"
                     
-                    logging.info(f"[DEBUG] Sending search results to fast model for classification:\n{context[:300]}")
+                    logging.info(f"[DEBUG] Sending search results to fast model for classification ({len(context)} chars)")
                     
-                    # Use fast model to classify the results
+                    # Use fast model to classify based on the descriptions only
                     classify_messages = [
                         {
                             "role": "system",
-                            "content": "Analyze the search results. Reply with exactly ONE word: PERSON (only for real people/biographies), PLACE (only for locations), or SEARCH (for companies, products, websites, anything else)."
+                            "content": "You read search result titles and descriptions. Decide what the user is looking for. Reply with exactly ONE word: PERSON (only if the results are clearly about a real person, biography, individual), PLACE (only if the results are clearly about a location, city, address, landmark), or SEARCH (companies, products, brands, websites, topics, or anything else). Base your answer only on what the descriptions say."
                         },
                         {
                             "role": "user",
-                            "content": f"Query: {query}\n\n{context}\n\nOne word:"
+                            "content": f"User query: {query}\n\n{context}\n\nOne word (PERSON, PLACE, or SEARCH):"
                         }
                     ]
                     
@@ -333,27 +339,19 @@ Examples:
                             messages=classify_messages, max_tokens=8, temperature=0.0, request_id=request_id
                         )
                         classification_text = classification['choices'][0]['message']['content'].strip().upper()
-                        # Take only the first word (model might add extra text)
                         first_word = classification_text.split()[0] if classification_text else ""
-                        logging.info(f"[DEBUG] Fast model classification result: '{classification_text}' -> first_word: '{first_word}'")
+                        logging.info(f"[DEBUG] Fast model classification: '{classification_text}' -> '{first_word}'")
                         
-                        # Act on classification - require exact match to avoid false positives
+                        # Act on model decision only - no keyword overrides
                         if first_word == "PERSON":
-                            logging.info(f"[DEBUG] Classification: PERSON - getting person result for: {q}")
+                            logging.info(f"[DEBUG] Model chose PERSON for: {q}")
                             person_result = get_person_result(q)
                             if person_result:
-                                # Validate: don't show as person if it looks like a company
-                                name = person_result.get('name', '')
-                                company_keywords = ['labs', 'inc', 'llc', 'company', 'corp', 'group', 'agency', 'studio', 'solutions', 'technologies', 'systems', 'services']
-                                if any(kw in name.lower() for kw in company_keywords):
-                                    logging.info(f"[DEBUG] Person result looks like company '{name}', showing as link instead")
-                                    person_result = None
-                                else:
-                                    actions.append(person_result)
-                                    continue
+                                actions.append(person_result)
+                                continue
                         
                         elif first_word == "PLACE":
-                            logging.info(f"[DEBUG] Classification: PLACE - getting place result for: {q}")
+                            logging.info(f"[DEBUG] Model chose PLACE for: {q}")
                             place_result = get_place_result(q)
                             if place_result:
                                 actions.append(place_result)
