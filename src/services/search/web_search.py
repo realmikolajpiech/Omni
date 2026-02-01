@@ -267,7 +267,22 @@ def get_navigation_result(query, fast=False):
         results = search_api(query, categories='general', fast=fast)
         
         if not results:
-            logging.warning(f"No search results found for: '{query}' (fast={fast})")
+            logging.warning(f"No search results found for: '{query}' (fast={fast}), trying URL fallback")
+            # Smart fallback: construct URL from query
+            # Try common domain patterns: query.com, query.org, query.io
+            fallback_url = None
+            for tld in ['com', 'org', 'io', 'net', 'co']:
+                url = f"https://{query_lower}.{tld}"
+                fallback_result = {
+                    "url": url,
+                    "title": query.title(),
+                    "description": f"Search result for {query.title()}",
+                    "is_likely_app": True
+                }
+                logging.info(f"Using URL fallback for '{query}': {url}")
+                _set_cache_nav(query, fallback_result, fast)
+                return fallback_result
+            
             _set_cache_nav(query, None, fast)
             return None
         
