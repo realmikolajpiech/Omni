@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider, QPushButton)
 from PyQt6.QtCore import (Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, 
                           QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo,
                           QThreadPool, QRunnable, QObject, pyqtSignal)
@@ -111,7 +111,6 @@ class ThinkingWidget(QWidget):
         self.main_layout.setSpacing(8)
 
         self.header = QLabel("Thinking...")
-        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
         self.header.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal))
         f = self.header.font(); f.setItalic(True); self.header.setFont(f)
 
@@ -121,9 +120,9 @@ class ThinkingWidget(QWidget):
                 color: #666666;
                 padding-left: 0px;
             }
-            QLabel:hover { color: #333333; }
         """)
-        self.header.mousePressEvent = self.toggle_expand
+        # Make text unclickable and transparent to mouse events
+        self.header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self.content_label = QLabel(text if text else "")
         self.content_label.setWordWrap(True)
@@ -144,7 +143,7 @@ class ThinkingWidget(QWidget):
     def toggle_expand(self, event):
         self.is_expanded = not self.is_expanded
         self.content_label.setHidden(not self.is_expanded)
-        self.header.setText("Thinking... (Click to collapse)" if self.is_expanded else "Thinking...")
+        self.content_label.setHidden(not self.is_expanded)
         self.update_item_size()
 
     def update_item_size(self):
@@ -239,27 +238,167 @@ class UnscrollableTextEdit(QTextEdit):
     def wheelEvent(self, event):
         event.ignore()
 
+class CollapsibleThinkingWidget(QWidget):
+    size_changed = pyqtSignal()
+
+    def __init__(self, thinking_text, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(4)
+        
+        # Track if this is the first time we're setting thinking (for auto-expand on first update)
+        self._first_thinking_set = True
+
+        # Header button - minimal, elegant design
+        self.header_button = QPushButton("✨ Thoughts")
+        self.header_button.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 6px;
+                text-align: left;
+                font-family: Manrope;
+                font-size: 13px;
+                font-weight: normal;
+                color: #555555;
+            }
+            QPushButton:hover {
+                background: rgba(0, 0, 0, 0.05);
+                color: #333333;
+            }
+        """)
+        self.header_button.setCheckable(True)
+        self.header_button.setChecked(False)
+        self.header_button.clicked.connect(self.toggle_content)
+        self.header_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.layout.addWidget(self.header_button)
+
+        # Content area
+        self.content_widget = QWidget()
+        content_layout = QVBoxLayout(self.content_widget)
+        content_layout.setContentsMargins(0, 4, 0, 4)  # Reduced vertical margins
+        content_layout.setSpacing(0)
+
+        self.thinking_text = UnscrollableTextEdit()
+        self.thinking_text.setReadOnly(True)
+        self.thinking_text.setFrameStyle(QFrame.Shape.NoFrame)
+        self.thinking_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.thinking_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Subtle styling: transparent background, darker color for readability, italic
+        self.thinking_text.setStyleSheet("QTextEdit { background: transparent; color: #444444; padding: 0px; margin: 0px; line-height: 1.4; }")
+        self.thinking_text.setPlainText(thinking_text)
+
+        font = QFont("Manrope", 12, QFont.Weight.Normal)
+        font.setItalic(True)
+        self.thinking_text.setFont(font)
+        self.thinking_text.document().setTextWidth(620)
+        self.thinking_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+
+        content_layout.addWidget(self.thinking_text)
+        self.layout.addWidget(self.content_widget)
+
+        # Initially hide content (collapsed)
+        self.content_widget.setVisible(False)
+
+    def set_thinking_text(self, text):
+        """Update the thinking text and ensure the widget is visible."""
+        # Mark that we've set thinking at least once
+        was_first = self._first_thinking_set
+        self._first_thinking_set = False
+        
+        self.thinking_text.setPlainText(text)
+        self.thinking_text.document().setTextWidth(620)
+        
+        # Force height update
+        doc_height = self.thinking_text.document().size().height()
+        self.thinking_text.setFixedHeight(int(doc_height + 20))
+        
+        # Ensure widget and button stay enabled and visible
+        self.setVisible(True)
+        self.setEnabled(True)
+        self.header_button.setEnabled(True)
+        
+        # Auto-expand only on the very first thinking update (when user hasn't made a choice yet)
+        if was_first and text.strip():
+            self.set_collapsed(False)
+        
+        self.size_changed.emit()
+        self.updateGeometry()
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'updateGeometry'):
+                parent.updateGeometry()
+            parent = parent.parent()
+
+    def set_collapsed(self, collapsed):
+        """Collapse (True) or expand (False) the thinking content. Widget stays visible either way."""
+        self.setVisible(True)  # Make sure the widget itself is visible
+        
+        # Set the content visibility and button text based on collapsed state
+        new_visibility = not collapsed
+        self.content_widget.setVisible(new_visibility)
+        self.header_button.setText("✨ Thoughts" if collapsed else "✨ Hide thoughts")
+        
+        if new_visibility:
+            doc_height = self.thinking_text.document().size().height()
+            self.thinking_text.setFixedHeight(int(doc_height + 20))
+            
+        self.size_changed.emit()
+        self.updateGeometry()
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'updateGeometry'):
+                parent.updateGeometry()
+            parent = parent.parent()
+
+    def toggle_content(self):
+        is_visible = self.content_widget.isVisible()
+        self.set_collapsed(is_visible)
+
+    def sizeHint(self):
+        base_height = self.header_button.sizeHint().height()
+        if self.content_widget.isVisible():
+            # Recalculate text width every time for accurate height
+            self.thinking_text.document().setTextWidth(620)
+            content_height = self.thinking_text.document().size().height()
+            # Add small padding for breathing room
+            return QSize(660, int(base_height + content_height + 24))
+        return QSize(660, base_height)
+
+
 class AnswerWidget(QWidget):
-    def __init__(self, text, query_text=None, parent=None):
+    def __init__(self, text, query_text=None, thinking_text=None, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(24, 4, 24, 4)
-        
+        self.layout.setSpacing(12)
+
+        # Add thinking section if provided (can be added later via ensure_thinking_widget)
+        self.thinking_widget = None
+        if thinking_text and thinking_text.strip():
+            self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
+            self.thinking_widget.size_changed.connect(self.update_item_size)
+            self.layout.insertWidget(0, self.thinking_widget, 0, Qt.AlignmentFlag.AlignTop)
+
         self.text_edit = UnscrollableTextEdit()
         self.text_edit.setReadOnly(True)
         self.text_edit.setFrameStyle(QFrame.Shape.NoFrame)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.text_edit.setStyleSheet("background: transparent; color: #222222;")
-        
+        self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+
         self.text_edit.setMarkdown(text)
-        
+
         font = QFont("Manrope", 16, QFont.Weight.Normal)
         self.text_edit.setFont(font)
-        
+
         self.text_edit.document().setTextWidth(660)
-        
-        self.layout.addWidget(self.text_edit)
+
+        # Add answer text with stretch
+        self.layout.addWidget(self.text_edit, 1)  # This widget takes remaining space
         
         # Add small gray query label
         self.query_label = QLabel(query_text if query_text else "")
@@ -276,14 +415,53 @@ class AnswerWidget(QWidget):
     def set_query_visible(self, visible):
         self.query_label.setVisible(visible)
 
+    def ensure_thinking_widget(self):
+        """Create thinking section if not present (for streaming thoughts first)."""
+        if self.thinking_widget is None:
+            self.thinking_widget = CollapsibleThinkingWidget("")
+            self.thinking_widget.size_changed.connect(self.update_item_size)
+            self.layout.insertWidget(0, self.thinking_widget, 0, Qt.AlignmentFlag.AlignTop)
+
+    def update_thinking(self, text):
+        """Update thinking content; create thinking section if needed. Auto-expands only on first update."""
+        self.ensure_thinking_widget()
+        # The CollapsibleThinkingWidget will handle auto-expanding on the first set_thinking_text call
+        # Subsequent updates will respect the user's collapse/expand choice
+        self.thinking_widget.set_thinking_text(text)
+        self.update_item_size()
+
+    def set_thinking_collapsed(self, collapsed):
+        """Collapse or expand the thinking section (e.g. after </think> when answer starts)."""
+        if self.thinking_widget is not None:
+            self.thinking_widget.set_collapsed(collapsed)
+            self.update_item_size()
+
+    def update_item_size(self):
+        """Updates the size hint in the parent QListWidget."""
+        list_widget = self.window().findChild(QListWidget)
+        if list_widget:
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if list_widget.itemWidget(item) == self:
+                    item.setSizeHint(self.sizeHint())
+                    break
+        
+        # Also notify parent layout
+        if hasattr(self.window(), "adjust_window_height"):
+            self.window().adjust_window_height()
+
     def sizeHint(self):
         self.text_edit.document().setTextWidth(660)
         h = self.text_edit.document().size().height()
-        
+
+        # Add thinking widget height if present
+        if self.thinking_widget is not None:
+            h += self.thinking_widget.sizeHint().height() + 12  # spacing between thinking and text
+
         if self.query_label.isVisible():
-            h += self.query_label.heightForWidth(660) + 16 # Increased padding
-            
-        return QSize(660, int(h) + 48) # Increased bottom padding even more to prevent cutoff
+            h += self.query_label.heightForWidth(660) + 16  # Increased padding
+
+        return QSize(660, int(h) + 48)  # Increased bottom padding even more to prevent cutoff
 
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):

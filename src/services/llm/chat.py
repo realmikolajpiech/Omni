@@ -2,6 +2,7 @@ import logging
 import json
 import re
 import time
+import os
 import subprocess
 from simpleeval import SimpleEval
 from flask import jsonify
@@ -85,7 +86,18 @@ def should_search(query):
 def should_see_screen(query):
     """Uses Fast Model to decide if we need to see the screen."""
     query_lower = query.lower()
-    # High priority patterns
+    
+    # Questions about identity/system information should NOT require screenshots
+    identity_patterns = [
+        "who are you", "what are you", "how are you", "about you",
+        "your name", "tell me about", "what do you do", "what's your name",
+        "describe yourself"
+    ]
+    if any(pattern in query_lower for pattern in identity_patterns):
+        logging.info(f"Screen Intent: NO (identity question) for '{query}'")
+        return False
+    
+    # High priority patterns for screen intent
     screen_patterns = [
         "screen", "look at this", "read this", "screenshot", "what's on", "what is on",
         "visible", "window", "monitor", "display", "capture",
@@ -102,10 +114,11 @@ def should_see_screen(query):
         "Decide if this query requires SEEING the user's SCREEN (taking a screenshot) to answer.\n"
         "Output ONLY 'YES' or 'NO'.\n"
         "YES: 'what is on my screen?', 'summarize this page', 'who is in this video?', 'look at this code', 'explain this error', 'read this', 'which button should i click?', 'what do you see?'.\n"
-        "NO: 'generate an image', 'find a photo of cats', 'what time is it', 'how are you'.\n"
+        "NO: 'who are you?', 'how are you?', 'generate an image', 'find a photo of cats', 'what time is it'.\n"
         "\n"
         "Examples:\n"
         "Query: what is this website? -> YES\n"
+        "Query: who are you? -> NO (identity question)\n"
         "Query: show me a cat -> NO (this is image generation/search)\n"
         "Query: look at this -> YES\n"
         "\n"
@@ -118,36 +131,60 @@ def should_see_screen(query):
     try:
         with fast_lock:
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
-            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
+            # Add timeout to prevent hanging on model inference
+            out = model_manager.fast_model.create_chat_completion(
+                messages=messages, 
+                max_tokens=256, 
+                temperature=0.0,
+                timeout=10  # 10 second timeout for intent check
+            )
         res = out['choices'][0]['message']['content'].strip()
         # Clean up <THINK> blocks
         res = re.sub(r'<THINK>.*?</THINK>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
         logging.info(f"Screen Intent: {res} for '{query}'")
         return "YES" in res
+    except TimeoutError:
+        logging.warning(f"Screen Intent check timed out - defaulting to NO for '{query}'")
+        return False
     except Exception as e:
         logging.error(f"Screen Intent check failed: {e}")
         return False
 
 def extract_actions(text):
-    if not text: return "", []
-    
+    if not text: return "", [], ""
+
     actions = []
     clean_text = text
+    thinking_content = ""
     
+    # First, extract thinking content from <think> tags
+    # This MUST be done BEFORE other processing to avoid contaminating the answer
+    think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL | re.IGNORECASE)
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+        # Remove the ENTIRE think block from text
+        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    else:
+        # Unclosed <think>: treat everything from <think> to end as thinking
+        unclosed = re.search(r'<think>(.*)$', text, re.DOTALL | re.IGNORECASE)
+        if unclosed:
+            thinking_content = unclosed.group(1).strip()
+            clean_text = re.sub(r'<think>.*$', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    
+    # Now process the clean_text (without thinking) for actions and JSON
     # Try to find JSON block
-    # 1. Look for ```json ... ``` (greedy or open-ended)
     json_block = None
     
-    match = re.search(r"```json\s*(.*?)($|```)", text, re.DOTALL | re.IGNORECASE)
+    match = re.search(r"```json\s*(.*?)($|```)", clean_text, re.DOTALL | re.IGNORECASE)
     if match:
         json_block = match.group(1).strip()
-        clean_text = text.replace(match.group(0), "").strip()
-    elif "{" in text:
+        clean_text = clean_text.replace(match.group(0), "").strip()
+    elif "{" in clean_text:
         # Fallback: find { ... }
-        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        match = re.search(r"(\{.*\})", clean_text, re.DOTALL)
         if match:
             json_block = match.group(1).strip()
-            clean_text = text.replace(json_block, "").strip()
+            clean_text = clean_text.replace(json_block, "").strip()
 
     if json_block:
         # PRE-PROCESSING: Auto-close braces
@@ -179,10 +216,48 @@ def extract_actions(text):
 
     # Remove trailing cleanup markers
     clean_text = re.sub(r"(?i)(JSON block for actions|Actions|JSON|Here is the JSON):\s*$", "", clean_text).strip()
-    
-    return clean_text, actions
 
-def process_chat_request(query, history, screenshot_b64=None):
+    return clean_text, actions, thinking_content
+
+
+def _split_thinking_and_answer(text):
+    """Split streamed text into (thinking_so_far, answer_so_far) for UI.
+    
+    DEFAULT: Everything is thinking until </think> is seen.
+    RULE: When </think> appears, everything before it (after <think>) is thinking, everything after is answer.
+    """
+    if not text:
+        return "", ""
+    text = text.strip()
+    
+    # If </think> tag is found, split there
+    if '</think>' in text.lower():
+        # Extract thinking content (between <think> and </think>)
+        think_match = re.search(r'<think>(.*?)</think>\s*(.*)$', text, re.DOTALL | re.IGNORECASE)
+        if think_match:
+            thinking = think_match.group(1).strip()
+            answer = think_match.group(2).strip()
+            return thinking, answer
+        else:
+            # Fallback: if no <think> found but </think> exists, take everything before </think> as thinking
+            match = re.search(r'(.*?)</think>\s*(.*)$', text, re.DOTALL | re.IGNORECASE)
+            if match:
+                thinking = match.group(1).strip()
+                answer = match.group(2).strip()
+                return thinking, answer
+    
+    # No </think> found: check if we have opened <think> tag
+    if '<think>' in text.lower():
+        # Extract everything after <think> as thinking so far (not closed yet)
+        think_match = re.search(r'<think>(.*?)$', text, re.DOTALL | re.IGNORECASE)
+        if think_match:
+            thinking = think_match.group(1).strip()
+            return thinking, ""
+    
+    # No thinking tags at all: everything so far is thinking (default behavior for models without think tags)
+    return text, ""
+
+def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
     abort_fast_event.set()
     ensure_main_model()
@@ -192,7 +267,8 @@ def process_chat_request(query, history, screenshot_b64=None):
 
     # CHECK SCREEN INTENT
     if not screenshot_b64 and should_see_screen(query):
-        logging.info("Requesting Screenshot from Client...")
+        logging.info(f"[SCREENSHOT] Requesting Screenshot from Client for query: '{query}'")
+        logging.info("[SCREENSHOT] Client has 5 seconds to capture and return the screenshot")
         return {"special_action": "screenshot_required"}
 
     context_text = ""
@@ -223,7 +299,6 @@ def process_chat_request(query, history, screenshot_b64=None):
          except Exception as e:
              logging.error(f"Brightness Error: {e}")
              return {"answer": f"I tried to reduce brightness but failed: {e}"}
-
     # HARDCODED: App Launcher (Deterministic Bypass)
     app_match = re.search(r"^(?:open|run|launch|start)\s+(.+)$", query.strip(), re.IGNORECASE)
     if app_match and len(query.split()) < 10:
@@ -525,17 +600,53 @@ Current Conversation:
         abort_fast_event.clear()
         with main_lock:
             if hasattr(model_manager.llm, 'reset'): model_manager.llm.reset()
-            output = model_manager.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=2048,
-                stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
-                temperature=0.1
-            )
-            full_text = output['choices'][0]['message']['content'].strip()
-            if full_text.startswith(':'): full_text = full_text[1:].strip()
-            logging.info(f"RAW LLM OUTPUT:\n{full_text}")
 
-        answer, actions = extract_actions(full_text)
+            if stream:
+                # Real streaming mode - get tokens as they're generated
+                streamer = model_manager.llm.create_chat_completion(
+                    messages=messages,
+                    max_tokens=2048,
+                    temperature=0.1,
+                    stream=True
+                )
+
+                # Yield tokens as they arrive
+                accumulated_text = ""
+                for token in streamer:
+                    accumulated_text += token
+                    # Log streaming chunks so logs show raw response (last 100 chars per chunk)
+                    if accumulated_text:
+                        tail = accumulated_text[-100:] if len(accumulated_text) > 100 else accumulated_text
+                        logging.info(f"[STREAM] raw chunk: ...{tail!r}")
+                    # Split into thinking (collapsible, gray) and answer (main text) for UI
+                    thinking_so_far, answer_so_far = _split_thinking_and_answer(accumulated_text)
+                    # Yield partial whenever we have thinking or answer (so UI can stream both)
+                    if thinking_so_far or answer_so_far:
+                        yield ("partial", {"thinking": thinking_so_far, "answer": answer_so_far})
+
+                # Final processing: use the split result and then extract actions from answer only
+                thinking_content, answer_text = _split_thinking_and_answer(accumulated_text)
+                # Now extract actions/JSON from the answer text only (not from thinking)
+                answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
+                logging.info(f"[STREAM] final raw length={len(accumulated_text)}, thinking length={len(thinking_content)}, answer length={len(answer)}, actions count={len(actions)}")
+                yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
+            else:
+                # Non-streaming mode (original behavior)
+                output = model_manager.llm.create_chat_completion(
+                    messages=messages,
+                    max_tokens=2048,
+                    stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
+                    temperature=0.1
+                )
+                full_text = output['choices'][0]['message']['content'].strip()
+                if full_text.startswith(':'): full_text = full_text[1:].strip()
+                logging.info(f"RAW LLM OUTPUT:\n{full_text}")
+
+                # Use the same splitting logic for consistency
+                thinking_content, answer_text = _split_thinking_and_answer(full_text)
+                # Extract actions from answer only (not from thinking)
+                answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
+                return {"answer": answer, "actions": actions, "thinking": thinking_content}
 
         # VALIDATION: Filter out hallucinated computer_control actions
         valid_actions = []
@@ -607,4 +718,4 @@ Current Conversation:
                      act['status'] = 'error'
                      act['content'] = msg
 
-    return {"answer": answer, "actions": actions}
+    return {"answer": answer, "actions": actions, "thinking": thinking_content}

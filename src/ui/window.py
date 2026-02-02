@@ -1072,17 +1072,258 @@ class OmniWindow(QWidget):
             self.screenshot_worker = ScreenshotWorker()
             self.screenshot_worker.finished.connect(lambda b64: self.start_ai_worker(query, b64))
             self.screenshot_worker.failed.connect(lambda: self.start_ai_worker(query, None))
+            
+            # Add a timeout timer to handle stuck screenshot operations (5 seconds max)
+            self.screenshot_timeout_timer = QTimer()
+            self.screenshot_timeout_timer.setSingleShot(True)
+            self.screenshot_timeout_timer.setInterval(5000)  # 5 seconds
+            self.screenshot_timeout_timer.timeout.connect(lambda: self._handle_screenshot_timeout())
+            self.screenshot_timeout_timer.start()
+            
             self.screenshot_worker.start()
+            logging.info("Screenshot worker started with 5-second timeout")
         else:
             self.start_ai_worker(query, None)
+    
+    def _handle_screenshot_timeout(self):
+        """Handle screenshot operation timeout."""
+        if self.screenshot_worker and self.screenshot_worker.isRunning():
+            logging.warning("Screenshot worker timeout - forcing fallback without screenshot")
+            # Disconnect signals to prevent duplicate processing
+            try:
+                self.screenshot_worker.finished.disconnect()
+                self.screenshot_worker.failed.disconnect()
+            except:
+                pass
+            # Proceed without screenshot
+            self.start_ai_worker(self.input_field.text(), None)
 
     def start_ai_worker(self, query, screenshot_b64):
         self.ai_worker = AIWorker(query, self.chat_history, screenshot_b64)
         self.ai_worker.finished.connect(self.on_ai_response)
+        self.ai_worker.partial_response.connect(self.on_partial_response)
         self.ai_worker.start()
+
+    def on_stream_started(self, data):
+        """Handle the start of streaming by creating the initial answer widget."""
+        # This is similar to on_ai_response but for streaming start
+        self.logo_label.stop_spinning()
+
+        # Remove thinking widget and separator (iterate backwards)
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            role = item.data(Qt.ItemDataRole.UserRole)
+            if role in ["thinking", "separator"]:
+                pass
+
+        # Updated cleanup: Remove 'thinking' AND the specific 'separator' added during thinking phase
+        # The 'separator' added during perform_ai_query for followup is just below 'thinking'.
+        # We need to remove it too, because we are about to re-add a separator in the correct place
+        # (between new answer and old answer).
+        # Actually, we can just REUSE it if it exists, or remove and re-add.
+        # Simpler to remove and re-add to be consistent.
+
+        # We need to find the thinking widget index, and see if there is a separator below it.
+        thinking_idx = -1
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == "thinking":
+                thinking_idx = i
+                break
+
+        if thinking_idx != -1:
+            # Check if next item is separator (thinking is at top/0 usually, so separator at 1)
+            # But we iterate backwards to remove safely.
+
+            # First remove separator if it exists below thinking
+            if thinking_idx + 1 < self.list_widget.count():
+                next_item = self.list_widget.item(thinking_idx + 1)
+                if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
+                    self.list_widget.takeItem(thinking_idx + 1)
+
+            # Then remove thinking
+            self.list_widget.takeItem(thinking_idx)
+
+        # Fallback cleanup for any other thinking widgets
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            role = item.data(Qt.ItemDataRole.UserRole)
+            if role == "thinking":
+                 self.list_widget.takeItem(i)
+
+        answer = data.get("answer", "")
+        thinking = data.get("thinking", "")
+
+        # Determine insertion method (Append vs Prepend)
+        prepend = self.is_history_mode
+        insert_idx = 0
+
+        # Helper to add item based on mode
+        def add_item(w, d):
+            nonlocal insert_idx
+            if prepend:
+                self.insert_list_item(insert_idx, w, d)
+                insert_idx += 1
+            else:
+                self.add_list_item(w, d)
+
+        # Update visibility of existing items if we are prepending (entering history)
+        if prepend:
+            # We are adding a new answer.
+            # Existing items (the old answer) should now show their query labels if they weren't already.
+            # Also, we need to insert a separator before the old answer (which is currently at index 0, before we insert new stuff).
+
+            # Step 1: Insert Separator at top (pushing old answer down)
+            if self.list_widget.count() > 0:
+                self.insert_list_item(0, SeparatorWidget(), "separator")
+                # Do NOT increment insert_idx.
+
+        # Create answer widget with initial streaming data
+        current_query = self.input_field.text()
+        w = AnswerWidget(answer, query_text=current_query, thinking_text=thinking)
+        if prepend:
+            w.set_query_visible(True)
+
+        add_item(w, "answer")
+
+        # Add Actions (initially empty for streaming)
+        actions = data.get("actions", [])
+        for act in actions:
+            if isinstance(act, dict):
+                if act.get('type') == 'link':
+                    w = LinkActionWidget(act['title'], act['url'], act['description'])
+                    add_item(w, act)
+                elif act.get('type') == 'install':
+                    w = InstallActionWidget(act['name'], act.get('website'))
+                    add_item(w, act)
+                elif act.get('type') == 'status':
+                    w = StandardItemWidget(act['description'], icon_name="dialog-information")
+                    add_item(w, act)
+
+    def _unwrap_answer_widget(self, item):
+        """Get the real AnswerWidget from a list item (unwrap SmoothEntryWidget)."""
+        w = self.list_widget.itemWidget(item)
+        if isinstance(w, SmoothEntryWidget):
+            w = w.content_widget
+        return w
+
+    def on_partial_response(self, data):
+        """Handle partial streaming: show thinking in collapsible (gray), answer in main. Collapse thinking when answer starts."""
+        self.logo_label.stop_spinning()
+
+        thinking = data.get("thinking", "")
+        answer = data.get("answer", "")
+
+        # Find existing answer widget or create one
+        answer_widget = None
+        answer_item = None
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == "answer":
+                answer_item = item
+                answer_widget = self._unwrap_answer_widget(item)
+                break
+
+        if answer_widget is None:
+            # First partial: create widget WITHOUT thinking in constructor, add it dynamically
+            prepend = self.is_history_mode
+            if prepend and self.list_widget.count() > 0:
+                self.insert_list_item(0, SeparatorWidget(), "separator")
+
+            current_query = self.input_field.text()
+            # Create answer widget with empty answer and NO thinking_text (we'll add thinking dynamically)
+            answer_widget = AnswerWidget("", query_text=current_query, thinking_text="")
+            
+            # Now add/update thinking dynamically
+            if thinking:
+                answer_widget.ensure_thinking_widget()
+                answer_widget.update_thinking(thinking)
+                # Keep thinking expanded while we're still thinking (no answer yet)
+                answer_widget.set_thinking_collapsed(False)
+            
+            if prepend:
+                answer_widget.set_query_visible(True)
+                self.insert_list_item(0, answer_widget, "answer")
+            else:
+                self.add_list_item(answer_widget, "answer")
+        else:
+            # Update existing: stream thinking in collapsible, answer in main
+            if thinking:
+                answer_widget.ensure_thinking_widget()
+                answer_widget.update_thinking(thinking)
+            
+            if answer:
+                # When answer appears, collapse thinking and show answer in main text
+                if thinking:
+                    answer_widget.set_thinking_collapsed(True)
+                if hasattr(answer_widget, 'text_edit'):
+                    answer_widget.text_edit.setMarkdown(answer)
+            # Don't force expand/collapse while streaming - let user control it or auto-expand only once on first update
+            
+            answer_widget.updateGeometry()
+            if answer_item is not None:
+                answer_item.setSizeHint(answer_widget.sizeHint())
+                self.adjust_window_height(animate=False)
+
+        self.list_widget.update()
+        if hasattr(self, "adjust_window_height"):
+            self.adjust_window_height(animate=False)
 
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
+
+        # Check if we already have a streaming answer widget
+        has_streaming_answer = False
+        for i in range(self.list_widget.count() - 1, -1, -1):
+            item = self.list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == "answer":
+                widget = self._unwrap_answer_widget(item)
+                if widget and hasattr(widget, 'text_edit'):
+                    # Update the existing streaming widget with final data
+                    answer = data.get("answer", "")
+                    thinking = data.get("thinking", "")
+                    actions = data.get("actions", [])
+                    
+                    # Update thinking and answer
+                    if thinking:
+                        widget.ensure_thinking_widget()
+                        widget.update_thinking(thinking)
+                        widget.set_thinking_collapsed(True)  # Collapse thinking after final response
+                    
+                    widget.text_edit.setMarkdown(answer)
+
+                    # Add any final actions that weren't added during streaming
+                    if actions:
+                        # Find where to insert actions (after the answer widget)
+                        insert_pos = i + 1
+                        for act in actions:
+                            if isinstance(act, dict):
+                                if act.get('type') == 'link':
+                                    w = LinkActionWidget(act['title'], act['url'], act['description'])
+                                    self.insert_list_item(insert_pos, w, act)
+                                    insert_pos += 1
+                                elif act.get('type') == 'install':
+                                    w = InstallActionWidget(act['name'], act.get('website'))
+                                    self.insert_list_item(insert_pos, w, act)
+                                    insert_pos += 1
+                                elif act.get('type') == 'status':
+                                    w = StandardItemWidget(act['description'], icon_name="dialog-information")
+                                    self.insert_list_item(insert_pos, w, act)
+                                    insert_pos += 1
+
+                    # Recalculate sizes after all updates
+                    widget.updateGeometry()
+                    # Force recalculation of sizeHint to get accurate collapsed/expanded height
+                    new_size = widget.sizeHint()
+                    item.setSizeHint(new_size)
+                    
+                    self.list_widget.update()
+                    self.adjust_window_height(animate=False)
+                    has_streaming_answer = True
+                    break
+
+        if has_streaming_answer:
+            return  # Already handled the response via streaming
         
         # Remove thinking widget and separator (iterate backwards)
         # Note: In perform_ai_query we removed the separator for followup, 
@@ -1146,12 +1387,38 @@ class OmniWindow(QWidget):
 
         answer = data.get("answer", "")
         actions = data.get("actions", [])
+        thinking = data.get("thinking", "")
         special = data.get("special_action")
 
         if special == "screenshot_required":
-            # Retry with screenshot
+            # Retry with screenshot, with timeout + failure fallback
+            original_query = self.input_field.text()
+
             self.screenshot_worker = ScreenshotWorker()
-            self.screenshot_worker.finished.connect(lambda b64: self.start_ai_worker(self.input_field.text(), b64))
+            # On success, proceed with screenshot and stop any timeout timer
+            def _on_screenshot_finished(b64):
+                if hasattr(self, "screenshot_timeout_timer") and self.screenshot_timeout_timer:
+                    self.screenshot_timeout_timer.stop()
+                self.start_ai_worker(original_query, b64)
+
+            # On failure, proceed without screenshot
+            def _on_screenshot_failed():
+                if hasattr(self, "screenshot_timeout_timer") and self.screenshot_timeout_timer:
+                    self.screenshot_timeout_timer.stop()
+                logging.warning("Screenshot worker failed after screenshot_required – falling back without screenshot")
+                self.start_ai_worker(original_query, None)
+
+            self.screenshot_worker.finished.connect(_on_screenshot_finished)
+            self.screenshot_worker.failed.connect(_on_screenshot_failed)
+
+            # Add a timeout timer to handle stuck screenshot operations (5 seconds max)
+            self.screenshot_timeout_timer = QTimer()
+            self.screenshot_timeout_timer.setSingleShot(True)
+            self.screenshot_timeout_timer.setInterval(5000)  # 5 seconds
+            self.screenshot_timeout_timer.timeout.connect(lambda: self._handle_screenshot_timeout())
+            self.screenshot_timeout_timer.start()
+
+            logging.info("Screenshot requested by backend (screenshot_required); worker started with 5-second timeout")
             self.screenshot_worker.start()
             return
 
@@ -1217,7 +1484,7 @@ class OmniWindow(QWidget):
             # If prepend, visible=True.
             
             current_query = self.input_field.text()
-            w = AnswerWidget(answer, query_text=current_query)
+            w = AnswerWidget(answer, query_text=current_query, thinking_text=thinking)
             if prepend:
                 w.set_query_visible(True)
             

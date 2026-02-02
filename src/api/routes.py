@@ -2,17 +2,36 @@ import time
 import json
 import logging
 import torch
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 
 from src.core.config import COMMON_SHORTCUTS
 from src.services.llm import model_manager
-from src.services.llm.chat import process_chat_request, perform_calculation
+from src.services.llm.chat import process_chat_request, perform_calculation, should_see_screen
 from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
 from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata
 from src.services.system.installer import generate_install_plan, log_debug
 
 api_bp = Blueprint('api', __name__)
+
+
+@api_bp.route('/health', methods=['GET'])
+def health_check():
+    """Simple health check endpoint that doesn't require model loading."""
+    return jsonify({"status": "ok", "service": "brain"})
+
+
+@api_bp.route('/status', methods=['GET'])
+def status_check():
+    """Check if models are loaded."""
+    main_loaded = model_manager.llm is not None
+    fast_loaded = model_manager.fast_model is not None
+    return jsonify({
+        "main_model_loaded": main_loaded,
+        "fast_model_loaded": fast_loaded,
+        "main_model_name": getattr(model_manager, 'MAIN_MODEL_FILENAME', 'Unknown'),
+        "fast_model_name": getattr(model_manager, 'FAST_MODEL_HF_ID', 'Unknown')
+    })
 
 
 def _sanitize_search_query(extracted: str, original: str) -> str:
@@ -56,8 +75,49 @@ def ask_llm():
     if not model_manager.llm:
          return jsonify({"answer": "The Omni AI hasn't loaded yet. Please try again in a moment."}), 503
 
-    response = process_chat_request(query, history, screenshot_b64)
-    return jsonify(response)
+    # Check if streaming is requested
+    stream = req.get("stream", False)
+
+    if stream:
+        # Streaming response
+
+        # First, check if we need a screenshot before calling the main chat pipeline.
+        # This avoids hanging the streaming connection when the backend requests a screenshot.
+        if not screenshot_b64 and should_see_screen(query):
+            logging.info(f"[SCREENSHOT] Requesting Screenshot from Client for query: '{query}'")
+            logging.info("[SCREENSHOT] Client has 5 seconds to capture and return the screenshot")
+
+            def screenshot_stream():
+                try:
+                    # Send a special event so the client can trigger screenshot capture.
+                    payload = {"type": "special", "special_action": "screenshot_required"}
+                    yield f'data: {json.dumps(payload)}\n\n'
+                except Exception as e:
+                    yield f'data: {json.dumps({"type": "error", "error": str(e)})}\n\n'
+
+            return Response(screenshot_stream(), mimetype="text/event-stream")
+
+        def stream_generator():
+            try:
+                for msg_type, content in process_chat_request(query, history, screenshot_b64, stream=True):
+                    if msg_type == "partial":
+                        # content is dict with "thinking" and "answer"
+                        thinking = content.get("thinking", "")
+                        answer = content.get("answer", "")
+                        if thinking or answer:
+                            logging.info(f"[STREAM] sending partial (thinking={len(thinking)} chars, answer={len(answer)} chars)")
+                        yield f'data: {json.dumps({"type": "partial", "thinking": thinking, "answer": answer})}\n\n'
+                    elif msg_type == "final":
+                        # Send final response
+                        yield f'data: {json.dumps({"type": "final", **content})}\n\n'
+            except Exception as e:
+                yield f'data: {json.dumps({"type": "error", "error": str(e)})}\n\n'
+
+        return Response(stream_generator(), mimetype="text/event-stream")
+    else:
+        # Non-streaming response
+        response = process_chat_request(query, history, screenshot_b64)
+        return jsonify(response)
 
 @api_bp.route('/search', methods=['POST'])
 def search_endpoint():
@@ -105,6 +165,12 @@ def action_endpoint():
         if old_request_id is not None:
             logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
             model_manager.abort_fast_event.set()
+    
+    # Check if abort was already set (meaning main AI model is starting)
+    # If so, this action request should be aborted immediately
+    if model_manager.abort_fast_event.is_set():
+        logging.info(f"Action endpoint {request_id}: Abort event already set, skipping action request")
+        return jsonify({"actions": []})
     
     # Clear abort event for this new request to proceed
     # (set() was only for cancelling the old request)

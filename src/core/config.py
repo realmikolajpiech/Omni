@@ -18,9 +18,9 @@ FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"  # legacy / fallback
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
 FAST_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 
-MAIN_MODEL_FILENAME = "Qwen/Qwen3-VL-4B-Instruct"
-MAIN_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct" # Transformers uses repo ID directly
-MAIN_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct"
+MAIN_MODEL_FILENAME = "Qwen/Qwen3-VL-4B-Thinking"
+MAIN_MODEL_PATH = "Qwen/Qwen3-VL-4B-Thinking" # Transformers uses repo ID directly
+MAIN_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking"
 
 MMPROJ_FILENAME = None # Not needed for Transformers
 MMPROJ_PATH = None

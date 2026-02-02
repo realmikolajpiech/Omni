@@ -1,10 +1,13 @@
 from PyQt6.QtWidgets import QListWidget, QAbstractItemView
-from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 
 class SmoothScrollListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Prevent any horizontal scroll (range 0-0)
+        self.horizontalScrollBar().setRange(0, 0)
         self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value")
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutQuart) # Premium feel
         self._scroll_anim.setDuration(600) # Longer glide

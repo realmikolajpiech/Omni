@@ -17,12 +17,28 @@ def create_app():
     app.register_blueprint(api_bp)
     return app
 
+def load_models_background():
+    """Load models in background with error handling."""
+    try:
+        ensure_model_loaded()
+        logging.info("Model loading completed successfully")
+    except Exception as e:
+        logging.error(f"Model loading failed: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+
 if __name__ == "__main__":
     app = create_app()
     logging.info(f"Starting Brain Service on {BRAIN_HOST}:{BRAIN_PORT}")
-    
-    # Preload models in background
+
+    # Preload models in background with error handling
     import threading
-    threading.Thread(target=ensure_model_loaded).start()
-    
-    app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)
+    model_thread = threading.Thread(target=load_models_background, daemon=True)
+    model_thread.start()
+
+    try:
+        app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)
+    except Exception as e:
+        logging.error(f"Flask app failed: {e}")
+        import traceback
+        logging.error(traceback.format_exc())

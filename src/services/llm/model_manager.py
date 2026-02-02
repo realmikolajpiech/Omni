@@ -4,7 +4,7 @@ import threading
 import requests
 import torch
 try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig, TextIteratorStreamer
 except ImportError:
     logging.warning("transformers not fully installed, some models may not load.")
 
@@ -297,7 +297,7 @@ def ensure_main_model():
     if not Llama: return
 
     # Check if we are using the "Transformers" model (based on config variable name or content)
-    USE_TRANSFORMERS = "Qwen3-VL-4B-Instruct" in MAIN_MODEL_FILENAME and "gguf" not in MAIN_MODEL_FILENAME.lower()
+    USE_TRANSFORMERS = "Qwen3-VL-4B" in MAIN_MODEL_FILENAME and "gguf" not in MAIN_MODEL_FILENAME.lower()
     
     if USE_TRANSFORMERS:
         with main_lock:
@@ -355,41 +355,69 @@ def ensure_main_model():
                         self.model = model
                         self.processor = processor
                         
-                    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, **kwargs):
+                    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, **kwargs):
                         # Convert messages to text/inputs
                         # This is a simplified wrapper.
                         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
-                        
+
                         # Handle images if present in messages (needs complex parsing)
                         # For now, let's assume text-only or simple image structure
-                        
+
                         inputs = self.processor(
                             text=[text],
-                            images=None, 
+                            images=None,
                             padding=True,
                             return_tensors="pt"
                         ).to(self.model.device)
-                        
-                        generated_ids = self.model.generate(**inputs, max_new_tokens=max_tokens)
-                        output_text = self.processor.batch_decode(
-                            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-                        )[0]
-                        
-                        # Remove input text from output
-                        # The model might return the input prompt in the output, so we should clean it.
-                        if output_text.startswith(text):
-                            output_text = output_text[len(text):]
-                        elif "assistant\n" in output_text:
-                            output_text = output_text.split("assistant\n", 1)[1]
-                        
-                        return {
-                            "choices": [{
-                                "message": {
-                                    "role": "assistant",
-                                    "content": output_text
-                                }
-                            }]
-                        }
+
+                        if stream:
+                            # Streaming mode
+                            from threading import Thread
+
+                            # Set up streamer
+                            streamer = TextIteratorStreamer(
+                                self.processor.tokenizer,
+                                skip_prompt=True,
+                                skip_special_tokens=True,
+                                clean_up_tokenization_spaces=False
+                            )
+
+                            # Generation parameters
+                            gen_kwargs = {
+                                **inputs,
+                                "max_new_tokens": max_tokens,
+                                "do_sample": temperature > 0,
+                                "temperature": temperature if temperature > 0 else None,
+                                "streamer": streamer,
+                            }
+
+                            # Start generation in background thread
+                            thread = Thread(target=self.model.generate, kwargs=gen_kwargs)
+                            thread.start()
+
+                            return streamer
+                        else:
+                            # Non-streaming mode (original behavior)
+                            generated_ids = self.model.generate(**inputs, max_new_tokens=max_tokens)
+                            output_text = self.processor.batch_decode(
+                                generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                            )[0]
+
+                            # Remove input text from output
+                            # The model might return the input prompt in the output, so we should clean it.
+                            if output_text.startswith(text):
+                                output_text = output_text[len(text):]
+                            elif "assistant\n" in output_text:
+                                output_text = output_text.split("assistant\n", 1)[1]
+
+                            return {
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": output_text
+                                    }
+                                }]
+                            }
 
                 llm = TransformersWrapper(model, processor)
                 logging.info("Main Model Loaded (Transformers).")
