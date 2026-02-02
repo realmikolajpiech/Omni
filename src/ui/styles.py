@@ -62,6 +62,18 @@ QListWidget::item {
     color: #333333;
     font-family: "Manrope";
     font-size: 15px;
+}
+
+QListWidget::item:selected {
+    background-color: transparent;
+}
+
+QListWidget::item:selected:hover {
+    background-color: transparent;
+}
+
+QListWidget::item:hover {
+    background-color: transparent;
     font-weight: 500;
     border: 1px solid transparent;
     background-color: rgba(255, 255, 255, 0.0); /* Transparent by default */

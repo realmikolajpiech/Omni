@@ -35,6 +35,7 @@ pytz
 nagisa
 soynlp
 qwen-omni-utils
+qwen_asr
 
 # Windows specific
 pywin32; sys_platform == 'win32'

@@ -12,6 +12,31 @@ class SmoothScrollListWidget(QListWidget):
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutQuart) # Premium feel
         self._scroll_anim.setDuration(600) # Longer glide
         self._target_val = 0
+        
+        # Track keyboard vs mouse selection
+        self._keyboard_locked = False  # When True, ignore mouse hover
+        self.itemEntered.connect(self._on_item_entered)
+    
+    def _on_item_entered(self, item):
+        """Called when mouse hovers over an item - hover IS selection."""
+        # If keyboard is locked (arrow keys were pressed), ignore mouse
+        if self._keyboard_locked:
+            return
+        
+        if item:
+            row = self.row(item)
+            if row >= 0 and self.currentRow() != row:
+                # Hover IS selection - directly select the hovered item
+                self.blockSignals(True)
+                self.setCurrentRow(row)
+                self.blockSignals(False)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse movement - unlocks keyboard lock."""
+        # Mouse movement resumes mouse control
+        self._keyboard_locked = False
+        # Let parent handle mouse move
+        super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
         # Calculate delta
@@ -39,3 +64,10 @@ class SmoothScrollListWidget(QListWidget):
         self._scroll_anim.start()
         
         event.accept()
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation - locks out mouse cursor."""
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            # Keyboard navigation locks out the mouse cursor
+            self._keyboard_locked = True
+        super().keyPressEvent(event)

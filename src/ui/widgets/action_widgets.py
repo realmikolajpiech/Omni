@@ -3,9 +3,11 @@ import threading
 import logging
 import requests
 from urllib.parse import urlparse
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
@@ -208,10 +210,18 @@ class InstallActionWidget(LinkActionWidget):
         layout.addStretch()
 
 class FileActionWidget(QWidget):
+    """File action widget with space-to-preview functionality."""
+    
+    # Signal emitted when space is pressed to show full preview
+    preview_requested = pyqtSignal(str, str)  # (path, content)
+    
     def __init__(self, filename, path, icon_name=None, parent=None):
         super().__init__(parent)
         self.filename = filename
         self.path = path
+        self.preview_expanded = False
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -235,7 +245,7 @@ class FileActionWidget(QWidget):
         card_layout.setContentsMargins(12, 12, 12, 12)
         card_layout.setSpacing(4)
 
-        # Top Row: Icon + Label
+        # Top Row: Icon + Label + SPACE Hint
         top_row = QWidget()
         top_layout = QHBoxLayout(top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -245,15 +255,21 @@ class FileActionWidget(QWidget):
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Load icon
+        # Load icon - Try to get actual file icon
         if not icon_name:
-            icon_name = "folder" if os.path.isdir(path) else "text-x-generic"
+            icon_name = self._get_best_icon_name(path)
         
-        icon = QIcon.fromTheme(icon_name)
+        icon = self._load_file_icon(icon_name, path)
         if not icon.isNull():
             self.icon_label.setPixmap(icon.pixmap(18, 18))
         else:
-            self.icon_label.setText("📄")
+            # Fallback to generic icon
+            fallback_icon = "folder" if os.path.isdir(path) else "text-x-generic"
+            fallback = QIcon.fromTheme(fallback_icon)
+            if not fallback.isNull():
+                self.icon_label.setPixmap(fallback.pixmap(18, 18))
+            else:
+                self.icon_label.setText("📄")
 
         self.icon_label.setStyleSheet("""
             background-color: #FFFFFF; 
@@ -268,6 +284,61 @@ class FileActionWidget(QWidget):
         top_layout.addWidget(self.icon_label)
         top_layout.addWidget(self.action_label)
         top_layout.addStretch()
+        
+        # Keyboard hints (top right) - Similar to INSTALL widget
+        if not os.path.isdir(path):
+            # CTRL+S for preview
+            ctrl_s_key = QLabel("CTRL+S")
+            ctrl_s_key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ctrl_s_key.setFixedHeight(24)
+            ctrl_s_key.setFixedWidth(50)
+            ctrl_s_key.setStyleSheet("""
+                background-color: #FFFFFF;
+                border: 1px solid #D6D6D6;
+                border-bottom: 2px solid #C0C0C0;
+                border-radius: 5px;
+                color: #333333;
+                padding: 0px;
+                font-family: "Manrope";
+                font-size: 8px;
+                font-weight: 800;
+            """)
+            
+            preview_label = QLabel("PREVIEW")
+            preview_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+            preview_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
+            preview_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            preview_label.setFixedHeight(24)
+            
+            top_layout.addWidget(ctrl_s_key)
+            top_layout.addWidget(preview_label)
+        
+        # ENTER hint
+        enter_key = QLabel("↵")
+        enter_key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        enter_key.setFixedHeight(24)
+        enter_key.setFixedWidth(30)
+        enter_key.setStyleSheet("""
+            background-color: #FFFFFF;
+            border: 1px solid #D6D6D6;
+            border-bottom: 2px solid #C0C0C0;
+            border-radius: 5px;
+            color: #333333;
+            padding: 0px;
+            font-family: "Manrope";
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 24px;
+        """)
+        
+        open_label = QLabel("OPEN")
+        open_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        open_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
+        open_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        open_label.setFixedHeight(24)
+        
+        top_layout.addWidget(enter_key)
+        top_layout.addWidget(open_label)
 
         # Title
         self.title_label = QLabel(filename)
@@ -289,7 +360,6 @@ class FileActionWidget(QWidget):
         # Content Peek
         self.peek_label = QLabel()
         self.peek_label.setWordWrap(True)
-        # self.peek_label.setFont(QFont("JetBrains Mono", 10)) # JetBrains Mono might not be installed
         self.peek_label.setFont(QFont("Consolas", 10))
         self.peek_label.setStyleSheet("color: #777777; background-color: rgba(0,0,0,0.03); border-radius: 8px; padding: 8px; margin-top: 4px;")
         self.peek_label.setHidden(True)
@@ -297,43 +367,109 @@ class FileActionWidget(QWidget):
 
         layout.addWidget(self.card)
         
+        # Load preview automatically for images
         if not os.path.isdir(path):
-            # Check for image extension
             _, ext = os.path.splitext(path)
             if ext.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}:
                 self.load_image_preview()
             else:
-                threading.Thread(target=self.peek_content, daemon=True).start()
+                # Start loading content preview in background
+                threading.Thread(target=self.load_preview_content, daemon=True).start()
+    
+    def load_preview_content(self):
+        """Load preview content for various file types."""
+        try:
+            _, ext = os.path.splitext(self.path)
+            ext = ext.lower()
+            
+            # Text-based files
+            text_extensions = {
+                '.txt', '.md', '.py', '.js', '.html', '.css', '.json', 
+                '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+                '.sh', '.bat', '.cmd', '.ps1', '.lua', '.rb', '.go',
+                '.java', '.cpp', '.c', '.h', '.hpp', '.cs', '.swift',
+                '.rs', '.ts', '.tsx', '.jsx', '.vue', '.sql', '.r',
+                '.dockerfile', '.env', '.log'
+            }
+            
+            # Image files
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.ico', '.svg'}
+            
+            # JSON/structured data
+            data_extensions = {'.json', '.yaml', '.yml', '.toml', '.xml', '.csv'}
+            
+            if ext in text_extensions or ext in data_extensions:
+                with open(self.path, 'r', errors='ignore') as f:
+                    content = f.read(3000).strip()  # Read more for preview (3KB)
+                    if content:
+                        lines = content.split('\n')[:20]  # Show first 20 lines
+                        snippet = "\n".join(lines)
+                        from PyQt6.QtCore import QMetaObject, Q_ARG
+                        QMetaObject.invokeMethod(
+                            self.peek_label, "setText", 
+                            Qt.ConnectionType.QueuedConnection, 
+                            Q_ARG(str, snippet)
+                        )
+                        QMetaObject.invokeMethod(
+                            self.peek_label, "show", 
+                            Qt.ConnectionType.QueuedConnection
+                        )
+        except Exception as e:
+            logging.debug(f"Could not load preview for {self.path}: {e}")
 
     def load_image_preview(self):
+        """Load image preview."""
         try:
             pix = QPixmap(self.path)
             if not pix.isNull():
-                 # Scale comfortably (e.g. max height 300)
                  scaled = pix.scaledToHeight(250, Qt.TransformationMode.SmoothTransformation)
                  self.peek_label.setPixmap(scaled)
-                 # Remove the "box" styling for images
                  self.peek_label.setStyleSheet("background: transparent; padding: 0; margin-top: 4px;")
                  self.peek_label.setHidden(False)
         except: pass
 
-    def peek_content(self):
+    def get_file_preview(self) -> str:
+        """Get file preview content for various file types."""
         try:
-            # Only read first 300 chars
-            with open(self.path, 'r', errors='ignore') as f:
-                  content = f.read(300).strip()
-                  if content:
-                       # Clean up content (no tabs, multiple newlines)
-                       lines = [l.strip() for l in content.split('\n') if l.strip()]
-                       snippet = "\n".join(lines[:3]) # First 3 lines
-                       if snippet:
-                           from PyQt6.QtCore import QMetaObject, Q_ARG
-                           QMetaObject.invokeMethod(self.peek_label, "setText", Qt.ConnectionType.QueuedConnection, Q_ARG(str, snippet))
-                           QMetaObject.invokeMethod(self.peek_label, "show", Qt.ConnectionType.QueuedConnection)
-                           # Force size update
-                           if hasattr(self.window(), "adjust_window_height"):
-                               QMetaObject.invokeMethod(self.window(), "adjust_window_height", Qt.ConnectionType.QueuedConnection)
-        except: pass
+            _, ext = os.path.splitext(self.path)
+            ext = ext.lower()
+            
+            # Text-based files
+            text_extensions = {
+                '.txt', '.md', '.py', '.js', '.html', '.css', '.json', 
+                '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+                '.sh', '.bat', '.cmd', '.ps1', '.lua', '.rb', '.go',
+                '.java', '.cpp', '.c', '.h', '.hpp', '.cs', '.swift',
+                '.rs', '.ts', '.tsx', '.jsx', '.vue', '.sql', '.r',
+                '.dockerfile', '.env', '.log', '.csv'
+            }
+            
+            if ext in text_extensions:
+                with open(self.path, 'r', errors='ignore') as f:
+                    content = f.read(15000)  # Read up to 15KB for preview (much more content)
+                    return content
+            
+            # Binary/media files
+            elif ext in {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.ico', '.svg'}:
+                return f"[Image Preview]\nFile: {self.filename}\nType: Image ({ext[1:].upper()})"
+            
+            elif ext in {'.pdf', '.docx', '.xlsx', '.pptx'}:
+                return f"[Document]\nFile: {self.filename}\nType: {ext[1:].upper()} Document"
+            
+            elif ext in {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2'}:
+                return f"[Archive]\nFile: {self.filename}\nType: Archive ({ext[1:].upper()})"
+            
+            elif ext in {'.mp3', '.mp4', '.avi', '.mov', '.mkv', '.flv', '.wav'}:
+                return f"[Media File]\nFile: {self.filename}\nType: Media ({ext[1:].upper()})"
+            
+            elif ext in {'.exe', '.dll', '.so', '.dylib', '.bin'}:
+                return f"[Executable]\nFile: {self.filename}\nType: Binary Executable"
+            
+            else:
+                return f"[Binary File]\nFile: {self.filename}\nExtension: {ext}"
+        
+        except Exception as e:
+            return f"[Error]\nCould not load preview: {str(e)}"
 
     def sizeHint(self):
         w = getattr(self.parent(), 'width', lambda: 660)()
@@ -343,6 +479,144 @@ class FileActionWidget(QWidget):
             # Basic fallback height
             return QSize(660, 96)
         return QSize(660, 96)
+    
+    def show_context_menu(self, position):
+        """Show context menu with copy path option."""
+        menu = QMenu(self)
+        
+        # Copy Path action
+        copy_action = menu.addAction("Copy Path")
+        copy_action.triggered.connect(self.copy_path_to_clipboard)
+        
+        menu.addSeparator()
+        
+        # Open in file explorer
+        open_explorer_action = menu.addAction("Open in File Explorer")
+        open_explorer_action.triggered.connect(self.open_in_explorer)
+        
+        # Show menu at cursor position
+        menu.exec(self.mapToGlobal(position))
+    
+    def copy_path_to_clipboard(self):
+        """Copy file path to clipboard."""
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(self.path)
+    
+    def open_in_explorer(self):
+        """Open file in file explorer."""
+        import subprocess
+        import platform
+        
+        if platform.system() == 'Windows':
+            # Windows: Open in File Explorer
+            subprocess.Popen(f'explorer /select,"{self.path}"')
+        elif platform.system() == 'Darwin':
+            # macOS: Open in Finder
+            subprocess.Popen(['open', '-R', self.path])
+        else:
+            # Linux: Open directory in file manager
+            import os
+            directory = os.path.dirname(self.path)
+            subprocess.Popen(['xdg-open', directory])
+    
+    def _get_best_icon_name(self, path: str) -> str:
+        """Get the best icon name for a file based on extension."""
+        _, ext = os.path.splitext(path)
+        ext = ext.lower()
+        
+        # Map file extensions to theme icon names
+        icon_map = {
+            # Code
+            '.py': 'text-x-python',
+            '.js': 'text-x-javascript',
+            '.ts': 'text-x-typescript',
+            '.jsx': 'text-x-javascript',
+            '.tsx': 'text-x-typescript',
+            '.java': 'text-x-java',
+            '.cpp': 'text-x-cpp',
+            '.c': 'text-x-c',
+            '.h': 'text-x-header',
+            '.go': 'text-x-go',
+            '.rs': 'text-x-rust',
+            '.rb': 'text-x-ruby',
+            # Web
+            '.html': 'text-html',
+            '.css': 'text-css',
+            '.xml': 'text-xml',
+            # Data
+            '.json': 'application-json',
+            '.yaml': 'text-yaml',
+            '.yml': 'text-yaml',
+            '.csv': 'text-csv',
+            '.sql': 'text-x-sql',
+            # Documents
+            '.pdf': 'application-pdf',
+            '.txt': 'text-plain',
+            '.md': 'text-markdown',
+            '.doc': 'application-msword',
+            '.docx': 'application-msword',
+            '.xls': 'application-vnd.ms-excel',
+            '.xlsx': 'application-vnd.ms-excel',
+            '.ppt': 'application-vnd.ms-powerpoint',
+            '.pptx': 'application-vnd.ms-powerpoint',
+            # Images
+            '.png': 'image-png',
+            '.jpg': 'image-jpeg',
+            '.jpeg': 'image-jpeg',
+            '.gif': 'image-gif',
+            '.svg': 'image-svg+xml',
+            '.ico': 'image-x-icon',
+            '.bmp': 'image-bmp',
+            # Archives
+            '.zip': 'application-zip',
+            '.rar': 'application-x-rar',
+            '.7z': 'application-x-7z-compressed',
+            '.tar': 'application-x-tar',
+            '.gz': 'application-gzip',
+            '.bz2': 'application-x-bzip2',
+            # Media
+            '.mp3': 'audio-mpeg',
+            '.wav': 'audio-wav',
+            '.mp4': 'video-mp4',
+            '.avi': 'video-avi',
+            '.mkv': 'video-x-matroska',
+            '.mov': 'video-quicktime',
+            # Executable
+            '.exe': 'application-x-executable',
+            '.sh': 'text-x-shellscript',
+            '.bat': 'application-x-bat',
+            '.ps1': 'text-x-powershell',
+        }
+        
+        if ext in icon_map:
+            return icon_map[ext]
+        
+        # Fallback based on file type
+        if os.path.isdir(path):
+            return 'folder'
+        return 'text-x-generic'
+    
+    def _load_file_icon(self, icon_name: str, path: str) -> QIcon:
+        """Load file icon with fallback chain."""
+        # Try the suggested icon name first
+        icon = QIcon.fromTheme(icon_name)
+        if not icon.isNull():
+            return icon
+        
+        # Try generic fallbacks
+        fallbacks = [
+            'text-x-generic',
+            'document',
+            'application-octet-stream',
+        ]
+        
+        for fallback in fallbacks:
+            icon = QIcon.fromTheme(fallback)
+            if not icon.isNull():
+                return icon
+        
+        # Return empty icon if nothing works
+        return QIcon()
 
 class PersonActionWidget(QWidget):
     image_downloaded = pyqtSignal(object)

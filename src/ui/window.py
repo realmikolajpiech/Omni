@@ -31,6 +31,7 @@ from src.ui.workers.search_worker import SearchWorker
 from src.ui.workers.action_worker import ActionWorker
 from src.ui.workers.screenshot_worker import ScreenshotWorker
 from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker
+from src.ui.workers.file_search_worker import FileSearchWorker
 
 try:
     from BlurWindow.blurWindow import blur
@@ -184,8 +185,32 @@ class OmniWindow(QWidget):
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.itemClicked.connect(self.on_entered)
-        self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.list_widget.setStyleSheet("outline: none;")
+        self.list_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow keyboard nav
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_widget.setMouseTracking(True)  # Enable mouse tracking for smooth hover
+        self.list_widget.setStyleSheet("""
+            QListWidget {
+                outline: none;
+                background: transparent;
+                border: none;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(255, 255, 255, 0.15);
+                border-radius: 16px;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.15);
+                border-radius: 16px;
+            }
+            QListWidget::item:selected:hover {
+                background-color: rgba(255, 255, 255, 0.15);
+                border-radius: 16px;
+            }
+            QListWidget::item:focus {
+                background-color: rgba(255, 255, 255, 0.15);
+                outline: none;
+            }
+        """)
 
         content_layout.addWidget(self.input_container)
         content_layout.addWidget(self.divider)
@@ -211,13 +236,14 @@ class OmniWindow(QWidget):
         self.search_worker = None
         self.action_worker = None
         self.ai_worker = None
+        self.file_search_worker = None
 
         self.external_actions = []
         self.external_search_results = []
 
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
-        self.debounce_timer.setInterval(650)
+        self.debounce_timer.setInterval(300)  # FAST: Reduced from 650ms to 300ms
         self.debounce_timer.timeout.connect(self.trigger_async_searches)
 
         # Start IPC Listener
@@ -634,11 +660,44 @@ class OmniWindow(QWidget):
     def eventFilter(self, obj, event):
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Down:
-                self.list_widget.setCurrentRow(min(self.list_widget.count()-1, self.list_widget.currentRow()+1))
+                # Navigate down in list
+                current_row = self.list_widget.currentRow()
+                if current_row < 0 and self.list_widget.count() > 0:
+                    # No current selection, select first
+                    self.list_widget.setCurrentRow(0)
+                elif current_row < self.list_widget.count() - 1:
+                    # Move to next
+                    self.list_widget.setCurrentRow(current_row + 1)
                 return True
             elif event.key() == Qt.Key.Key_Up:
-                self.list_widget.setCurrentRow(max(0, self.list_widget.currentRow()-1))
+                # Navigate up in list
+                current_row = self.list_widget.currentRow()
+                if current_row > 0:
+                    self.list_widget.setCurrentRow(current_row - 1)
                 return True
+            elif event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                # CTRL+S for preview on currently selected file
+                logging.debug("CTRL+S pressed - attempting preview")
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    data = current_item.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(data, dict) and data.get('type') == 'open_file':
+                        logging.debug(f"Showing preview for {data['path']}")
+                        self.show_file_preview(data['path'])
+                        return True
+                logging.debug("No file selected for preview")
+                return False
+            elif event.key() == Qt.Key.Key_Return:
+                # ENTER on input field - trigger selected item or AI query
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    self.on_entered(current_item)
+                    return True
+                else:
+                    query = self.input_field.text().strip()
+                    if query:
+                        self.perform_ai_query(query)
+                        return True
             elif event.key() == Qt.Key.Key_Escape:
                 logging.info("Escape key pressed (Input Field)")
                 if self.is_history_mode:
@@ -771,6 +830,39 @@ class OmniWindow(QWidget):
         self.anim_close_group.start()
 
     def keyPressEvent(self, event):
+        # Handle CTRL+S for preview on selected file (backup handler)
+        if event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            logging.debug("keyPressEvent: CTRL+S detected")
+            current_item = self.list_widget.currentItem()
+            if current_item:
+                data = current_item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get('type') == 'open_file':
+                    self.show_file_preview(data['path'])
+                    event.accept()
+                    return
+        
+        # Arrow key navigation for list items (if list has focus or is selected)
+        if event.key() == Qt.Key.Key_Down:
+            current_item = self.list_widget.currentItem()
+            if not current_item and self.list_widget.count() > 0:
+                # Select first item if none selected
+                self.list_widget.setCurrentRow(0)
+            else:
+                current_row = self.list_widget.row(current_item)
+                if current_row < self.list_widget.count() - 1:
+                    self.list_widget.setCurrentRow(current_row + 1)
+            event.accept()
+            return
+        
+        if event.key() == Qt.Key.Key_Up:
+            current_item = self.list_widget.currentItem()
+            if current_item:
+                current_row = self.list_widget.row(current_item)
+                if current_row > 0:
+                    self.list_widget.setCurrentRow(current_row - 1)
+            event.accept()
+            return
+        
         if event.key() == Qt.Key.Key_Escape:
             logging.info("Escape key pressed (Global)")
             if self.is_history_mode:
@@ -861,8 +953,9 @@ class OmniWindow(QWidget):
 
         # 3. External Search Results (Files)
         for res in self.external_search_results:
-            if res.get('type') == 'file':
-                data = {"type": "open_file", "path": res['path'], "name": res['name']}
+            if res.get('type') in ('file', 'folder'):
+                # Handle both files and folders from file search worker
+                data = {"type": "open_file", "path": res['path'], "name": res['name'], "is_dir": res.get('is_dir', False)}
                 key = self.get_item_key(data)
                 
                 def create_file_widget(r=res):
@@ -1011,6 +1104,14 @@ class OmniWindow(QWidget):
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
+        
+        # Start File Search Worker (NEW) - OPTIMIZED FOR SPEED
+        if self.file_search_worker:
+            try: self.file_search_worker.results_found.disconnect()
+            except: pass
+        self.file_search_worker = FileSearchWorker(query, max_results=8)  # Reduced for speed
+        self.file_search_worker.results_found.connect(self.on_file_search_results)
+        self.file_search_worker.start()
 
     def on_search_results(self, results, query):
         if self.input_field.text().strip() != query: return
@@ -1022,6 +1123,14 @@ class OmniWindow(QWidget):
         if self.input_field.text().strip() != query: return
         
         self.external_actions = actions
+        self.refresh_list(query, animate=False)
+    
+    def on_file_search_results(self, results, query):
+        """Handle file search results from the file search worker."""
+        if self.input_field.text().strip() != query: return
+        
+        # Convert file search results to the format used by external_search_results
+        self.external_search_results = results
         self.refresh_list(query, animate=False)
 
     def on_entered(self, item=None):
@@ -1051,8 +1160,27 @@ class OmniWindow(QWidget):
                 # We could show status, but typically we close or show notification
                 self.animate_close()
             elif data.get('type') == 'open_file':
-                QDesktopServices.openUrl(QUrl(f"file://{data['path']}"))
-                self.animate_close()
+                # Open file in default application
+                import subprocess
+                try:
+                    file_path = data['path']
+                    import platform
+                    if platform.system() == 'Windows':
+                        # Windows: Use os.startfile
+                        import os
+                        os.startfile(file_path)
+                    elif platform.system() == 'Darwin':
+                        # macOS: Use open command
+                        subprocess.Popen(['open', file_path])
+                    else:
+                        # Linux: Use xdg-open
+                        subprocess.Popen(['xdg-open', file_path])
+                    
+                    # Close after a small delay to ensure file opens
+                    QTimer.singleShot(500, self.animate_close)
+                except Exception as e:
+                    logging.error(f"Failed to open file {data['path']}: {e}")
+                    self.animate_close()
             elif 'cmd' in data: # App from cache
                 try:
                     subprocess.Popen(data['cmd'], shell=True, start_new_session=True)
@@ -1064,6 +1192,42 @@ class OmniWindow(QWidget):
             # Fallback
             query = self.input_field.text().strip()
             if query: self.perform_ai_query(query)
+    
+    def show_file_preview(self, file_path):
+        """Toggle preview expansion for the selected file."""
+        try:
+            current_item = self.list_widget.currentItem()
+            if not current_item:
+                return
+            
+            widget_container = self.list_widget.itemWidget(current_item)
+            if not widget_container:
+                return
+            
+            # Extract the actual FileActionWidget
+            if hasattr(widget_container, 'content_widget'):
+                file_widget = widget_container.content_widget
+            else:
+                file_widget = widget_container
+            
+            # Toggle preview expansion
+            if hasattr(file_widget, 'peek_label'):
+                is_hidden = file_widget.peek_label.isHidden()
+                
+                if is_hidden:
+                    # Expand: load and show preview
+                    if hasattr(file_widget, 'get_file_preview'):
+                        preview_content = file_widget.get_file_preview()
+                        file_widget.peek_label.setText(preview_content)
+                    file_widget.peek_label.setHidden(False)
+                else:
+                    # Collapse: hide preview
+                    file_widget.peek_label.setHidden(True)
+                
+                # Adjust window height
+                self.adjust_window_height(animate=False)
+        except Exception as e:
+            logging.error(f"Error toggling preview: {e}")
 
     def start_install(self, app_name):
         self.list_widget.clear()
