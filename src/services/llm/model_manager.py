@@ -3,6 +3,18 @@ import logging
 import threading
 import requests
 import torch
+import sys
+
+# Suppress HuggingFace Hub Permission Warnings
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+# Filter out the specific annoying permission error logs if they still appear via logging
+class PermissionErrorFilter(logging.Filter):
+    def filter(self, record):
+        return "Permission denied" not in record.getMessage() and "Could not cache non-existence" not in record.getMessage()
+
+logging.getLogger("huggingface_hub").addFilter(PermissionErrorFilter())
+logging.getLogger("transformers").addFilter(PermissionErrorFilter())
+
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig, TextIteratorStreamer
 except ImportError:
@@ -19,6 +31,7 @@ from src.core.config import (
 # Global State
 llm = None
 fast_model = None
+tts_model = None
 embed_model = None
 db_conn = None
 vision_model = None
@@ -27,6 +40,7 @@ init_error = None
 # Thread Locks
 main_lock = threading.Lock()
 fast_lock = threading.Lock()
+tts_lock = threading.Lock()
 abort_fast_event = threading.Event()
 
 # Fast model request queue for cancellation
@@ -309,11 +323,16 @@ def ensure_main_model():
                     torch.cuda.empty_cache()
 
                 # Check for bitsandbytes
-                try:
-                    import bitsandbytes
-                except ImportError:
-                     logging.error("bitsandbytes not installed, falling back to non-quantized load (Risk of OOM)")
-                     raise ImportError("Please install bitsandbytes>=0.46.1")
+                use_bnb = False
+                # Only use bitsandbytes if CUDA is available, as 4-bit loading usually requires it
+                if torch.cuda.is_available():
+                    try:
+                        import bitsandbytes
+                        use_bnb = True
+                    except ImportError:
+                        logging.warning("bitsandbytes not installed, falling back to non-quantized load")
+                else:
+                    logging.info("CUDA not available, skipping bitsandbytes quantization.")
 
                 # We need to use the right class. Qwen3-VL uses Qwen2_5_VL code in transformers usually
                 # or Qwen3VLForConditionalGeneration if updated.
@@ -332,20 +351,23 @@ def ensure_main_model():
                         ModelClass = AutoModelForVision2Seq
 
                 # Define quantization config for 4-bit loading (similar to GGUF Q4)
-                # This drastically reduces VRAM usage (from ~8GB to ~3GB for 4B model)
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4"
-                )
+                if use_bnb:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4"
+                    )
+                else:
+                    quantization_config = None
 
                 model = ModelClass.from_pretrained(
                     MAIN_MODEL_FILENAME, 
-                    quantization_config=quantization_config, # Apply 4-bit quantization
+                    quantization_config=quantization_config, # Apply 4-bit quantization if available
                     device_map="auto",
                     trust_remote_code=True,
-                    low_cpu_mem_usage=True
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.float16 if torch.backends.mps.is_available() else "auto"
                 )
                 processor = AutoProcessor.from_pretrained(MAIN_MODEL_FILENAME, trust_remote_code=True)
                 
@@ -489,3 +511,29 @@ def ensure_main_model():
 def ensure_model_loaded():
     ensure_fast_model()
     ensure_main_model()
+
+def ensure_tts_model():
+    global tts_model
+    if tts_model: return
+
+    from src.core.config import TTS_MODEL_ID
+    
+    with tts_lock:
+        if tts_model: return
+        logging.info(f"Loading TTS Model: {TTS_MODEL_ID}")
+        try:
+            from transformers import AutoTokenizer, AutoModel
+            
+            tokenizer = AutoTokenizer.from_pretrained(TTS_MODEL_ID, trust_remote_code=True)
+            # Use AutoModel to handle custom architectures (like Qwen3-TTS if it differs from VitsModel)
+            model = AutoModel.from_pretrained(TTS_MODEL_ID, trust_remote_code=True)
+            
+            if torch.cuda.is_available():
+                model = model.to("cuda")
+            elif sys.platform == "darwin" and torch.backends.mps.is_available():
+                model = model.to("mps")
+                
+            tts_model = {"model": model, "tokenizer": tokenizer}
+            logging.info("TTS Model Loaded.")
+        except Exception as e:
+            logging.error(f"TTS Model Load Error: {e}")

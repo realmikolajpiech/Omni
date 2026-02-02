@@ -3,6 +3,8 @@ import os
 import logging
 import signal
 import keyboard
+import subprocess
+import atexit
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -36,7 +38,8 @@ def main():
     def toggle_omni():
         try:
             # Emit signal to handle UI update on main thread
-            window.toggle_requested.emit()
+            # Source is 'manual' because this comes from keyboard hotkey
+            window.toggle_requested.emit("manual")
         except Exception as e:
             logging.error(f"Error in toggle_omni: {e}")
 
@@ -47,7 +50,6 @@ def main():
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
-        import atexit
 
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
@@ -183,8 +185,33 @@ def main():
                 logging.warning("App is NOT running as Administrator. 'Windows' key suppression might fail.")
         except: pass
 
+    # Start Voice Listener
+    voice_process = None
+    try:
+        listener_script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
+                                       "src", "services", "voice", "listener.py")
+        
+        logging.info(f"Starting Voice Listener: {listener_script}")
+        
+        # Use stdout=None to see output in terminal for debugging
+        voice_process = subprocess.Popen([sys.executable, listener_script], 
+                                         cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                         stdout=None, 
+                                         stderr=None)
+        
+        def kill_voice():
+            if voice_process:
+                voice_process.terminate()
+        
+        atexit.register(kill_voice)
+        logging.info("Voice Listener started.")
+        
+    except Exception as e:
+        logging.error(f"Failed to start voice listener: {e}")
+
     # Start the application
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
