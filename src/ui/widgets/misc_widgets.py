@@ -398,6 +398,87 @@ class RotatingLabel(QLabel):
         y = (h - pm.height()) // 2
         painter.drawPixmap(x, y, pm)
 
+class MicWidget(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Load Mic Icon (ensure you have one or use text/unicode for now if needed, but we prefer icon)
+        # Using a standard unicode mic for simplicity if icon fails, or better, draw it.
+        # Let's try to load standard icon name "audio-input-microphone"
+        self.icon_name = "audio-input-microphone"
+        self.active = False
+        
+        loader = IconLoader(self.icon_name)
+        loader.signals.icon_loaded.connect(self.on_icon_loaded)
+        QThreadPool.globalInstance().start(loader)
+        
+        self.setStyleSheet("""
+            QLabel {
+                background-color: transparent;
+                border-radius: 20px;
+            }
+            QLabel:hover {
+                background-color: rgba(0, 0, 0, 0.05);
+            }
+        """)
+        
+        # Pulse Animation
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.opacity_effect.setOpacity(0.6) # Default idle opacity
+        self.setGraphicsEffect(self.opacity_effect)
+        
+        self.anim = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.anim.setDuration(800)
+        self.anim.setLoopCount(-1)
+        self.anim.setStartValue(0.4)
+        self.anim.setEndValue(1.0)
+        self.anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+    def on_icon_loaded(self, icon, name):
+        if not icon.isNull():
+            self.setPixmap(icon.pixmap(24, 24))
+        else:
+            # Fallback text
+            self.setText("🎤")
+            self.setFont(QFont("Segoe UI Emoji", 20))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def set_active(self, active):
+        if self.active == active: return
+        self.active = active
+        
+        if active:
+            self.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(255, 59, 48, 0.1); /* Red tint */
+                    border-radius: 20px;
+                    border: 1px solid rgba(255, 59, 48, 0.3);
+                }
+            """)
+            self.anim.start()
+        else:
+            self.setStyleSheet("""
+                QLabel {
+                    background-color: transparent;
+                    border-radius: 20px;
+                    border: none;
+                }
+                QLabel:hover {
+                    background-color: rgba(0, 0, 0, 0.05);
+                }
+            """)
+            self.anim.stop()
+            self.opacity_effect.setOpacity(0.6)
+
 class GradientBorderFrame(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)

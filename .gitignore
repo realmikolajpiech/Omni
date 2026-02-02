@@ -1,3 +1,4 @@
+# Core Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,10 +7,45 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+*.spec
 
 # Environments
 .env
 .venv
 env/
 venv/
-.log
+ENV/
+
+# Logs
+*.log
+logs/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Local Models & Data (Don't upload large files)
+models/
+src/services/voice/vosk-model-*/
+*.zip
+*.pt
+*.pth
+*.bin
+*.gguf
+*.safetensors
+
+# Database / User Data
+*.db
+*.sqlite
+personal.manifest.wal
+personal.mv2
+personal.lancedb/
+data/
+
+# SearXNG local instances if any
+searxng/searxng_local/

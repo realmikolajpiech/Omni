@@ -19,9 +19,10 @@ from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget
                                          PersonActionWidget, PlaceActionWidget, AppActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
+import socket
 from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, 
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
-                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader)
+                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader, MicWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 from src.ui.widgets.settings_panel import SettingsPanel
 
@@ -49,7 +50,7 @@ if sys.platform == "darwin":
 
 class OmniWindow(QWidget):
     # Signal for external triggers (e.g. global hotkey)
-    toggle_requested = pyqtSignal()
+    toggle_requested = pyqtSignal(str) # Accepts source
 
     def setup_uinput(self):
         # Linux only
@@ -143,6 +144,9 @@ class OmniWindow(QWidget):
         self.input_field.returnPressed.connect(self.on_entered)
         self.input_field.installEventFilter(self)
 
+        self.mic_widget = MicWidget()
+        self.mic_widget.clicked.connect(self.toggle_listening)
+
         input_layout.addWidget(self.logo_label)
         input_layout.addWidget(self.input_field, 1)  # Stretch factor 1 = expand to fill space
 
@@ -168,6 +172,9 @@ class OmniWindow(QWidget):
         
         self.cc_container.hide()
         input_layout.addWidget(self.cc_container)
+
+        # Mic at the end (Right edge)
+        input_layout.addWidget(self.mic_widget)
 
         self.divider = QFrame()
         self.divider.setObjectName("Divider")
@@ -195,6 +202,7 @@ class OmniWindow(QWidget):
         self.apps = self.load_apps()
         self.is_entry_animating = False
         self.is_installing = False 
+        self.voice_triggered_query = False
         self.refresh_list("", animate=False)
         self.center()  
 
@@ -388,10 +396,12 @@ class OmniWindow(QWidget):
         text = self.input_field.text() if not clear else ""
         self.refresh_list(text, animate=animate)
 
-    def toggle_visibility_safe(self):
+    def toggle_visibility_safe(self, source="manual"):
         logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}")
         if self.isVisible():
             self.animate_close()
+            # If manually closed or voice closed, go to IDLE (Wake Word)
+            self.send_udp_command("SET_MODE:IDLE")
         else:
             self.reset_to_search_mode(animate=False)
             self.chat_history = [] # Start clean
@@ -399,6 +409,73 @@ class OmniWindow(QWidget):
             self.center()
             self.animate_entry()
             self.input_field.setFocus()
+            
+            # Handle Voice Logic based on source
+            if source == "voice":
+                # Opened via "Hey Omni" -> Start active listening
+                self.send_udp_command("SET_MODE:LISTENING")
+                self.mic_widget.set_active(True)
+            else:
+                # Opened manually -> Pause listening (wait for mic click)
+                self.send_udp_command("SET_MODE:PAUSED")
+                self.mic_widget.set_active(False)
+
+    def send_udp_command(self, command):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(command.encode('utf-8'), ('127.0.0.1', 5557))
+        except Exception as e:
+            logging.error(f"UDP Error: {e}")
+
+    def toggle_listening(self):
+        if self.mic_widget.active:
+            # Stop listening -> Go to PAUSED (since window is visible)
+            self.send_udp_command("SET_MODE:PAUSED")
+            self.mic_widget.set_active(False)
+        else:
+            # Start listening -> Go to LISTENING
+            self.send_udp_command("SET_MODE:LISTENING")
+            self.mic_widget.set_active(True)
+
+    def handle_voice_status(self, status):
+        if status == "LISTENING":
+            self.mic_widget.set_active(True)
+            self.input_field.setPlaceholderText("Listening...")
+        elif status == "PAUSED":
+            self.mic_widget.set_active(False)
+            self.input_field.setPlaceholderText("Search or ask...")
+        elif status == "IDLE":
+            # Should happen when window is hidden, but if it happens while visible,
+            # it means we are waiting for wake word.
+            self.mic_widget.set_active(False)
+            self.input_field.setPlaceholderText("Search or ask...")
+
+    def handle_partial_text(self, text):
+        # Update input field with partial text without triggering search
+        self.input_field.blockSignals(True)
+        self.input_field.setText(text)
+        self.input_field.blockSignals(False)
+        # Maybe move cursor to end
+        self.input_field.setCursorPosition(len(text))
+
+    def handle_ipc_query(self, query):
+        logging.info(f"IPC Query Received: {query}")
+        
+        # Ensure window is visible
+        if not self.isVisible():
+            self.reset_to_search_mode(animate=False)
+            self.chat_history = []
+            self.show()
+            self.center()
+            self.animate_entry()
+        
+        self.raise_()
+        self.activateWindow()
+        
+        # Set text and submit
+        self.input_field.setText(query)
+        self.voice_triggered_query = True
+        self.perform_ai_query(query)
 
     def animate_entry(self):
         self.is_entry_animating = True
@@ -679,6 +756,14 @@ class OmniWindow(QWidget):
         def on_close_finished():
              self.close() # Or self.hide()
              self.setGraphicsEffect(None) # Cleanup
+             
+             # Reset MacOS blur view reference so it gets recreated on next show
+             if sys.platform == 'darwin' and hasattr(self, 'mac_blur_view'):
+                 # Try to remove it from superview if possible, though close() might do it
+                 try:
+                     self.mac_blur_view.removeFromSuperview()
+                 except: pass
+                 del self.mac_blur_view
         
         self.anim_close_group.finished.connect(on_close_finished)
         self.anim_close_group.addAnimation(anim_pos)
@@ -940,6 +1025,7 @@ class OmniWindow(QWidget):
         self.refresh_list(query, animate=False)
 
     def on_entered(self, item=None):
+        self.voice_triggered_query = False
         if not item:
             item = self.list_widget.currentItem()
         
@@ -1084,6 +1170,15 @@ class OmniWindow(QWidget):
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
         
+        answer = data.get("answer", "")
+        if answer and self.voice_triggered_query:
+            # TTS Trigger
+            from src.services.voice.tts import speak
+            import threading
+            threading.Thread(target=speak, args=(answer,), daemon=True).start()
+            # Reset flag
+            self.voice_triggered_query = False
+
         # Remove thinking widget and separator (iterate backwards)
         # Note: In perform_ai_query we removed the separator for followup, 
         # so there might not be one if it was a followup query.

@@ -31,6 +31,9 @@ VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 VOSK_MODEL_PATH = os.path.join(MODEL_DIR, VOSK_MODEL_NAME)
 VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
+ASR_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
+TTS_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+
 # URLs
 BRAIN_HOST = "127.0.0.1"
 BRAIN_PORT = 5555
