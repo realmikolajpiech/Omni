@@ -27,8 +27,11 @@ def main():
 
     app = QApplication(sys.argv)
     
-    # Allow Ctrl+C
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # Allow Ctrl+C to interrupt the Qt Event Loop
+    from PyQt6.QtCore import QTimer
+    timer = QTimer()
+    timer.timeout.connect(lambda: None)
+    timer.start(100)
 
     window = OmniWindow()
     window.show()
@@ -204,6 +207,7 @@ def main():
                 voice_process.terminate()
         
         atexit.register(kill_voice)
+        app.aboutToQuit.connect(kill_voice)
         logging.info("Voice Listener started.")
         
     except Exception as e:

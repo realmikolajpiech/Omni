@@ -426,8 +426,7 @@ class OmniWindow(QWidget):
         logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}")
         if self.isVisible():
             self.animate_close()
-            # If manually closed or voice closed, go to IDLE (Wake Word)
-            self.send_udp_command("SET_MODE:IDLE")
+            # UDP command moved to animate_close to cover all closing paths (Escape, etc.)
         else:
             self.reset_to_search_mode(animate=False)
             self.chat_history = [] # Start clean
@@ -778,6 +777,9 @@ class OmniWindow(QWidget):
 
     def animate_close(self):
         if self._is_closing: return
+        
+        # Always switch back to IDLE (Wake Word) mode when closing
+        self.send_udp_command("SET_MODE:IDLE")
         
         # Stop geometry animation if running
         if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:

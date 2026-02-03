@@ -1,5 +1,4 @@
 import sys
-print("DEBUG: Starting listener script...", file=sys.stderr)
 import os
 import queue
 import sounddevice as sd
@@ -7,332 +6,321 @@ import numpy as np
 import logging
 import socket
 import torch
-
-# Add project root to path to allow imports from src
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
-# Add Qwen3_ASR library path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "Qwen3_ASR")))
-
-from src.core.config import ASR_MODEL_ID, IPC_PORT
-
 import threading
 import json
-
 import time
 import zipfile
 import urllib.request
-import json
+from typing import Optional, List
 
-# --- CONFIG ---
-WAKE_WORDS = ["hey omni", "hey army", "hey on me", "hey only", "hi omni", "okay omni", "hey", "omni"]
+# Add project root to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+
+try:
+    from src.core.config import (
+        ASR_MODEL_ID, IPC_PORT, VOSK_MODEL_PATH, VOSK_MODEL_URL, 
+        VOSK_MODEL_NAME, MODEL_DIR
+    )
+except ImportError:
+    # Fallback if config not found (standalone run)
+    IPC_PORT = 5556
+    ASR_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
+    MODEL_DIR = os.path.expanduser("~/.local/share/ai-models")
+    VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
+    VOSK_MODEL_PATH = os.path.join(MODEL_DIR, VOSK_MODEL_NAME)
+    VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+
+# --- CONFIGURATION ---
+WAKE_WORDS = ["hey omni", "omni", "computer", "hey computer"]
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 4000
-SILENCE_THRESHOLD = 0.00002 
-SILENCE_DURATION = 1.0
+BLOCK_SIZE = 4000  # 0.25s
+SILENCE_THRESHOLD = 0.005 # Adjusted from 0.00002 which was too low
+SILENCE_DURATION = 1.0 # Seconds of silence to consider end of utterance
 UDP_PORT = 5557
-PARTIAL_INTERVAL = 0.5 
+VAD_SENSITIVITY = 0.5 # For future use
 
-VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-VOSK_MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "vosk-model-small-en-us-0.15"))
+# Logging Setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("VoiceListener")
 
-q = queue.Queue()
-state = {
-    "mode": "IDLE",  # IDLE (Waiting for wake word), LISTENING (Active dictation)
-    "running": True
-}
-
-def udp_listener():
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('127.0.0.1', UDP_PORT))
-        logging.info(f"UDP Control Listener started on port {UDP_PORT}")
-        while state["running"]:
-            data, addr = sock.recvfrom(1024)
-            msg = data.decode('utf-8').strip()
-            logging.info(f"UDP Received: {msg}")
+class VoiceService:
+    def __init__(self):
+        self.state = {
+            "mode": "IDLE", # IDLE, LISTENING, PAUSED, PROCESSING
+            "running": True
+        }
+        self.audio_queue = queue.Queue()
+        self.vosk_model = None
+        self.vosk_rec_wake = None # Recognizer for Wake Word
+        self.qwen_model = None
+        self.audio_buffer = []
+        self.is_speaking = False
+        self.silence_frames = 0
+        self.max_silence_frames = int(SILENCE_DURATION * SAMPLE_RATE / BLOCK_SIZE)
+        self.udp_sock = None
+        
+        self.setup_models()
+        self.setup_udp()
+        
+    def setup_models(self):
+        """Initialize Vosk (Wake Word) and Qwen (ASR)"""
+        # 1. Setup Vosk
+        if not os.path.exists(VOSK_MODEL_PATH):
+            self.download_vosk()
             
-            if msg == "START_LISTENING":
-                # Force active listening
-                state["mode"] = "LISTENING"
-                send_ipc(b"STATUS:LISTENING")
-                play_feedback_sound()
-            elif msg == "STOP_LISTENING":
-                # Finalize current utterance but don't necessarily go to IDLE (Wake Word)
-                # This is "Mic Off" in UI -> Should go to PAUSED
-                state["finalize"] = True
-                state["mode"] = "PAUSED" 
-                send_ipc(b"STATUS:PAUSED")
-            elif msg == "SET_MODE:IDLE":
-                # Window hidden -> Wait for wake word
-                state["mode"] = "IDLE"
-                send_ipc(b"STATUS:IDLE")
-            elif msg == "SET_MODE:LISTENING":
-                # Window visible (Voice triggered) -> Active dictation
-                state["mode"] = "LISTENING"
-                send_ipc(b"STATUS:LISTENING")
-                play_feedback_sound()
-            elif msg == "SET_MODE:PAUSED":
-                # Window visible (Manual triggered) -> Mic off
-                state["mode"] = "PAUSED"
-                send_ipc(b"STATUS:PAUSED")
-    except Exception as e:
-        logging.error(f"UDP Listener Error: {e}")
-
-def audio_callback(indata, frames, time, status):
-    if status:
-        print(status, file=sys.stderr)
-    q.put(indata.copy())
-
-def play_feedback_sound():
-    if sys.platform == 'darwin':
         try:
-            import subprocess
-            subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"])
-        except: pass
-    elif sys.platform == 'win32':
-        import winsound
+            from vosk import Model, KaldiRecognizer
+            if os.path.exists(VOSK_MODEL_PATH):
+                self.vosk_model = Model(VOSK_MODEL_PATH)
+                # Wake Word Grammar - significantly improves performance and reduces false positives
+                grammar = json.dumps(WAKE_WORDS + ["[unk]"])
+                self.vosk_rec_wake = KaldiRecognizer(self.vosk_model, SAMPLE_RATE, grammar)
+                logger.info("Vosk Wake Word Engine initialized.")
+            else:
+                logger.error("Vosk model path invalid.")
+        except Exception as e:
+            logger.error(f"Vosk Init Failed: {e}")
+
+        # 2. Setup Qwen ASR
+        logger.info(f"Loading Qwen ASR: {ASR_MODEL_ID}...")
         try:
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ASYNC)
-        except: pass
-
-def send_ipc(msg):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(('127.0.0.1', IPC_PORT))
-        s.sendall(msg)
-        s.close()
-        logging.info(f"Sent IPC: {msg}")
-        return True
-    except Exception as e:
-        logging.error(f"IPC Error: {e}")
-        return False
-
-def download_vosk_model():
-    if not os.path.exists(VOSK_MODEL_DIR):
-        logging.info(f"Downloading Vosk Model to {VOSK_MODEL_DIR}...")
-        zip_path = os.path.join(os.path.dirname(__file__), "vosk_model.zip")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if sys.platform == "darwin" and torch.backends.mps.is_available():
+                device = "mps"
+            
+            logger.info(f"Using device: {device}")
+            
+            from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
+            self.qwen_model = Qwen3ASRModel.from_pretrained(
+                ASR_MODEL_ID,
+                device_map=device,
+                torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+                trust_remote_code=True
+            )
+            logger.info("Qwen3ASR initialized.")
+        except Exception as e:
+            logger.error(f"Qwen Init Failed: {e}")
+            # Non-fatal? We can fall back to Vosk for everything if Qwen fails? 
+            # For now, let's assume it's critical.
+            
+    def download_vosk(self):
+        logger.info(f"Downloading Vosk Model to {VOSK_MODEL_PATH}...")
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        zip_path = os.path.join(MODEL_DIR, "vosk.zip")
         try:
             urllib.request.urlretrieve(VOSK_MODEL_URL, zip_path)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(os.path.dirname(__file__))
-            logging.info("Vosk Model Downloaded.")
+                zip_ref.extractall(MODEL_DIR)
+            logger.info("Vosk Model Downloaded.")
         except Exception as e:
-            logging.error(f"Failed to download Vosk model: {e}")
+            logger.error(f"Download Error: {e}")
         finally:
             if os.path.exists(zip_path):
                 os.remove(zip_path)
 
-def run_listener():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
-    # Init Vosk
-    download_vosk_model()
-    try:
-        from vosk import Model, KaldiRecognizer
-        if os.path.exists(VOSK_MODEL_DIR):
-            vosk_model = Model(VOSK_MODEL_DIR)
-            rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
-            rec.SetWords(False) # Faster
-            logging.info("Vosk Model Loaded.")
-        else:
-            logging.error("Vosk model directory not found.")
-            rec = None
-    except Exception as e:
-        logging.error(f"Vosk Init Error: {e}")
-        rec = None
+    def setup_udp(self):
+        try:
+            self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Allow address reuse to help with quick restarts
+            self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_sock.bind(('127.0.0.1', UDP_PORT))
+            self.udp_sock.setblocking(False)
+            logger.info(f"UDP Control listening on {UDP_PORT}")
+        except Exception as e:
+            logger.error(f"UDP Setup Error: {e}")
+            self.udp_sock = None # Ensure it's None if failed
 
-    logging.info(f"Loading ASR Model: {ASR_MODEL_ID}...")
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if sys.platform == "darwin" and torch.backends.mps.is_available():
-        device = "mps"
-        
-    logging.info(f"Using device: {device}")
+    def audio_callback(self, indata, frames, time, status):
+        if status:
+            print(status, file=sys.stderr)
+        self.audio_queue.put(indata.copy())
 
-    try:
-        from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
+    def process_udp(self):
+        if not self.udp_sock: return
         
-        # Load model using the official wrapper
-        model = Qwen3ASRModel.from_pretrained(
-            ASR_MODEL_ID,
-            device_map=device,
-            torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-            trust_remote_code=True
-        )
-        
-        logging.info("Qwen3ASRModel loaded successfully via wrapper.")
+        try:
+            while True:
+                data, _ = self.udp_sock.recvfrom(1024)
+                msg = data.decode('utf-8').strip()
+                logger.info(f"UDP CMD: {msg}")
+                
+                if msg == "START_LISTENING":
+                    self.set_mode("LISTENING")
+                    self.play_cue(active=True)
+                elif msg == "STOP_LISTENING":
+                    self.set_mode("PAUSED")
+                elif msg == "SET_MODE:IDLE":
+                    self.set_mode("IDLE")
+                elif msg == "SET_MODE:LISTENING":
+                    self.set_mode("LISTENING")
+                    self.play_cue(active=True)
+                elif msg == "SET_MODE:PAUSED":
+                    self.set_mode("PAUSED")
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            logger.error(f"UDP Error: {e}")
 
-    except Exception as e:
-        logging.error(f"Failed to load Qwen ASR model: {e}")
-        sys.exit(1)
-
-    logging.info("Starting VAD loop...")
-    
-    # Start UDP Listener
-    udp_thread = threading.Thread(target=udp_listener, daemon=True)
-    udp_thread.start()
-
-    # Audio Buffer for VAD
-    audio_buffer = []
-    is_speaking = False
-    silence_frames = 0
-    max_silence_frames = int(SILENCE_DURATION * SAMPLE_RATE / BLOCK_SIZE)
-    
-    # Flush queue
-    while not q.empty(): q.get()
-    
-    # Explicitly select default device if None doesn't work well
-    # or list devices to debug
-    logging.info(f"Audio Devices:\n{sd.query_devices()}")
-    
-    # Increase block size for potentially better energy readings? No, smaller is usually better for responsiveness.
-    # Try amplifying input?
-    
-    with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, device=None,
-                        channels=1, callback=audio_callback):
-        
-        logging.info("Listening (SoundDevice InputStream started)...")
-        last_partial_time = time.time()
-        
-        while True:
-            try:
-                indata = q.get(timeout=0.5)
-            except queue.Empty:
-                continue
+    def set_mode(self, mode):
+        if self.state["mode"] != mode:
+            logger.info(f"State Change: {self.state['mode']} -> {mode}")
+            self.state["mode"] = mode
+            self.send_ipc(f"STATUS:{mode}".encode('utf-8'))
             
-            # Skip processing if PAUSED (Window visible but mic off)
-            if state["mode"] == "PAUSED":
-                # Clear buffer to avoid buildup
-                if len(audio_buffer) > 0: audio_buffer = []
-                is_speaking = False
-                continue
+            if mode == "IDLE":
+                # Reset buffer
+                self.audio_buffer = []
+                self.is_speaking = False
+                # Reset Vosk recognizer for fresh wake word detection
+                if self.vosk_rec_wake:
+                    self.vosk_rec_wake.Reset()
 
-            # DIGITAL AMPLIFICATION: Multiply signal to boost very quiet mic input
-            indata = indata * 5.0 
+    def send_ipc(self, msg):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0) # Timeout for IPC
+            s.connect(('127.0.0.1', IPC_PORT))
+            s.sendall(msg)
+            s.close()
+            return True
+        except Exception as e:
+            # logger.error(f"IPC Error: {e}") # Reduce noise
+            return False
 
-            audio_buffer.append(indata)
+    def play_cue(self, active=True):
+        """Play a subtle synthesized beep instead of system sound"""
+        try:
+            fs = 44100
+            duration = 0.15
+            f = 880.0 if active else 440.0
+            t = np.linspace(0, duration, int(fs * duration), False)
+            # Sine wave with envelope to avoid clicking
+            audio = np.sin(f * 2 * np.pi * t) * 0.3
+            # Simple fade in/out
+            fade_len = int(0.01 * fs)
+            audio[:fade_len] *= np.linspace(0, 1, fade_len)
+            audio[-fade_len:] *= np.linspace(1, 0, fade_len)
             
-            # Simple Energy VAD
-            energy = np.linalg.norm(indata) / len(indata)
-            
-            # Dynamic threshold logging for debugging (print every ~50 blocks)
-            if len(audio_buffer) % 50 == 0:
-               logging.info(f"Energy: {energy:.6f} (Threshold: {SILENCE_THRESHOLD})")
-            
-            if energy > SILENCE_THRESHOLD:
-                if not is_speaking:
-                    is_speaking = True
-                    logging.info(f"Speech detected (Energy: {energy:.4f})...")
-                silence_frames = 0
-            else:
-                if is_speaking:
-                    silence_frames += 1
+            sd.play(audio.astype(np.float32), fs)
+            # Don't wait, async
+        except Exception:
+            pass
 
-            # Vosk Streaming (Real-time Feedback)
-            if state["mode"] == "LISTENING" and rec is not None:
+    def run(self):
+        logger.info("Starting Audio Loop...")
+        
+        # Open stream
+        with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, 
+                            channels=1, callback=self.audio_callback):
+            
+            while self.state["running"]:
+                self.process_udp()
+                
                 try:
-                    # Convert to int16
-                    audio_int16 = (indata * 32767).astype(np.int16).tobytes()
-                    rec.AcceptWaveform(audio_int16)
-                    
-                    if time.time() - last_partial_time > 0.2:
-                        res = json.loads(rec.PartialResult())
-                        text = res.get("partial", "")
-                        if text:
-                            # logging.info(f"Partial: {text}")
-                            send_ipc(f"PARTIAL:{text}".encode('utf-8'))
-                        last_partial_time = time.time()
-                except Exception as e:
-                    logging.error(f"Vosk Error: {e}")
-
-            # Check for forced finalization (from UI Stop button)
-            if state.get("finalize", False):
-                state["finalize"] = False
-                if len(audio_buffer) > 0:
-                    logging.info("Forcing finalization of utterance...")
-                    is_speaking = True
-                    silence_frames = max_silence_frames + 100
-
-            # End of utterance detection
-            if is_speaking and silence_frames > max_silence_frames:
-                logging.info("End of utterance. Transcribing...")
-                
-                # Reset Vosk for next time
-                if rec: rec.Reset()
-                is_speaking = False
-                silence_frames = 0
-                
-                # Concatenate buffer
-                full_audio = np.concatenate(audio_buffer, axis=0).flatten()
-                audio_buffer = [] # Reset buffer
-                
-                # Verify length
-                if len(full_audio) < SAMPLE_RATE * 0.5:
-                    logging.info("Audio too short, ignoring.")
+                    indata = self.audio_queue.get(timeout=0.1)
+                except queue.Empty:
                     continue
                 
-                # Transcribe
-                try:
-                    logging.info(f"Transcribing {len(full_audio)/SAMPLE_RATE:.2f}s audio...")
-                    
-                    # Qwen3 inference
-                    # Wrapper expects (waveform, sample_rate) tuple for raw audio
-                    results = model.transcribe(audio=[(full_audio, SAMPLE_RATE)], language=None)
-                    text = results[0].text.lower().strip()
-                    
-                    logging.info(f"Transcribed: '{text}'")
-                    
-                    if not text: continue
+                # Check Mode
+                mode = self.state["mode"]
+                
+                if mode == "PAUSED":
+                    continue
+                
+                # Pre-processing (Normalization / Boost)
+                # Boost weak mic input slightly, but clip to avoid distortion
+                audio_data = indata.flatten() * 3.0 
+                
+                if mode == "IDLE":
+                    self.handle_idle(audio_data)
+                elif mode == "LISTENING":
+                    self.handle_listening(audio_data)
 
-                    # Check Mode
-                    if state["mode"] == "LISTENING":
-                        # Direct Command Mode
-                        logging.info(f"Command (Active Mode): {text}")
-                        send_ipc(f"QUERY:{text}".encode('utf-8'))
-                        
-                        # Reset to PAUSED after command?
-                        # User usually wants to continue conversation?
-                        # But "Google Assistant" style usually stops listening after one query until prompted again?
-                        # User said: "like google assistant". Usually after query it stops.
-                        state["mode"] = "PAUSED"
-                        send_ipc(b"STATUS:PAUSED")
-                        
-                    elif state["mode"] == "IDLE":
-                        # Wake Word Mode
-                        wake_found = any(w in text for w in WAKE_WORDS)
-                        
-                        if wake_found:
-                            logging.info(f"WAKE WORD DETECTED: {text}")
-                            play_feedback_sound()
-                            send_ipc(b"TOGGLE")
-                            
-                            # Switch to LISTENING mode for next command
-                            state["mode"] = "LISTENING"
-                            send_ipc(b"STATUS:LISTENING")
-                            
-                            # Extract command if present in SAME utterance
-                            command = text
-                            for w in WAKE_WORDS:
-                                command = command.replace(w, "")
-                            command = command.strip()
-                            
-                            if command:
-                                logging.info(f"Command (Immediate): {command}")
-                                send_ipc(f"QUERY:{command}".encode('utf-8'))
-                                # If immediate command found, maybe go back to PAUSED?
-                                state["mode"] = "PAUSED"
-                                send_ipc(b"STATUS:PAUSED")
-                        else:
-                             logging.info(f"No wake word in: '{text}'")
-                            
-                except Exception as e:
-                    logging.error(f"Transcription error: {e}")
+    def handle_idle(self, audio_data):
+        if not self.vosk_rec_wake: return
+        
+        # Vosk expects int16 bytes
+        audio_int16 = (audio_data * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
+        
+        if self.vosk_rec_wake.AcceptWaveform(audio_int16):
+            res = json.loads(self.vosk_rec_wake.Result())
+            text = res.get("text", "")
+            if text:
+                logger.info(f"Wake Word Logic Checked: '{text}'")
+                # Since grammar is restricted, any result is likely a wake word
+                if any(w in text for w in WAKE_WORDS):
+                    logger.info("Wake Word Detected!")
+                    self.set_mode("LISTENING")
+                    self.play_cue(active=True)
+                    self.send_ipc(b"TOGGLE") # Show UI
+
+    def handle_listening(self, audio_data):
+        # 1. Accumulate
+        self.audio_buffer.append(audio_data)
+        
+        # 2. VAD (Energy based for now, but cleaner)
+        energy = np.sqrt(np.mean(audio_data**2))
+        
+        if energy > SILENCE_THRESHOLD:
+            if not self.is_speaking:
+                logger.info("Speech detected...")
+                self.is_speaking = True
+            self.silence_frames = 0
+        else:
+            if self.is_speaking:
+                self.silence_frames += 1
+        
+        # 3. Check End of Utterance
+        if self.is_speaking and self.silence_frames > self.max_silence_frames:
+            logger.info("End of utterance detected. Transcribing...")
+            self.process_buffer()
             
-            # Limit buffer size to avoid OOM if VAD fails
-            if len(audio_buffer) * BLOCK_SIZE > 15 * SAMPLE_RATE:
-                logging.warning("Buffer full (15s), clearing...")
-                audio_buffer = []
-                is_speaking = False
+        # 4. Timeout / Buffer Limit (15s)
+        if len(self.audio_buffer) * BLOCK_SIZE > 15 * SAMPLE_RATE:
+             logger.warning("Max duration reached. Transcribing...")
+             self.process_buffer()
+
+    def process_buffer(self):
+        if not self.audio_buffer: return
+        
+        full_audio = np.concatenate(self.audio_buffer)
+        self.audio_buffer = []
+        self.is_speaking = False
+        self.silence_frames = 0
+        
+        # Ignore short audio (< 0.5s)
+        if len(full_audio) < SAMPLE_RATE * 0.5:
+            return
+
+        if self.qwen_model:
+            try:
+                # Transcribe
+                # Qwen expects list of (audio, sr) tuples
+                results = self.qwen_model.transcribe(
+                    audio=[(full_audio, SAMPLE_RATE)], 
+                    language="English" 
+                )
+                text = results[0].text.strip()
+                logger.info(f"Transcribed: {text}")
+                
+                if text:
+                    self.send_ipc(f"QUERY:{text}".encode('utf-8'))
+                    self.play_cue(active=False) # Confirmation beep
+                    self.set_mode("PAUSED") # Stop listening after command
+            except Exception as e:
+                logger.error(f"Transcription Failed: {e}")
+        else:
+            logger.error("Qwen Model not loaded!")
 
 if __name__ == "__main__":
-    run_listener()
+    service = VoiceService()
+    try:
+        service.run()
+    except KeyboardInterrupt:
+        pass

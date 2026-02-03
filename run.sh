@@ -2,38 +2,49 @@
 
 echo "Starting Omni..."
 
-# Check and install dependencies first (as current user, not root if possible, unless script started as root)
-if [ "$EUID" -ne 0 ]; then
-    echo "Checking dependencies..."
-    python3 setup.py
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Determine Python command
+if command_exists python3; then
+    PYTHON_CMD=python3
+elif command_exists python; then
+    PYTHON_CMD=python
 else
-    # If running as root, try to run setup as the SUDO_USER to avoid root-owned pip packages
-    if [ -n "$SUDO_USER" ]; then
-        echo "Running setup as $SUDO_USER..."
-        sudo -u $SUDO_USER python3 setup.py
-    else
-        echo "Running setup as root (not recommended but necessary)..."
-        python3 setup.py
-    fi
+    echo "Error: Python is not installed."
+    exit 1
 fi
 
-# Kill previous instances
-echo "Cleaning up old instances..."
-sudo pkill -f "run.py" || true
-sudo pkill -f "src/services/voice/listener.py" || true
-sudo pkill -f "src/app/brain.py" || true
+# Check dependencies
+echo "Checking dependencies..."
+$PYTHON_CMD setup.py
+if [ $? -ne 0 ]; then
+    echo "Dependency check failed."
+    exit 1
+fi
 
-# Set environment variables to suppress some warnings
+# Cleanup old instances
+echo "Cleaning up old instances..."
+pkill -f "run.py" || true
+pkill -f "src/services/voice/listener.py" || true
+
+# Environment Variables
 export TRANSFORMERS_VERBOSITY=error
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
+export PYTHONUTF8=1
 
+# Run
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "Requesting root privileges for global hotkey support (Ctrl+Space)..."
-    # Ensure we use the python that has the packages installed
-    PYTHON_CMD=$(which python3)
-    sudo -E "$PYTHON_CMD" run.py
+    echo "macOS detected."
+    # Check if we are running with sudo already?
+    # Global hotkeys might need accessibility permissions rather than sudo.
+    # Sudo is often needed for keyboard monitoring if not signed.
+    if [ "$EUID" -ne 0 ]; then
+        echo "Note: If global hotkeys don't work, grant Terminal accessibility permissions."
+    fi
+    $PYTHON_CMD run.py
 else
-    python3 run.py
+    $PYTHON_CMD run.py
 fi
-
-read -p "Press Enter to continue..."

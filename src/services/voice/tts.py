@@ -28,9 +28,22 @@ def speak(text):
                 # Convert to numpy
                 audio_np = output.cpu().numpy().squeeze()
                 
+                # Normalize audio to prevent clipping
+                max_val = np.abs(audio_np).max()
+                if max_val > 0.95:
+                    audio_np = audio_np / max_val * 0.95
+                
+                # Ensure float32
+                audio_np = audio_np.astype(np.float32)
+                
                 # Play
-                sd.play(audio_np, samplerate=model.config.sampling_rate)
-                sd.wait()
+                try:
+                    sd.play(audio_np, samplerate=model.config.sampling_rate)
+                    sd.wait()
+                except Exception as e:
+                    logging.error(f"SoundDevice Playback Error: {e}")
+                    # Fallback to system TTS if audio device fails
+                    raise e 
                 return
     except Exception as e:
         logging.error(f"TTS Error: {e}")
@@ -41,7 +54,11 @@ def speak(text):
     if sys.platform == "darwin":
         import subprocess
         # Use -r to speed up slightly if needed, or default
-        subprocess.run(["say", text])
+        try:
+            subprocess.run(["say", text])
+        except Exception as e:
+            logging.error(f"Mac TTS Error: {e}")
+            
     elif sys.platform == "win32":
         try:
             import win32com.client
