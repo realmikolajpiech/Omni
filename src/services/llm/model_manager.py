@@ -5,6 +5,16 @@ import requests
 import torch
 import sys
 
+# Prefer external libllama if present
+try:
+    from src.core.config import PROJECT_ROOT
+    _ll_path = os.path.join(PROJECT_ROOT, ".deps", "llama.cpp", "build", "lib", "libllama.dylib")
+    if os.path.exists(_ll_path):
+        os.environ["LLAMA_CPP_LIB"] = _ll_path
+        os.environ["LLAMA_CPP_LOG"] = "1"
+except Exception:
+    pass
+
 # Suppress HuggingFace Hub Permission Warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 # Filter out the specific annoying permission error logs if they still appear via logging
@@ -86,6 +96,10 @@ def ensure_fast_model():
             cuda_ok = torch.cuda.is_available()
             mps_ok = sys.platform == "darwin" and torch.backends.mps.is_available()
             
+            # MPS Safety: Avoid meta tensor issues on M4 by loading directly to CPU first if needed
+            # But AutoModel usually handles this. The error suggests "accelerate" library usage with device_map="auto" or similar might be failing on MPS.
+            # We will force standard loading without fancy offloading if on MPS to be safe.
+            
             if cuda_ok:
                 logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
             elif mps_ok:
@@ -97,50 +111,24 @@ def ensure_fast_model():
             tokenizer = AutoTokenizer.from_pretrained(FAST_MODEL_HF_ID, trust_remote_code=True)
 
             try:
-                if cuda_ok:
-                    torch.backends.cuda.matmul.allow_tf32 = True
-                    torch.backends.cudnn.allow_tf32 = True
-
-                # 4-bit quantization in-code (faster inference, less VRAM than bf16)
-                use_quant = cuda_ok
-                try:
-                    import bitsandbytes
-                except ImportError:
-                    if use_quant:
-                        logging.warning("bitsandbytes not installed; fast model will load in bfloat16 (slower).")
-                    use_quant = False
-
-                # 8-bit quantization (better quality than 4-bit for small models, still efficient)
-                # 4-bit NF4 can be too aggressive for 0.6B model, causing garbage/Chinese output
-                if use_quant:
-                    quantization_config = BitsAndBytesConfig(
-                        load_in_8bit=True,
-                    )
-                    logging.info("Loading fast model with 8-bit quantization...")
-                    model = AutoModelForCausalLM.from_pretrained(
-                        FAST_MODEL_HF_ID,
-                        quantization_config=quantization_config,
-                        device_map="cuda:0",
-                        trust_remote_code=True,
-                        attn_implementation=attn_implementation,
-                        low_cpu_mem_usage=True
-                    )
-                    # Quantized model: do not call .to(dtype=...) 
-                else:
-                    device = "cuda:0" if cuda_ok else ("mps" if mps_ok else "cpu")
-                    logging.info(f"Loading fast model on {device} with {dtype}...")
-                    model = AutoModelForCausalLM.from_pretrained(
-                        FAST_MODEL_HF_ID,
-                        torch_dtype=dtype,
-                        device_map=device,
-                        trust_remote_code=True,
-                        attn_implementation=attn_implementation,
-                        low_cpu_mem_usage=True
-                    )
-                    if cuda_ok:
-                        model = model.to(dtype=dtype, device="cuda:0")
-                    elif mps_ok:
-                        model = model.to(device="mps")
+                # Explicitly disable device_map for MPS to avoid "meta tensor" copy errors
+                # This forces simple direct loading which is more stable on Mac
+                device_map = None 
+                if cuda_ok: device_map = "auto"
+                
+                model = AutoModelForCausalLM.from_pretrained(
+                    FAST_MODEL_HF_ID,
+                    torch_dtype=dtype,
+                    device_map=device_map, # None for MPS
+                    trust_remote_code=True,
+                    attn_implementation=attn_implementation,
+                    low_cpu_mem_usage=True
+                )
+                
+                if mps_ok:
+                    model = model.to("mps")
+                elif cuda_ok and not device_map:
+                    model = model.to("cuda:0")
                 
                 model.eval()
                 
@@ -148,41 +136,12 @@ def ensure_fast_model():
                     logging.info("Warming up fast model...")
                     warmup_input = tokenizer("Hi", return_tensors="pt").to(model.device)
                     with torch.inference_mode():
-                        model.generate(**warmup_input, max_new_tokens=2)
-                    if cuda_ok:
-                        torch.cuda.synchronize()
-                    elif mps_ok:
-                        torch.mps.synchronize()
+                         model.generate(**warmup_input, max_new_tokens=2)
                     logging.info("Fast model warmup complete.")
-            except Exception as oom:
-                if cuda_ok and "out of memory" in str(oom).lower():
-                    logging.warning("Fast model OOM, falling back to 8-bit or unquantized")
-                    torch.cuda.empty_cache()
-                    try:
-                        quantization_config = BitsAndBytesConfig(
-                            load_in_8bit=True,
-                            bnb_8bit_compute_dtype=dtype
-                        )
-                        model = AutoModelForCausalLM.from_pretrained(
-                            FAST_MODEL_HF_ID,
-                            quantization_config=quantization_config,
-                            device_map="auto",
-                            trust_remote_code=True,
-                            attn_implementation="sdpa",
-                            low_cpu_mem_usage=True
-                        )
-                        model.eval()
-                    except Exception:
-                        model = AutoModelForCausalLM.from_pretrained(
-                            FAST_MODEL_HF_ID,
-                            torch_dtype=dtype,
-                            device_map="auto",
-                            trust_remote_code=True,
-                            low_cpu_mem_usage=True
-                        )
-                        model.eval()
-                else:
-                    raise
+
+            except Exception as e:
+                logging.error(f"Fast Model Load Logic Error: {e}")
+                raise e # Re-raise to trigger fallback or logging
 
             # Log where the model actually ended up
             try:
@@ -313,6 +272,9 @@ def ensure_main_model():
     if embed_model is None:
         try:
             from sentence_transformers import SentenceTransformer
+            # Force CPU for embeddings to avoid Metal conflicts and meta tensor issues
+            # We must be very careful about device placement on Mac
+            os.environ["TOKENIZERS_PARALLELISM"] = "false"
             embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
         except Exception as e: logging.error(f"Embeddings Error: {e}")
 
@@ -321,6 +283,12 @@ def ensure_main_model():
 
     Llama = ensure_imports()
     if not Llama: return
+    try:
+        logging.info("llama.cpp system info follows:")
+        from llama_cpp import llama_print_system_info as _sysinfo
+        logging.info(_sysinfo().decode() if hasattr(_sysinfo(), "decode") else _sysinfo())
+    except Exception:
+        pass
 
     # Check if we are using the "Transformers" model (based on config variable name or content)
     USE_TRANSFORMERS = "Qwen3-VL-4B" in MAIN_MODEL_FILENAME and "gguf" not in MAIN_MODEL_FILENAME.lower()
@@ -444,6 +412,13 @@ def ensure_main_model():
                             elif "assistant\n" in output_text:
                                 output_text = output_text.split("assistant\n", 1)[1]
 
+                            # Reduce memory usage: clear cache if not using stream
+                            if not stream and torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            elif not stream and sys.platform == "darwin":
+                                # torch.mps.empty_cache() # Not always available/effective, but good practice
+                                pass
+
                             return {
                                 "choices": [{
                                     "message": {
@@ -464,20 +439,25 @@ def ensure_main_model():
 
     # Standard GGUF Path
     if not os.path.exists(MAIN_MODEL_PATH):
-        logging.info("Main model not found. Downloading...")
+        logging.info(f"Main model not found: {MAIN_MODEL_FILENAME}. Downloading...")
         if not download_file(MAIN_MODEL_URL, MAIN_MODEL_PATH):
             init_error = "Failed to download main model."
             return
 
     # Ensure MMPROJ for Vision Support
     chat_handler = None
-    if MMPROJ_PATH and MMPROJ_URL:
+    # Check if we are loading a GGUF model that needs external vision adapter
+    if MMPROJ_PATH and MMPROJ_URL and "gguf" in MAIN_MODEL_FILENAME.lower():
         if not os.path.exists(MMPROJ_PATH):
              logging.info(f"MMPROJ not found. Downloading {MMPROJ_FILENAME}...")
              if not download_file(MMPROJ_URL, MMPROJ_PATH):
                  logging.error("Failed to download MMPROJ. Vision might not work.")
         
-        if os.path.exists(MMPROJ_PATH):
+        # NOTE: For Qwen3-VL server mode, we don't need a chat_handler in Python.
+        # The server handles vision. But we ensure the file exists above.
+        # We only need chat_handler if running local Llama() instance (not server).
+        
+        if os.path.exists(MMPROJ_PATH) and not "qwen3" in MAIN_MODEL_FILENAME.lower():
             try:
                 # Try Qwen2.5 VL Handler (Newer llama-cpp-python)
                 from llama_cpp.llama_chat_format import Qwen25VLChatHandler
@@ -498,6 +478,100 @@ def ensure_main_model():
                         logging.info("Initialized Llava15ChatHandler as fallback.")
                     except:
                         logging.error("Could not initialize any ChatHandler with MMPROJ.")
+    
+
+
+    # Qwen3-VL Special Handling: Use local llama.cpp server
+    if "qwen3" in MAIN_MODEL_FILENAME.lower():
+        logging.info("Using Qwen3-VL Local Server Mode...")
+        # Start server if not running
+        import subprocess
+        import time
+        import socket
+        
+        server_port = 8081
+        server_url = f"http://127.0.0.1:{server_port}/v1"
+        
+        # Check if port is open
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('127.0.0.1', server_port))
+        sock.close()
+        
+        if result != 0:
+            logging.info("Starting local Qwen3-VL server...")
+            subprocess.Popen(["./start_model_server.sh"], shell=True)
+            # Wait for server to come up
+            for i in range(30):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    if sock.connect_ex(('127.0.0.1', server_port)) == 0:
+                        sock.close()
+                        logging.info("Server is up!")
+                        break
+                    sock.close()
+                except: pass
+                time.sleep(1)
+        
+        # Create OpenAI client wrapper
+        from llama_cpp.llama_chat_format import Qwen25VLChatHandler # Placeholder if needed
+        try:
+            from openai import OpenAI
+            client = OpenAI(base_url=server_url, api_key="sk-no-key-required")
+            
+            class OpenAIWrapper:
+                def __init__(self, client):
+                    self.client = client
+                    self.device = "server" # Mock
+                    
+                def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, **kwargs):
+                    # Filter out unsupported params or adjust
+                    
+                    # Convert OpenAI image_url format to llama-server supported format if needed
+                    # messages structure: [{'role': 'user', 'content': [{'type': 'text', ...}, {'type': 'image_url', ...}]}]
+                    # Qwen3-VL server via OpenAI API usually expects standard OpenAI format.
+                    # We ensure it's passed through correctly.
+                    
+                    # Ensure temperature is float
+                    temperature = float(temperature)
+                    
+                    response = self.client.chat.completions.create(
+                        model="qwen3vl", # Model name in server is often just alias
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=stream,
+                        extra_body=kwargs
+                    )
+                    
+                    if stream:
+                        return response # It's already an iterator
+                    
+                    # Wrap non-stream response to match Llama object dict
+                    return {
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": response.choices[0].message.content
+                            }
+                        }]
+                    }
+                
+                def reset(self): pass
+
+            llm = OpenAIWrapper(client)
+            
+            # Reduce memory usage: clear cache if not using stream
+            if sys.platform == "darwin":
+                # Explicitly delete any large tensors if accessible
+                import gc
+                gc.collect()
+            
+            logging.info("Main Model Loaded (Local Server).")
+            return
+        except ImportError:
+            logging.error("openai package missing. Please install openai.")
+            init_error = "openai package missing"
+            return
 
     with main_lock:
         if llm: return
@@ -507,15 +581,17 @@ def ensure_main_model():
             
             # If we have a chat_handler, use it. 
             # Note: Qwen2-VL usually requires n_ctx to be large enough for image tokens.
+            # Reduced to 16384 to save RAM on standard Macs while still allowing reasonable context
             llm = Llama(
                 model_path=MAIN_MODEL_PATH,
                 chat_handler=chat_handler,
-                n_ctx=32768, # Increased for Vision/Long Context
-                n_threads=4,
-                n_gpu_layers=-1,
-                verbose=False
+                n_ctx=16384, 
+                n_threads=6, # Increase threads for M4
+                n_gpu_layers=-1, # Metal Support
+                verbose=True, # Enable verbose to see Metal usage
+                # chat_format="qwen2" # Let auto-detection work or rely on handler
             )
-            logging.info("Main Model Loaded.")
+            logging.info("Main Model Loaded (GGUF/Metal).")
         except Exception as e:
             logging.error(f"Main Model Load Error: {e}")
             init_error = str(e)

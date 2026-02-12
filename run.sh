@@ -42,6 +42,11 @@ pkill -f "src/services/voice/listener.py" || true
 export TRANSFORMERS_VERBOSITY=error
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export PYTHONUTF8=1
+LLAMA_LIB_PATH="$(pwd)/.deps/llama.cpp/build/lib/libllama.dylib"
+if [ -f "$LLAMA_LIB_PATH" ]; then
+  export LLAMA_CPP_LIB="$LLAMA_LIB_PATH"
+  export LLAMA_CPP_LOG=1
+fi
 
 # Run
 if [[ "$OSTYPE" == "darwin"* ]]; then

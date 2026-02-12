@@ -85,6 +85,9 @@ def should_search(query):
 
 def should_see_screen(query):
     """Uses Fast Model to decide if we need to see the screen."""
+    # TEMPORARY DISABLE: Always return False
+    return False
+
     query_lower = query.lower()
     
     # Questions about identity/system information should NOT require screenshots
@@ -114,10 +117,12 @@ def should_see_screen(query):
         "Decide if this query requires SEEING the user's SCREEN (taking a screenshot) to answer.\n"
         "Output ONLY 'YES' or 'NO'.\n"
         "YES: 'what is on my screen?', 'summarize this page', 'who is in this video?', 'look at this code', 'explain this error', 'read this', 'which button should i click?', 'what do you see?'.\n"
-        "NO: 'who are you?', 'how are you?', 'generate an image', 'find a photo of cats', 'what time is it'.\n"
+        "NO: 'hello', 'hey', 'hi', 'who are you?', 'how are you?', 'generate an image', 'find a photo of cats', 'what time is it'.\n"
         "\n"
         "Examples:\n"
         "Query: what is this website? -> YES\n"
+        "Query: hello -> NO (greeting)\n"
+        "Query: hey -> NO (greeting)\n"
         "Query: who are you? -> NO (identity question)\n"
         "Query: show me a cat -> NO (this is image generation/search)\n"
         "Query: look at this -> YES\n"
@@ -255,7 +260,9 @@ def _split_thinking_and_answer(text):
             return thinking, ""
     
     # No thinking tags at all: everything so far is thinking (default behavior for models without think tags)
-    return text, ""
+    # BUT: If the model output doesn't start with <think> and doesn't contain </think>, it's probably just an answer.
+    # Qwen3-VL usually produces <think> tags. If it doesn't, assume it's answering directly.
+    return "", text
 
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
@@ -276,6 +283,11 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
 
     context_text = ""
     source_type = "None"
+    
+    # Initialize thinking_content early to avoid UnboundLocalError
+    thinking_content = ""
+    answer = ""
+    actions = []
 
     if any(x in query for x in ["+", "*", "/", "sqrt"]) and any(c.isdigit() for c in query):
          source_type = "Calculator"
@@ -624,7 +636,20 @@ Current Conversation:
 
                 # Yield tokens as they arrive
                 accumulated_text = ""
-                for token in streamer:
+                for chunk in streamer:
+                    # Handle both raw strings and ChatCompletionChunk objects
+                    if hasattr(chunk, 'choices') and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, 'content') and delta.content:
+                            token = delta.content
+                        else:
+                            token = ""
+                    else:
+                        # Fallback for simple string streaming or dictionary
+                        token = str(chunk) if chunk else ""
+                        if isinstance(chunk, dict):
+                            token = chunk.get('choices', [{}])[0].get('delta', {}).get('content', '')
+
                     accumulated_text += token
                     # Log streaming chunks so logs show raw response (last 100 chars per chunk)
                     if accumulated_text:
@@ -658,6 +683,10 @@ Current Conversation:
                 thinking_content, answer_text = _split_thinking_and_answer(full_text)
                 # Extract actions from answer only (not from thinking)
                 answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
+
+                if not thinking_content and not answer:
+                    answer = full_text
+
                 return {"answer": answer, "actions": actions, "thinking": thinking_content}
 
         # VALIDATION: Filter out hallucinated computer_control actions
@@ -677,6 +706,9 @@ Current Conversation:
         logging.error(f"Error in ask_llm: {e}")
         answer = f"Error: {e}"
         actions = []
+        # Ensure thinking_content is defined even in error case
+        if 'thinking_content' not in locals():
+            thinking_content = ""
 
     if auto_actions: actions.extend(auto_actions)
 

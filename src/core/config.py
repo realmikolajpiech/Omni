@@ -18,13 +18,13 @@ FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"  # legacy / fallback
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
 FAST_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 
-MAIN_MODEL_FILENAME = "Qwen/Qwen3-VL-4B-Thinking"
-MAIN_MODEL_PATH = "Qwen/Qwen3-VL-4B-Thinking" # Transformers uses repo ID directly
-MAIN_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking"
+MAIN_MODEL_FILENAME = "Qwen3VL-4B-Thinking-Q4_K_M.gguf"
+MAIN_MODEL_PATH = os.path.join(MODEL_DIR, MAIN_MODEL_FILENAME)
+MAIN_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF/resolve/main/Qwen3VL-4B-Thinking-Q4_K_M.gguf"
 
-MMPROJ_FILENAME = None # Not needed for Transformers
-MMPROJ_PATH = None
-MMPROJ_URL = None
+MMPROJ_FILENAME = "mmproj-Qwen3VL-4B-Thinking-F16.gguf"
+MMPROJ_PATH = os.path.join(MODEL_DIR, MMPROJ_FILENAME)
+MMPROJ_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-4B-Thinking-F16.gguf"
 
 # Voice Models
 VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"

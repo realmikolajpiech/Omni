@@ -44,10 +44,23 @@ brew install ffmpeg portaudio cmake
 
 echo "Step 2: Installing Python dependencies..."
 
-# Install llama-cpp-python with Metal (GPU) support
-# We force a build from source to ensure Metal integration is enabled.
-echo "Building llama-cpp-python with Metal support..."
-CMAKE_ARGS="-DGGML_METAL=on" $PYTHON_CMD -m pip install llama-cpp-python --force-reinstall --upgrade --no-cache-dir
+# Build latest llama.cpp (libllama) with Metal and link Python binding to it
+echo "Building latest llama.cpp (libllama) with Metal..."
+LLAMA_DIR=".deps/llama.cpp"
+mkdir -p .deps
+if [ ! -d "$LLAMA_DIR" ]; then
+    git clone https://github.com/ggml-org/llama.cpp "$LLAMA_DIR"
+else
+    echo "llama.cpp already present, pulling latest..."
+    (cd "$LLAMA_DIR" && git pull --ff-only)
+fi
+cmake -DGGML_METAL=ON -S "$LLAMA_DIR" -B "$LLAMA_DIR/build"
+cmake --build "$LLAMA_DIR/build" -j
+LLAMA_LIB="$(pwd)/$LLAMA_DIR/build/lib/libllama.dylib"
+echo "Using libllama at: $LLAMA_LIB"
+
+echo "Installing llama-cpp-python bound to external libllama..."
+LLAMA_CPP_BUILD=OFF LLAMA_CPP_LIB="$LLAMA_LIB" $PYTHON_CMD -m pip install --force-reinstall --no-cache-dir llama-cpp-python
 
 # Install the rest of the requirements
 # We skip llama-cpp-python here if it satisfies the requirement, but since we just installed latest, it should be fine.
