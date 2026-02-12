@@ -44,25 +44,28 @@ brew install ffmpeg portaudio cmake
 
 echo "Step 2: Installing Python dependencies..."
 
-# Build latest llama.cpp (libllama) with Metal and link Python binding to it
-echo "Building latest llama.cpp (libllama) with Metal..."
-LLAMA_DIR=".deps/llama.cpp"
-mkdir -p .deps
-if [ ! -d "$LLAMA_DIR" ]; then
-    git clone https://github.com/ggml-org/llama.cpp "$LLAMA_DIR"
-else
-    echo "llama.cpp already present, pulling latest..."
-    (cd "$LLAMA_DIR" && git pull --ff-only)
-fi
-cmake -DGGML_METAL=ON -S "$LLAMA_DIR" -B "$LLAMA_DIR/build"
-cmake --build "$LLAMA_DIR/build" -j
-LLAMA_LIB="$(pwd)/$LLAMA_DIR/build/lib/libllama.dylib"
-echo "Using libllama at: $LLAMA_LIB"
+# Install OpenAI client (used to talk to local llama-server)
+$PYTHON_CMD -m pip install openai
 
-echo "Installing llama-cpp-python bound to external libllama..."
-LLAMA_CPP_BUILD=OFF LLAMA_CPP_LIB="$LLAMA_LIB" $PYTHON_CMD -m pip install --force-reinstall --no-cache-dir llama-cpp-python
+# Build official llama.cpp server with Metal support
+echo "Building official llama.cpp server (with Metal)..."
+SERVER_DIR="llama_cpp_server"
+if [ ! -d "$SERVER_DIR" ]; then
+    git clone https://github.com/ggerganov/llama.cpp.git "$SERVER_DIR"
+else
+    echo "llama.cpp server repo present, pulling latest..."
+    (cd "$SERVER_DIR" && git pull)
+fi
+
+# Build the server binary
+echo "Compiling llama-server..."
+cmake -DGGML_METAL=ON -S "$SERVER_DIR" -B "$SERVER_DIR/build"
+cmake --build "$SERVER_DIR/build" -j --config Release
+
+echo "Server built successfully at $SERVER_DIR/build/bin/llama-server"
 
 # Install the rest of the requirements
+echo "Installing other requirements..."
 # We skip llama-cpp-python here if it satisfies the requirement, but since we just installed latest, it should be fine.
 # If requirements.txt has a pinned version, this might downgrade it. 
 # Current requirements.txt does not pin llama-cpp-python version.
