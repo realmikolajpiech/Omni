@@ -547,11 +547,17 @@ def ensure_main_model():
                         return response # It's already an iterator
                     
                     # Wrap non-stream response to match Llama object dict
+                    msg = response.choices[0].message
+                    content = msg.content
+                    # Try to get reasoning_content (DeepSeek/Qwen style)
+                    reasoning = getattr(msg, "reasoning_content", None)
+                    
                     return {
                         "choices": [{
                             "message": {
                                 "role": "assistant",
-                                "content": response.choices[0].message.content
+                                "content": content,
+                                "reasoning_content": reasoning
                             }
                         }]
                     }

@@ -258,10 +258,21 @@ def _split_thinking_and_answer(text):
         if think_match:
             thinking = think_match.group(1).strip()
             return thinking, ""
+            
+    # CRITICAL FIX: The server might NOT be outputting <think> tags at all in the stream 
+    # if it treats them as special tokens or if the chat template hides them.
+    # However, for Qwen3-Thinking, the thinking content usually comes FIRST.
+    # If we are streaming and haven't seen an end tag yet, and the text is getting long,
+    # it might ALL be thinking content if the model just "thinks" by default.
     
-    # No thinking tags at all: everything so far is thinking (default behavior for models without think tags)
-    # BUT: If the model output doesn't start with <think> and doesn't contain </think>, it's probably just an answer.
-    # Qwen3-VL usually produces <think> tags. If it doesn't, assume it's answering directly.
+    # BUT, looking at the raw curl output, the model DOES separate `reasoning_content` in the JSON response
+    # if using the OpenAI API format correctly!
+    # The `llama-server` returns `reasoning_content` field in the delta for thinking models?
+    # NO, standard OpenAI API doesn't have `reasoning_content` in delta usually, unless it's DeepSeek style.
+    # Wait, the curl output above showed: "reasoning_content": "First, the question is..." in the final JSON.
+    
+    # If we are streaming, we need to check if `chunk.choices[0].delta` has `reasoning_content`.
+    
     return "", text
 
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
@@ -636,33 +647,59 @@ Current Conversation:
 
                 # Yield tokens as they arrive
                 accumulated_text = ""
+                external_thinking = ""
                 for chunk in streamer:
                     # Handle both raw strings and ChatCompletionChunk objects
                     if hasattr(chunk, 'choices') and chunk.choices:
                         delta = chunk.choices[0].delta
+                        
+                        # Handle content
                         if hasattr(delta, 'content') and delta.content:
                             token = delta.content
                         else:
                             token = ""
+                            
+                        # Handle reasoning_content (DeepSeek/Qwen style)
+                        reasoning_token = ""
+                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            reasoning_token = delta.reasoning_content
+                        elif hasattr(delta, 'model_extra') and delta.model_extra and 'reasoning_content' in delta.model_extra:
+                            reasoning_token = delta.model_extra['reasoning_content']
+                            
+                        if reasoning_token:
+                            external_thinking += reasoning_token
+                            
                     else:
                         # Fallback for simple string streaming or dictionary
                         token = str(chunk) if chunk else ""
+                        reasoning_token = ""
                         if isinstance(chunk, dict):
-                            token = chunk.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                            delta_dict = chunk.get('choices', [{}])[0].get('delta', {})
+                            token = delta_dict.get('content', '')
+                            reasoning_token = delta_dict.get('reasoning_content', '')
+                            if reasoning_token:
+                                external_thinking += reasoning_token
 
                     accumulated_text += token
                     # Log streaming chunks so logs show raw response (last 100 chars per chunk)
                     if accumulated_text:
                         tail = accumulated_text[-100:] if len(accumulated_text) > 100 else accumulated_text
-                        logging.info(f"[STREAM] raw chunk: ...{tail!r}")
+                        # logging.info(f"[STREAM] raw chunk: ...{tail!r}")
+                        
                     # Split into thinking (collapsible, gray) and answer (main text) for UI
-                    thinking_so_far, answer_so_far = _split_thinking_and_answer(accumulated_text)
+                    inline_thinking, answer_so_far = _split_thinking_and_answer(accumulated_text)
+                    
+                    # Combine external (field) and inline (tag) thinking
+                    combined_thinking = external_thinking + inline_thinking
+                    
                     # Yield partial whenever we have thinking or answer (so UI can stream both)
-                    if thinking_so_far or answer_so_far:
-                        yield ("partial", {"thinking": thinking_so_far, "answer": answer_so_far})
+                    if combined_thinking or answer_so_far:
+                        yield ("partial", {"thinking": combined_thinking, "answer": answer_so_far})
 
                 # Final processing: use the split result and then extract actions from answer only
-                thinking_content, answer_text = _split_thinking_and_answer(accumulated_text)
+                inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
+                thinking_content = external_thinking + inline_thinking
+                
                 # Now extract actions/JSON from the answer text only (not from thinking)
                 answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
                 logging.info(f"[STREAM] final raw length={len(accumulated_text)}, thinking length={len(thinking_content)}, answer length={len(answer)}, actions count={len(actions)}")
@@ -675,12 +712,20 @@ Current Conversation:
                     stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
                     temperature=0.1
                 )
-                full_text = output['choices'][0]['message']['content'].strip()
+                msg = output['choices'][0]['message']
+                full_text = msg['content'].strip()
+                
+                # Extract reasoning_content if present
+                external_thinking = msg.get('reasoning_content', '') or ""
+                if not isinstance(external_thinking, str): external_thinking = ""
+                
                 if full_text.startswith(':'): full_text = full_text[1:].strip()
                 logging.info(f"RAW LLM OUTPUT:\n{full_text}")
 
                 # Use the same splitting logic for consistency
-                thinking_content, answer_text = _split_thinking_and_answer(full_text)
+                inline_thinking, answer_text = _split_thinking_and_answer(full_text)
+                thinking_content = external_thinking + inline_thinking
+                
                 # Extract actions from answer only (not from thinking)
                 answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
 
