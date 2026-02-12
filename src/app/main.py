@@ -154,20 +154,23 @@ def main():
             from pynput import keyboard as pynput_keyboard
             
             def on_activate():
-                logging.info("Global hotkey <ctrl>+<space> activated (pynput)")
+                logging.info("Global hotkey <alt>+<space> activated (pynput)")
                 toggle_omni()
 
             # Non-blocking listener
+            # On Mac, 'option' is often mapped to 'alt' or 'cmd' depending on pynput version
+            # But usually '<alt>+<space>' works for Option+Space
             hotkey_listener = pynput_keyboard.GlobalHotKeys({
-                '<ctrl>+<space>': on_activate
+                '<alt>+<space>': on_activate,
+                '<cmd>+<space>': on_activate # Backup/Alternative
             })
             hotkey_listener.start()
-            logging.info("Global hotkey 'ctrl+space' registered via pynput (macOS)")
+            logging.info("Global hotkey 'Option+Space' (mapped as <alt>+<space>) registered via pynput (macOS)")
         except Exception as e:
             logging.error(f"Failed to register pynput hotkey on macOS: {e}")
             # Fallback to keyboard module if pynput fails
             try:
-                keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
+                keyboard.add_hotkey('alt+space', toggle_omni, suppress=True)
             except Exception as e2:
                 logging.error(f"Fallback keyboard hotkey also failed: {e2}")
 

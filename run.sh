@@ -8,7 +8,15 @@ command_exists() {
 }
 
 # Determine Python command
-if command_exists python3; then
+# Check if venv exists and use it
+if [ -d "venv" ]; then
+    PYTHON_CMD="./venv/bin/python3"
+# Check for Python 3.12 (Homebrew) first
+elif command -v python3.12 >/dev/null 2>&1; then
+    PYTHON_CMD=python3.12
+elif [ -f "$(brew --prefix)/bin/python3.12" ]; then
+    PYTHON_CMD="$(brew --prefix)/bin/python3.12"
+elif command_exists python3; then
     PYTHON_CMD=python3
 elif command_exists python; then
     PYTHON_CMD=python

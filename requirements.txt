@@ -7,38 +7,43 @@ lancedb
 memvid_sdk
 PyQt6
 Pillow
-BlurWindow
 packaging
 
 # Keyboard handling
-keyboard; sys_platform == 'win32'
+keyboard
 pynput; sys_platform == 'darwin'
 
 # AI / LLM
-llama_cpp_python
-huggingface_hub[hf_xet]
-bitsandbytes>=0.42.0; sys_platform == 'linux'
-transformers
-accelerate
+# Explicitly pin torch to avoid long dependency resolution scans
 torch
 torchvision
+torchaudio
+accelerate
+transformers
+huggingface_hub[hf_xet]
+llama_cpp_python
 
 # Voice (ASR & TTS)
-sounddevice
+# Install core voice deps first
 numpy
-vosk
 scipy
-librosa
+sounddevice
 soundfile
+librosa
 sox
+vosk
+
+# NLP / Utils
 pytz
 nagisa
 soynlp
 qwen-omni-utils
-qwen_asr
+# qwen-asr - Removing problematic package, installing directly via git in script
+
 
 # Windows specific
 pywin32; sys_platform == 'win32'
+BlurWindow; sys_platform == 'win32'
 
 # macOS specific
 pyobjc; sys_platform == 'darwin'

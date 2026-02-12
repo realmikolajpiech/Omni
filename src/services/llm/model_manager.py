@@ -84,10 +84,14 @@ def ensure_fast_model():
         logging.info(f"Loading Fast Model (Transformers, 4-bit quantized): {FAST_MODEL_HF_ID}")
         try:
             cuda_ok = torch.cuda.is_available()
+            mps_ok = sys.platform == "darwin" and torch.backends.mps.is_available()
+            
             if cuda_ok:
                 logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+            elif mps_ok:
+                logging.info("MPS (Metal Performance Shaders) available.")
 
-            dtype = torch.bfloat16 if cuda_ok else torch.float32
+            dtype = torch.bfloat16 if cuda_ok else (torch.float16 if mps_ok else torch.float32)
             attn_implementation = "sdpa"  # sdpa is reliable with quantized models
             
             tokenizer = AutoTokenizer.from_pretrained(FAST_MODEL_HF_ID, trust_remote_code=True)
@@ -102,8 +106,9 @@ def ensure_fast_model():
                 try:
                     import bitsandbytes
                 except ImportError:
+                    if use_quant:
+                        logging.warning("bitsandbytes not installed; fast model will load in bfloat16 (slower).")
                     use_quant = False
-                    logging.warning("bitsandbytes not installed; fast model will load in bfloat16 (slower).")
 
                 # 8-bit quantization (better quality than 4-bit for small models, still efficient)
                 # 4-bit NF4 can be too aggressive for 0.6B model, causing garbage/Chinese output
@@ -122,25 +127,32 @@ def ensure_fast_model():
                     )
                     # Quantized model: do not call .to(dtype=...) 
                 else:
+                    device = "cuda:0" if cuda_ok else ("mps" if mps_ok else "cpu")
+                    logging.info(f"Loading fast model on {device} with {dtype}...")
                     model = AutoModelForCausalLM.from_pretrained(
                         FAST_MODEL_HF_ID,
                         torch_dtype=dtype,
-                        device_map="cuda:0" if cuda_ok else "cpu",
+                        device_map=device,
                         trust_remote_code=True,
                         attn_implementation=attn_implementation,
                         low_cpu_mem_usage=True
                     )
                     if cuda_ok:
                         model = model.to(dtype=dtype, device="cuda:0")
+                    elif mps_ok:
+                        model = model.to(device="mps")
                 
                 model.eval()
                 
-                if cuda_ok:
+                if cuda_ok or mps_ok:
                     logging.info("Warming up fast model...")
                     warmup_input = tokenizer("Hi", return_tensors="pt").to(model.device)
                     with torch.inference_mode():
                         model.generate(**warmup_input, max_new_tokens=2)
-                    torch.cuda.synchronize()
+                    if cuda_ok:
+                        torch.cuda.synchronize()
+                    elif mps_ok:
+                        torch.mps.synchronize()
                     logging.info("Fast model warmup complete.")
             except Exception as oom:
                 if cuda_ok and "out of memory" in str(oom).lower():
