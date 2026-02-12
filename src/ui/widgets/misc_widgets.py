@@ -250,23 +250,24 @@ class CollapsibleThinkingWidget(QWidget):
         # Track if this is the first time we're setting thinking (for auto-expand on first update)
         self._first_thinking_set = True
 
-        # Header button - minimal, elegant design
-        self.header_button = QPushButton("✨ Thoughts")
+        # Header button - minimal, text-only design
+        self.header_button = QPushButton("Reasoning process")
         self.header_button.setStyleSheet("""
             QPushButton {
                 background: transparent;
                 border: none;
-                border-radius: 4px;
-                padding: 4px 6px;
+                padding: 2px 0px;
                 text-align: left;
                 font-family: Manrope;
-                font-size: 13px;
-                font-weight: normal;
-                color: #555555;
+                font-size: 12px;
+                font-weight: 500;
+                color: #999999;
             }
             QPushButton:hover {
-                background: rgba(0, 0, 0, 0.05);
-                color: #333333;
+                color: #666666;
+            }
+            QPushButton:checked {
+                color: #666666;
             }
         """)
         self.header_button.setCheckable(True)
@@ -278,7 +279,7 @@ class CollapsibleThinkingWidget(QWidget):
         # Content area
         self.content_widget = QWidget()
         content_layout = QVBoxLayout(self.content_widget)
-        content_layout.setContentsMargins(0, 4, 0, 4)  # Reduced vertical margins
+        content_layout.setContentsMargins(0, 4, 0, 8)
         content_layout.setSpacing(0)
 
         self.thinking_text = UnscrollableTextEdit()
@@ -286,12 +287,11 @@ class CollapsibleThinkingWidget(QWidget):
         self.thinking_text.setFrameStyle(QFrame.Shape.NoFrame)
         self.thinking_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thinking_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Subtle styling: transparent background, darker color for readability, italic
-        self.thinking_text.setStyleSheet("QTextEdit { background: transparent; color: #444444; padding: 0px; margin: 0px; line-height: 1.4; }")
+        # Subtle styling: gray text, monospace font for technical feel
+        self.thinking_text.setStyleSheet("QTextEdit { background: transparent; color: #666666; padding: 0px; margin: 0px; line-height: 1.4; }")
         self.thinking_text.setPlainText(thinking_text)
 
         font = QFont("Manrope", 12, QFont.Weight.Normal)
-        font.setItalic(True)
         self.thinking_text.setFont(font)
         self.thinking_text.document().setTextWidth(620)
         self.thinking_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -301,6 +301,7 @@ class CollapsibleThinkingWidget(QWidget):
 
         # Initially hide content (collapsed)
         self.content_widget.setVisible(False)
+        self.header_button.setText("▶ Reasoning process")
 
     def set_thinking_text(self, text):
         """Update the thinking text and ensure the widget is visible."""
@@ -339,7 +340,11 @@ class CollapsibleThinkingWidget(QWidget):
         # Set the content visibility and button text based on collapsed state
         new_visibility = not collapsed
         self.content_widget.setVisible(new_visibility)
-        self.header_button.setText("✨ Thoughts" if collapsed else "✨ Hide thoughts")
+        
+        # Update text if needed, or just keep it static. Let's use an arrow indicator.
+        arrow = "▼" if new_visibility else "▶"
+        self.header_button.setText(f"{arrow} Reasoning process")
+        self.header_button.setChecked(new_visibility)
         
         if new_visibility:
             doc_height = self.thinking_text.document().size().height()

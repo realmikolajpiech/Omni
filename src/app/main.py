@@ -10,8 +10,10 @@ import atexit
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QIcon
 from src.core.logger import setup_logging, setup_exception_hook
 from src.ui.window import OmniWindow
+from src.core.config import LOGO_PATH
 
 def main():
     # Platform specific fixes
@@ -26,6 +28,58 @@ def main():
     setup_exception_hook()
 
     app = QApplication(sys.argv)
+    app.setApplicationName("Omni")
+    app.setApplicationDisplayName("Omni")
+    app.setDesktopFileName("Omni")
+    app.setWindowIcon(QIcon(LOGO_PATH))
+
+    # macOS: Set Dock Icon manually if running from source
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApplication, NSImage
+            import Foundation
+
+            app_name = "Omni"
+
+            # 1. Update Process Name
+            process_info = Foundation.NSProcessInfo.processInfo()
+            process_info.setProcessName_(app_name)
+
+            # 2. Fix App Name in Menu Bar/Dock (Best effort for script)
+            bundle = Foundation.NSBundle.mainBundle()
+            info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+            if info:
+                info['CFBundleName'] = app_name
+
+            ns_app = NSApplication.sharedApplication()
+            
+            # 3. Set Icon
+            image = NSImage.alloc().initWithContentsOfFile_(LOGO_PATH)
+            if image:
+                ns_app.setApplicationIconImage_(image)
+
+            # 4. Update Menu Bar Item (The bold application menu)
+            # This replaces 'Python' with 'Omni' in the top menu bar
+            # Note: This might only work if the menu bar has been initialized
+            main_menu = ns_app.mainMenu()
+            if main_menu:
+                app_menu_item = main_menu.itemAtIndex_(0)
+                if app_menu_item:
+                    app_menu_item.setTitle_(app_name)
+                    
+                    # Also update the submenu items (About Python -> About Omni, Quit Python -> Quit Omni)
+                    app_menu = app_menu_item.submenu()
+                    if app_menu:
+                        app_menu.setTitle_(app_name)
+                        for item in app_menu.itemArray():
+                            title = item.title()
+                            if "Python" in title:
+                                item.setTitle_(title.replace("Python", app_name))
+
+        except ImportError:
+            logging.warning("AppKit/Foundation not found, cannot set Dock icon/name")
+        except Exception as e:
+            logging.warning(f"Failed to set macOS Dock icon: {e}")
     
     # Allow Ctrl+C to interrupt the Qt Event Loop
     from PyQt6.QtCore import QTimer

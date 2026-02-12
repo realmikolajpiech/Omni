@@ -1356,108 +1356,14 @@ class OmniWindow(QWidget):
         self.ai_worker.partial_response.connect(self.on_partial_response)
         self.ai_worker.start()
 
-    def on_stream_started(self, data):
-        """Handle the start of streaming by creating the initial answer widget."""
-        # This is similar to on_ai_response but for streaming start
-        self.logo_label.stop_spinning()
 
-        # Remove thinking widget and separator (iterate backwards)
-        for i in range(self.list_widget.count() - 1, -1, -1):
-            item = self.list_widget.item(i)
-            role = item.data(Qt.ItemDataRole.UserRole)
-            if role in ["thinking", "separator"]:
-                pass
-
-        # Updated cleanup: Remove 'thinking' AND the specific 'separator' added during thinking phase
-        # The 'separator' added during perform_ai_query for followup is just below 'thinking'.
-        # We need to remove it too, because we are about to re-add a separator in the correct place
-        # (between new answer and old answer).
-        # Actually, we can just REUSE it if it exists, or remove and re-add.
-        # Simpler to remove and re-add to be consistent.
-
-        # We need to find the thinking widget index, and see if there is a separator below it.
-        thinking_idx = -1
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == "thinking":
-                thinking_idx = i
-                break
-
-        if thinking_idx != -1:
-            # Check if next item is separator (thinking is at top/0 usually, so separator at 1)
-            # But we iterate backwards to remove safely.
-
-            # First remove separator if it exists below thinking
-            if thinking_idx + 1 < self.list_widget.count():
-                next_item = self.list_widget.item(thinking_idx + 1)
-                if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
-                    self.list_widget.takeItem(thinking_idx + 1)
-
-            # Then remove thinking
-            self.list_widget.takeItem(thinking_idx)
-
-        # Fallback cleanup for any other thinking widgets
-        for i in range(self.list_widget.count() - 1, -1, -1):
-            item = self.list_widget.item(i)
-            role = item.data(Qt.ItemDataRole.UserRole)
-            if role == "thinking":
-                 self.list_widget.takeItem(i)
-
-        answer = data.get("answer", "")
-        thinking = data.get("thinking", "")
-
-        # Determine insertion method (Append vs Prepend)
-        prepend = self.is_history_mode
-        insert_idx = 0
-
-        # Helper to add item based on mode
-        def add_item(w, d):
-            nonlocal insert_idx
-            if prepend:
-                self.insert_list_item(insert_idx, w, d)
-                insert_idx += 1
-            else:
-                self.add_list_item(w, d)
-
-        # Update visibility of existing items if we are prepending (entering history)
-        if prepend:
-            # We are adding a new answer.
-            # Existing items (the old answer) should now show their query labels if they weren't already.
-            # Also, we need to insert a separator before the old answer (which is currently at index 0, before we insert new stuff).
-
-            # Step 1: Insert Separator at top (pushing old answer down)
-            if self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator")
-                # Do NOT increment insert_idx.
-
-        # Create answer widget with initial streaming data
-        current_query = self.input_field.text()
-        w = AnswerWidget(answer, query_text=current_query, thinking_text=thinking)
-        if prepend:
-            w.set_query_visible(True)
-
-        add_item(w, "answer")
-
-        # Add Actions (initially empty for streaming)
-        actions = data.get("actions", [])
-        for act in actions:
-            if isinstance(act, dict):
-                if act.get('type') == 'link':
-                    w = LinkActionWidget(act['title'], act['url'], act['description'])
-                    add_item(w, act)
-                elif act.get('type') == 'install':
-                    w = InstallActionWidget(act['name'], act.get('website'))
-                    add_item(w, act)
-                elif act.get('type') == 'status':
-                    w = StandardItemWidget(act['description'], icon_name="dialog-information")
-                    add_item(w, act)
 
     def _unwrap_answer_widget(self, item):
-        """Get the real AnswerWidget from a list item (unwrap SmoothEntryWidget)."""
-        w = self.list_widget.itemWidget(item)
-        if isinstance(w, SmoothEntryWidget):
-            w = w.content_widget
-        return w
+        if not item: return None
+        widget = self.list_widget.itemWidget(item)
+        if isinstance(widget, SmoothEntryWidget):
+            return widget.content_widget
+        return widget
 
     def on_partial_response(self, data):
         """Handle partial streaming: show thinking in collapsible (gray), answer in main. Collapse thinking when answer starts."""
@@ -1477,7 +1383,27 @@ class OmniWindow(QWidget):
                 break
 
         if answer_widget is None:
-            # First partial: create widget WITHOUT thinking in constructor, add it dynamically
+            # First partial: Remove "Thinking..." widget first
+            # We need to find the thinking widget index, and see if there is a separator below it.
+            thinking_idx = -1
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == "thinking":
+                    thinking_idx = i
+                    break
+            
+            if thinking_idx != -1:
+                # Check if next item is separator (thinking is at top/0 usually, so separator at 1)
+                # First remove separator if it exists below thinking
+                if thinking_idx + 1 < self.list_widget.count():
+                    next_item = self.list_widget.item(thinking_idx + 1)
+                    if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
+                        self.list_widget.takeItem(thinking_idx + 1)
+                
+                # Then remove thinking
+                self.list_widget.takeItem(thinking_idx)
+
+            # Create widget WITHOUT thinking in constructor, add it dynamically
             prepend = self.is_history_mode
             if prepend and self.list_widget.count() > 0:
                 self.insert_list_item(0, SeparatorWidget(), "separator")
