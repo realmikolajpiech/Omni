@@ -32,11 +32,13 @@ if __name__ == "__main__":
     logging.info(f"Starting Brain Service on {BRAIN_HOST}:{BRAIN_PORT}")
 
     # Preload models in background with error handling
-    import threading
-    model_thread = threading.Thread(target=load_models_background, daemon=True)
-    model_thread.start()
+    # DISABLED for now to prevent 500 error on startup if models are missing
+    # import threading
+    # model_thread = threading.Thread(target=load_models_background, daemon=True)
+    # model_thread.start()
 
     try:
+        # Increase timeout and disable threading to prevent race conditions during model load
         app.run(host=BRAIN_HOST, port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)
     except Exception as e:
         logging.error(f"Flask app failed: {e}")

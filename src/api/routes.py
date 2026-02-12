@@ -67,13 +67,14 @@ def ask_llm():
         model_manager.ensure_main_model()
     except Exception as e:
         logging.error(f"Failed to ensure main model: {e}")
-        return jsonify({"answer": f"Model loading error: {str(e)}"}), 500
+        # Instead of 500, return a friendly error message
+        return jsonify({"answer": f"I'm still waking up (Loading AI models...). Please try again in 30 seconds. Error: {str(e)}"}), 200
 
     if model_manager.init_error:
-         return jsonify({"answer": f"Model Initialization Error: {model_manager.init_error}"}), 500
+         return jsonify({"answer": f"I encountered an issue loading my AI brain: {model_manager.init_error}. Please check the logs."}), 200
     
     if not model_manager.llm:
-         return jsonify({"answer": "The Omni AI hasn't loaded yet. Please try again in a moment."}), 503
+         return jsonify({"answer": "I'm still loading my AI models. Please give me a moment."}), 200
 
     # Check if streaming is requested
     stream = req.get("stream", False)

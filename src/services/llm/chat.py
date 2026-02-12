@@ -265,6 +265,9 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
     if not model_manager.llm:
         return {"answer": f"Error: Model failed to load."}
 
+    # === LOGGING: Confirm model entry ===
+    logging.info(f"[CHAT] Starting process_chat_request for query: '{query}' (Stream: {stream})")
+
     # CHECK SCREEN INTENT
     if not screenshot_b64 and should_see_screen(query):
         logging.info(f"[SCREENSHOT] Requesting Screenshot from Client for query: '{query}'")
@@ -354,6 +357,9 @@ Context: {prev_ctx_msg}
 Input: {query}
 Output:"""
         
+        # === LOGGING: Fast Model extraction start ===
+        logging.info("[CHAT] Starting Fast Model memory extraction...")
+        
         ensure_fast_model()
         with fast_lock:
              if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
@@ -404,6 +410,9 @@ Output:"""
     elif should_search_files(query):
          source_type = "Local Files"
          context_text = f"--- Local File Context ---\n{perform_file_search(query)}\n"
+
+    # === LOGGING: Context determined ===
+    logging.info(f"[CHAT] Context determination finished. Source: {source_type}")
 
     user_loc = get_ip_location()
     user_personal_context = get_user_memory(query)
@@ -599,6 +608,9 @@ Current Conversation:
     try:
         abort_fast_event.clear()
         with main_lock:
+            # === LOGGING: Main Lock Acquired ===
+            logging.info("[CHAT] Main lock acquired. Starting generation...")
+            
             if hasattr(model_manager.llm, 'reset'): model_manager.llm.reset()
 
             if stream:
