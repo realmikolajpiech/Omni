@@ -5,15 +5,45 @@ import signal
 import keyboard
 import subprocess
 import atexit
+import glob
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QFontDatabase
 from src.core.logger import setup_logging, setup_exception_hook
 from src.ui.window import OmniWindow
 from src.core.config import LOGO_PATH
+
+def load_fonts():
+    """Load custom fonts from assets directory"""
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        assets_dir = os.path.join(project_root, "assets")
+        
+        font_files = []
+        
+        # Instrument Serif
+        font_files.extend(glob.glob(os.path.join(assets_dir, "Instrument_Serif", "*.ttf")))
+        
+        # Manrope
+        font_files.extend(glob.glob(os.path.join(assets_dir, "Manrope", "*.ttf")))
+        font_files.extend(glob.glob(os.path.join(assets_dir, "Manrope", "static", "*.ttf")))
+        
+        loaded_families = set()
+        for font_path in font_files:
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            if font_id != -1:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                loaded_families.update(families)
+            else:
+                logging.warning(f"Failed to load font: {os.path.basename(font_path)}")
+                
+        logging.info(f"Loaded custom font families: {loaded_families}")
+        
+    except Exception as e:
+        logging.error(f"Error loading fonts: {e}")
 
 def main():
     # Platform specific fixes
@@ -32,6 +62,9 @@ def main():
     app.setApplicationDisplayName("Omni")
     app.setDesktopFileName("Omni")
     app.setWindowIcon(QIcon(LOGO_PATH))
+
+    # Load custom fonts
+    load_fonts()
 
     # macOS: Set Dock Icon manually if running from source
     if sys.platform == "darwin":

@@ -564,12 +564,28 @@ class OmniWindow(QWidget):
             for i in range(count):
                 item = self.list_widget.item(i)
                 list_h += item.sizeHint().height()
-            # Cap list height
-            list_h = min(list_h, 600)
             
             base_h = 84 
+            extra_padding = 30
+            
+            # Dynamic height calculation to prevent going behind taskbar
+            screen = QGuiApplication.screenAt(self.pos()) or QApplication.primaryScreen()
+            max_h_limit = 600
+            
+            if screen:
+                avail_geo = screen.availableGeometry()
+                # Calculate space below the window's top edge
+                # avail_geo.bottom() is the y-coordinate of the dock/taskbar top edge
+                space_below = avail_geo.bottom() - self.y() - 20 # 20px safety margin
+                max_list_avail = space_below - base_h - extra_padding
+                max_h_limit = max(100, max_list_avail)
+            
+            # Cap list height
+            # We use 800 as a reasonable absolute max, but constrain by screen space
+            list_h = min(list_h, 800, max_h_limit)
+            
             # Add padding for list borders/margins (12px top + 12px bottom = 24px) + safety
-            new_h = base_h + list_h + 30 
+            new_h = base_h + list_h + extra_padding 
         else:
             self.divider.hide()
             self.list_widget.hide()
