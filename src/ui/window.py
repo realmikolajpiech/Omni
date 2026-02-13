@@ -45,7 +45,7 @@ if sys.platform == "darwin":
         import objc
         from AppKit import NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow, \
                            NSVisualEffectMaterialHUDWindow, NSViewWidthSizable, NSViewHeightSizable, \
-                           NSColor
+                           NSColor, NSApplication
     except ImportError:
         logging.warning("PyObjC not found. MacOS blur disabled.")
 
@@ -374,7 +374,12 @@ class OmniWindow(QWidget):
     def force_focus(self):
         self.activateWindow()
         self.raise_()
-        if sys.platform == "win32":
+        if sys.platform == "darwin":
+            try:
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception as e:
+                logging.debug(f"MacOS activateIgnoringOtherApps failed: {e}")
+        elif sys.platform == "win32":
             try:
                 import ctypes
                 hwnd = int(self.winId())
@@ -594,6 +599,14 @@ class OmniWindow(QWidget):
         current_h = self.height()
         
         if current_h != new_h:
+            # If we are already animating, force animation to continue to avoid snapping
+            if self.anim.state() == QPropertyAnimation.State.Running:
+                animate = True
+            
+            # Force animation when expanding from base state (e.g. first character typed)
+            if current_h <= 84 and new_h > 84:
+                animate = True
+
             self.anim.stop() # Always stop existing animation
             if animate:
                 self.anim.setStartValue(self.geometry())
@@ -831,7 +844,9 @@ class OmniWindow(QWidget):
         anim_opa.setEasingCurve(QEasingCurve.Type.InCubic)
         
         def on_close_finished():
-             self.close() # Or self.hide()
+             self.hide()
+             self._is_closing = False
+             self.setWindowOpacity(1.0)
              self.setGraphicsEffect(None) # Cleanup
              
              # Reset MacOS blur view reference so it gets recreated on next show

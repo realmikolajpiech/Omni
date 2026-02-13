@@ -62,6 +62,7 @@ def main():
     app.setApplicationDisplayName("Omni")
     app.setDesktopFileName("Omni")
     app.setWindowIcon(QIcon(LOGO_PATH))
+    app.setQuitOnLastWindowClosed(False)
 
     # Load custom fonts
     load_fonts()
@@ -78,7 +79,12 @@ def main():
             process_info = Foundation.NSProcessInfo.processInfo()
             process_info.setProcessName_(app_name)
 
-            # 2. Fix App Name in Menu Bar/Dock (Best effort for script)
+            # 2. Hide from Dock (Accessory Mode)
+            # NSApplicationActivationPolicyAccessory = 1
+            ns_app = NSApplication.sharedApplication()
+            ns_app.setActivationPolicy_(1)
+
+            # 3. Fix App Name in Menu Bar/Dock (Best effort for script)
             bundle = Foundation.NSBundle.mainBundle()
             info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
             if info:
@@ -135,6 +141,7 @@ def main():
 
     # Smart Windows Key Handling: Suppress Start Menu, allow shortcuts
     # Strategy: Use Low Level Hook (WH_KEYBOARD_LL) via ctypes to intercept the key.
+    # Note: hotkey_state must be defined before use
     hotkey_state = {'win_down': False, 'other_pressed': False}
 
     if sys.platform == "win32":
@@ -236,25 +243,110 @@ def main():
 
     # Global Hotkey Registration
     if sys.platform == "darwin":
-        # macOS: Use pynput for reliable global hotkeys
+        # macOS: Use Native NSEvent for reliable global hotkeys (requires Accessibility permissions)
         try:
-            from pynput import keyboard as pynput_keyboard
+            import AppKit
+            from AppKit import NSEvent, NSKeyDownMask, NSFlagsChangedMask
+            from ApplicationServices import AXIsProcessTrusted
             
-            def on_activate():
-                logging.info("Global hotkey <alt>+<space> activated (pynput)")
-                toggle_omni()
+            # 1. Check Permissions
+            def check_permissions():
+                if not AXIsProcessTrusted():
+                    logging.warning("Accessibility permissions missing!")
+                    # Show Dialog on Main Thread
+                    from PyQt6.QtWidgets import QMessageBox
+                    msg = QMessageBox()
+                    msg.setIcon(QMessageBox.Icon.Warning)
+                    msg.setWindowTitle("Permissions Needed")
+                    msg.setText("Global Hotkeys require Accessibility Permissions")
+                    msg.setInformativeText("To use the 'Option + Command' shortcut globally:\n\n1. Open System Settings\n2. Go to Privacy & Security > Accessibility\n3. Grant permission to your Terminal (e.g., iTerm, Terminal) or 'Omni'\n4. Restart the app.")
+                    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                    msg.exec()
+            
+            # Run check shortly after startup
+            QTimer.singleShot(1000, check_permissions)
 
-            # Non-blocking listener
-            # On Mac, 'option' is often mapped to 'alt' or 'cmd' depending on pynput version
-            # But usually '<alt>+<space>' works for Option+Space
-            hotkey_listener = pynput_keyboard.GlobalHotKeys({
-                '<alt>+<space>': on_activate,
-                '<cmd>+<space>': on_activate # Backup/Alternative
-            })
-            hotkey_listener.start()
-            logging.info("Global hotkey 'Option+Space' (mapped as <alt>+<space>) registered via pynput (macOS)")
+            # 2. Hotkey Logic
+            # We need to track state to detect "Empty" Cmd+Opt presses
+            # Using a mutable container for closure access
+            hotkey_state = {'armed': False}
+
+            def check_flags(flags):
+                # Check for Command + Option ONLY (ignoring CapsLock, etc if needed, but strict for now)
+                cmd = (flags & AppKit.NSEventModifierFlagCommand)
+                opt = (flags & AppKit.NSEventModifierFlagOption)
+                
+                # Ensure no other "heavy" modifiers are pressed
+                ctrl = (flags & AppKit.NSEventModifierFlagControl)
+                shift = (flags & AppKit.NSEventModifierFlagShift)
+                
+                return bool(cmd and opt and not ctrl and not shift)
+
+            def on_flags_changed(event):
+                try:
+                    flags = event.modifierFlags()
+                    is_target_combo = check_flags(flags)
+                    
+                    if is_target_combo:
+                        hotkey_state['armed'] = True
+                    else:
+                        # If we were armed, and now we are NOT...
+                        if hotkey_state['armed']:
+                             # Check if we released a key (valid trigger) or pressed an extra one (invalid)
+                             # If we lost Command OR Option, it's a valid release.
+                             
+                             now_cmd = (flags & AppKit.NSEventModifierFlagCommand)
+                             now_opt = (flags & AppKit.NSEventModifierFlagOption)
+                             
+                             if (not now_cmd) or (not now_opt):
+                                 logging.info("Global Hotkey Option+Command Triggered (Native)")
+                                 toggle_omni()
+                        
+                        hotkey_state['armed'] = False
+                except Exception as e:
+                    logging.error(f"Error in on_flags_changed: {e}")
+
+            def on_keydown(event):
+                try:
+                    # If any key is pressed, disarm the modifier-only trigger
+                    hotkey_state['armed'] = False
+                    
+                    # Optional: Handle Option+Space
+                    if event.keyCode() == 49: # Space
+                        flags = event.modifierFlags()
+                        if (flags & AppKit.NSEventModifierFlagOption) and not (flags & AppKit.NSEventModifierFlagCommand):
+                             # Pure Option+Space (to avoid conflict with Cmd+Opt+Space if that's a thing)
+                             logging.info("Global Hotkey Option+Space Triggered (Native)")
+                             toggle_omni()
+                             return None # Attempt to swallow (only works for Local)
+                             
+                except Exception as e:
+                    logging.error(f"Error in on_keydown: {e}")
+                return event
+
+            # 3. Register Monitors
+            # Global Monitor (Background - requires Accessibility)
+            # Handlers must not return anything
+            def global_flags_handler(event):
+                on_flags_changed(event)
+            
+            def global_keydown_handler(event):
+                on_keydown(event)
+
+            NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(NSFlagsChangedMask, global_flags_handler)
+            NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(NSKeyDownMask, global_keydown_handler)
+
+            # Local Monitor (Foreground)
+            # Handlers must return the event (or None)
+            NSEvent.addLocalMonitorForEventsMatchingMask_handler_(NSFlagsChangedMask, lambda e: (on_flags_changed(e), e)[1])
+            NSEvent.addLocalMonitorForEventsMatchingMask_handler_(NSKeyDownMask, on_keydown)
+            
+            logging.info("Native macOS hotkey listeners registered (Option+Cmd, Option+Space).")
+            
+        except ImportError:
+            logging.error("PyObjC not found. Global hotkeys disabled on macOS.")
         except Exception as e:
-            logging.error(f"Failed to register pynput hotkey on macOS: {e}")
+            logging.error(f"Failed to setup native macOS hotkeys: {e}")
             # Fallback to keyboard module if pynput fails
             try:
                 keyboard.add_hotkey('alt+space', toggle_omni, suppress=True)
