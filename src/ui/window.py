@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QP
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap
 
 from src.core.config import LOGO_PATH
-from src.ui.styles import STYLE_SHEET
+from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
@@ -45,9 +45,18 @@ if sys.platform == "darwin":
         import objc
         from AppKit import NSVisualEffectView, NSVisualEffectBlendingModeBehindWindow, \
                            NSVisualEffectMaterialHUDWindow, NSViewWidthSizable, NSViewHeightSizable, \
-                           NSColor, NSApplication
+                           NSColor, NSApplication, NSAppearance, NSAppearanceNameVibrantLight, NSAppearanceNameVibrantDark
     except ImportError:
         logging.warning("PyObjC not found. MacOS blur disabled.")
+
+    # Import Foundation separately to ensure it's available for theme detection
+    # even if AppKit import had issues (though unlikely if blur works)
+    try:
+        from Foundation import NSUserDefaults
+    except ImportError:
+        logging.warning("PyObjC Foundation not found. Theme detection disabled.")
+
+DEFAULT_WIDTH = 720
 
 class OmniWindow(QWidget):
     # Signal for external triggers (e.g. global hotkey)
@@ -91,7 +100,7 @@ class OmniWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("omni-search")
         self.setWindowIcon(QIcon(LOGO_PATH))
-        self.resize(720, 160) # Slightly larger initial size
+        self.resize(DEFAULT_WIDTH, 160) # Slightly larger initial size
         
         self.anim = QPropertyAnimation(self, b"geometry")
         self.anim.setDuration(450)
@@ -218,9 +227,9 @@ class OmniWindow(QWidget):
         # content_layout.addStretch() # Removed to prevent squashing list
         main_layout.addWidget(self.frame)
 
-        self.setStyleSheet(STYLE_SHEET)
+        # self.setStyleSheet(STYLE_SHEET) # Moved to set_theme
 
-        self.chat_history = [] 
+        self.chat_history = []  
         self.is_history_mode = False
         self.is_settings_mode = False
 
@@ -238,8 +247,15 @@ class OmniWindow(QWidget):
         self.ai_worker = None
         self.file_search_worker = None
 
+        self.current_theme = "dark" # Default
+        
+        # Detect and set initial theme
+        initial_theme = self.detect_system_theme()
+        self.set_theme(initial_theme)
+
         self.external_actions = []
         self.external_search_results = []
+        self.local_file_results = []
 
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
@@ -256,6 +272,126 @@ class OmniWindow(QWidget):
 
         # Apply initial blur
         self.apply_blur()
+
+    def detect_system_theme(self):
+        """Detect MacOS system theme."""
+        if sys.platform == "darwin":
+            # Method 1: NSUserDefaults (Standard)
+            try:
+                # Ensure we have the class imported
+                from Foundation import NSUserDefaults
+                defaults = NSUserDefaults.standardUserDefaults()
+                defaults.synchronize() # Force update
+                style = defaults.stringForKey_("AppleInterfaceStyle")
+                
+                # "Dark" returns "Dark", Light returns None (nil)
+                if style == "Dark":
+                    theme = "dark"
+                else:
+                    theme = "light"
+                
+                logging.info(f"System theme detected (NSUserDefaults): {theme}")
+                return theme
+            except Exception as e:
+                logging.warning(f"NSUserDefaults theme detection failed: {e}")
+            
+            # Method 2: Fallback to subprocess (Slow but reliable)
+            try:
+                import subprocess
+                # Read global domain for AppleInterfaceStyle
+                # Use full path to defaults to avoid PATH issues
+                result = subprocess.run(
+                    ["/usr/bin/defaults", "read", "-g", "AppleInterfaceStyle"], 
+                    capture_output=True, 
+                    text=True
+                )
+                
+                # If command succeeds and prints "Dark", it's dark.
+                # If command fails (exit code 1) it usually means key doesn't exist -> Light
+                if result.returncode == 0 and "Dark" in result.stdout:
+                    theme = "dark"
+                else:
+                    theme = "light"
+                
+                logging.info(f"System theme detected (subprocess): {theme}")
+                return theme
+            except Exception as e:
+                logging.error(f"Subprocess theme detection failed: {e}")
+                # If both methods fail, we can't be sure.
+                # But if we are here, it means even 'defaults' command failed to run.
+                
+        theme = "dark"
+        logging.info(f"System theme detected (default): {theme}")
+        return theme # Default for other platforms/failure
+
+    def set_theme(self, theme_name):
+        """Apply theme to window and all children."""
+        if theme_name not in THEMES:
+            theme_name = "dark"
+            
+        self.current_theme = theme_name
+        theme_data = THEMES[theme_name]
+        
+        # 1. Update Window Stylesheet
+        self.setStyleSheet(get_style_sheet(theme_name))
+        
+        # 2. Update Frame (GradientBorderFrame)
+        if hasattr(self, 'frame'):
+            self.frame.set_theme(theme_name)
+            
+        # 3. Update specific widgets that need manual update
+        if hasattr(self, 'follow_up_widget'):
+            self.follow_up_widget.set_theme(theme_name)
+            
+        if hasattr(self, 'mic_widget'):
+            self.mic_widget.set_theme(theme_name)
+            
+        # 4. Update List Items (Iterate and update)
+        if hasattr(self, 'list_widget'):
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                widget_container = self.list_widget.itemWidget(item)
+                if isinstance(widget_container, SmoothEntryWidget):
+                    real_widget = widget_container.content_widget
+                    if hasattr(real_widget, 'set_theme'):
+                        real_widget.set_theme(theme_name)
+                elif hasattr(widget_container, 'set_theme'):
+                    widget_container.set_theme(theme_name)
+                    
+        # 5. Update Glass Effect
+        self.update_glass_color()
+        
+    def update_glass_color(self):
+        """Update the tint color of the glass effect view."""
+        if sys.platform == "darwin" and hasattr(self, 'mac_blur_view'):
+            try:
+                # Check if it's the liquid glass view (NSGlassEffectView)
+                # We can check by class name or if it has setTintColor_
+                if hasattr(self.mac_blur_view, 'setTintColor_'):
+                    t = THEMES[self.current_theme]
+                    color = NSColor.colorWithCalibratedWhite_alpha_(t['glass_tint_white'], t['glass_tint_alpha'])
+                    self.mac_blur_view.setTintColor_(color)
+                elif hasattr(self.mac_blur_view, 'setMaterial_'):
+                    # Standard NSVisualEffectView fallback
+                    # 13 = HUDWindow (Dark), 9 = Popover (Adaptive/Light), 2 = UnderWindowBackground
+                    if self.current_theme == "light":
+                        # Use UnderWindowBackground (2) for standard light window look
+                        self.mac_blur_view.setMaterial_(2) # NSVisualEffectMaterialUnderWindowBackground
+                        
+                        try:
+                            appearance = NSAppearance.appearanceNamed_(NSAppearanceNameVibrantLight)
+                            self.mac_blur_view.setAppearance_(appearance)
+                        except: pass
+                    else:
+                        # Use HUDWindow for dark vibrant look
+                        self.mac_blur_view.setMaterial_(13) # NSVisualEffectMaterialHUDWindow
+                        
+                        try:
+                            appearance = NSAppearance.appearanceNamed_(NSAppearanceNameVibrantDark)
+                            self.mac_blur_view.setAppearance_(appearance)
+                        except: pass
+            except Exception as e:
+                logging.error(f"Error updating glass color: {e}")
 
     def load_apps(self):
         return get_app_cache()
@@ -297,7 +433,10 @@ class OmniWindow(QWidget):
                 ns_view = objc.objc_object(c_void_p=ctypes.c_void_p(view_ptr))
                 
                 # Check if we already have a blur view attached
-                if not hasattr(self, 'mac_blur_view'):
+                if hasattr(self, 'mac_blur_view'):
+                    # Update frame to match Qt view (handles resize/move animations)
+                    self.mac_blur_view.setFrame_(ns_view.frame())
+                else:
                     # Strategy: Add blur view as a SIBLING behind the Qt view.
                     # This ensures it doesn't cover the Qt content (child covers parent)
                     # and allows Qt to draw on top of it.
@@ -305,24 +444,72 @@ class OmniWindow(QWidget):
                     superview = ns_view.superview()
                     if superview:
                         # Create Visual Effect View with same frame as Qt view
-                        self.mac_blur_view = NSVisualEffectView.alloc().initWithFrame_(ns_view.frame())
                         
-                        # Configure
-                        # NSVisualEffectMaterialHUDWindow = 13 (Dark/Vibrant)
-                        self.mac_blur_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
-                        self.mac_blur_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-                        self.mac_blur_view.setState_(1) # Active
-                        self.mac_blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
-                        
-                        # Apply rounded corners to the blur view's layer
-                        self.mac_blur_view.setWantsLayer_(True)
-                        self.mac_blur_view.layer().setCornerRadius_(24.0)
+                        # Try NSGlassEffectView (Liquid Glass) first
+                        GlassEffectView = None
+                        try:
+                            GlassEffectView = objc.lookUpClass("NSGlassEffectView")
+                        except: pass
+
+                        if GlassEffectView:
+                            self.mac_blur_view = GlassEffectView.alloc().initWithFrame_(ns_view.frame())
+                            # Configure Liquid Glass
+                            # Use theme colors
+                            t = THEMES[self.current_theme]
+                            color = NSColor.colorWithCalibratedWhite_alpha_(t['glass_tint_white'], t['glass_tint_alpha']) 
+                            self.mac_blur_view.setTintColor_(color)
+                            self.mac_blur_view.setCornerRadius_(24.0)
+                            self.mac_blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+                            
+                            # Ensure layer clipping is enabled to prevent artifacts
+                            self.mac_blur_view.setWantsLayer_(True)
+                            self.mac_blur_view.layer().setCornerRadius_(24.0)
+                            self.mac_blur_view.layer().setMasksToBounds_(True)
+                            
+                            logging.info("MacOS Liquid Glass applied via NSGlassEffectView")
+                        else:
+                            # Fallback to NSVisualEffectView
+                            self.mac_blur_view = NSVisualEffectView.alloc().initWithFrame_(ns_view.frame())
+                            
+                            # Configure based on theme
+                            if self.current_theme == "light":
+                                # Use UnderWindowBackground (2) for standard light window look
+                                # Popover (9) is also good but UnderWindowBackground is safer
+                                self.mac_blur_view.setMaterial_(2) # NSVisualEffectMaterialUnderWindowBackground
+                                
+                                # Force light appearance for consistent "liquid glass" look
+                                try:
+                                    appearance = NSAppearance.appearanceNamed_(NSAppearanceNameVibrantLight)
+                                    self.mac_blur_view.setAppearance_(appearance)
+                                except Exception as e:
+                                    logging.warning(f"Failed to set light appearance: {e}")
+                                    
+                                logging.info("Using NSVisualEffectMaterialUnderWindowBackground (Light)")
+                            else:
+                                # Use HUDWindow (13) for dark vibrant look
+                                self.mac_blur_view.setMaterial_(13) # NSVisualEffectMaterialHUDWindow
+                                
+                                # Force dark appearance
+                                try:
+                                    appearance = NSAppearance.appearanceNamed_(NSAppearanceNameVibrantDark)
+                                    self.mac_blur_view.setAppearance_(appearance)
+                                except: pass
+                                
+                                logging.info("Using NSVisualEffectMaterialHUDWindow (Dark)")
+                                
+                            self.mac_blur_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+                            self.mac_blur_view.setState_(1) # Active
+                            self.mac_blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+                            
+                            # Apply rounded corners to the blur view's layer
+                            self.mac_blur_view.setWantsLayer_(True)
+                            self.mac_blur_view.layer().setCornerRadius_(24.0)
                         self.mac_blur_view.layer().setMasksToBounds_(True)
 
                         # Insert BEHIND the Qt view (-1 = NSWindowBelow)
                         superview.addSubview_positioned_relativeTo_(self.mac_blur_view, -1, ns_view)
                         
-                        logging.info("MacOS Blur applied via Sibling Strategy")
+                        # logging.info("MacOS Blur applied via Sibling Strategy")
                     else:
                         # Fallback: If no superview (rare), try adding as subview but at bottom
                         # Note: This might obscure content if Qt draws in drawRect
@@ -336,12 +523,16 @@ class OmniWindow(QWidget):
                         
                         ns_view.addSubview_positioned_relativeTo_(self.mac_blur_view, -1, None)
                         
+                # Ensure color/material matches current theme
+                self.update_glass_color()
+                        
             except Exception as e:
                 logging.error(f"MacOS Blur Error: {e}")
         
-        self.update_mask()
+        # self.update_mask() # Disabled to fix corner artifacts (black corners)
 
     def update_mask(self):
+        return # Disabled
         # Clip window to rounded corners to fix corner artifacts using QBitmap
         # This provides a 1-bit mask that clips the entire window surface, including blur
         mask = QBitmap(self.size())
@@ -361,6 +552,12 @@ class OmniWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        
+        # Check for theme change on show
+        current_os_theme = self.detect_system_theme()
+        if current_os_theme != self.current_theme:
+            self.set_theme(current_os_theme)
+            
         # Ensure minimal size on show if in search mode
         if not self.is_history_mode and not self.input_field.text():
              self.resize(self.width(), 84)
@@ -392,6 +589,10 @@ class OmniWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.apply_blur()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.apply_blur()
                 
     def center(self):
         cursor_pos = QCursor.pos()
@@ -422,7 +623,8 @@ class OmniWindow(QWidget):
         # Force resize to minimal
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
-        self.resize(self.width(), 84)
+        # Always reset to DEFAULT_WIDTH to prevent shrinking over time
+        self.resize(DEFAULT_WIDTH, 84)
         
         text = self.input_field.text() if not clear else ""
         self.refresh_list(text, animate=animate)
@@ -511,38 +713,46 @@ class OmniWindow(QWidget):
         self.is_entry_animating = True
         self.frame.boost_speed()
         
-        self.opacity_effect = QGraphicsOpacityEffect(self)
-        self.opacity_effect.setOpacity(0)
-        self.setGraphicsEffect(self.opacity_effect)
+        # Use windowOpacity for smoother whole-window fade (including blur)
+        self.setWindowOpacity(0.0)
+        self.setGraphicsEffect(None)
         
         self.anim_group = QParallelAnimationGroup()
         
         def on_finished():
             self.is_entry_animating = False
-            self.setGraphicsEffect(None) 
         
         self.anim_group.finished.connect(on_finished)
         
-        # Slide Down from slightly above
-        current_y = self.y()
-        target_y = current_y
-        start_y = target_y - 30 # Start higher
+        # Zoom In Animation
+        target_geo = self.geometry()
+        center = target_geo.center()
         
-        self.move(self.x(), start_y)
+        # Start size: 92% (Subtle zoom)
+        start_w = int(target_geo.width() * 0.92)
+        start_h = int(target_geo.height() * 0.92)
+        start_x = center.x() - start_w // 2
+        start_y = center.y() - start_h // 2
         
-        anim_pos = QPropertyAnimation(self, b"pos")
-        anim_pos.setDuration(350)
-        anim_pos.setStartValue(QPoint(self.x(), start_y))
-        anim_pos.setEndValue(QPoint(self.x(), target_y))
-        anim_pos.setEasingCurve(QEasingCurve.Type.OutCubic)
+        start_geo = QRect(start_x, start_y, start_w, start_h)
         
-        anim_opa = QPropertyAnimation(self.opacity_effect, b"opacity")
-        anim_opa.setDuration(350)
+        self.setGeometry(start_geo)
+        
+        # Geometry Animation
+        anim_geo = QPropertyAnimation(self, b"geometry")
+        anim_geo.setDuration(350) # Slightly slower for elegance
+        anim_geo.setStartValue(start_geo)
+        anim_geo.setEndValue(target_geo)
+        anim_geo.setEasingCurve(QEasingCurve.Type.OutBack) # The "Soul" - subtle pop
+        
+        # Opacity Animation
+        anim_opa = QPropertyAnimation(self, b"windowOpacity")
+        anim_opa.setDuration(250) # Fade in faster than zoom
         anim_opa.setStartValue(0.0)
         anim_opa.setEndValue(1.0)
         anim_opa.setEasingCurve(QEasingCurve.Type.OutCubic)
         
-        self.anim_group.addAnimation(anim_pos)
+        self.anim_group.addAnimation(anim_geo)
         self.anim_group.addAnimation(anim_opa)
         self.anim_group.start()
         
@@ -554,11 +764,8 @@ class OmniWindow(QWidget):
         if self.is_settings_mode: return
 
         if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
-            if hasattr(self, 'anim_group') and self.anim_group:
-                self.anim_group.stop()
-            self.is_entry_animating = False
-            if hasattr(self, 'opacity_effect'):
-                self.setGraphicsEffect(None)
+            # Don't interrupt entry animation
+            return
         
         list_h = 0
         count = self.list_widget.count()
@@ -820,34 +1027,38 @@ class OmniWindow(QWidget):
             
         self._is_closing = True
         
-        # Re-apply opacity effect for exit
-        self.opacity_effect = QGraphicsOpacityEffect(self)
-        self.opacity_effect.setOpacity(1.0)
-        self.setGraphicsEffect(self.opacity_effect)
-        
         self.anim_close_group = QParallelAnimationGroup()
         
-        # Slide UP (Exit)
-        current_y = self.y()
-        target_y = current_y - 30 # Move up
+        # Zoom Out
+        current_geo = self.geometry()
+        center = current_geo.center()
         
-        anim_pos = QPropertyAnimation(self, b"pos")
-        anim_pos.setDuration(250)
-        anim_pos.setStartValue(QPoint(self.x(), current_y))
-        anim_pos.setEndValue(QPoint(self.x(), target_y))
-        anim_pos.setEasingCurve(QEasingCurve.Type.InCubic)
+        target_w = int(current_geo.width() * 0.95)
+        target_h = int(current_geo.height() * 0.95)
+        target_x = center.x() - target_w // 2
+        target_y = center.y() - target_h // 2
         
-        anim_opa = QPropertyAnimation(self.opacity_effect, b"opacity")
-        anim_opa.setDuration(250)
+        target_geo = QRect(target_x, target_y, target_w, target_h)
+        
+        anim_geo = QPropertyAnimation(self, b"geometry")
+        anim_geo.setDuration(200) # Fast exit
+        anim_geo.setStartValue(current_geo)
+        anim_geo.setEndValue(target_geo)
+        anim_geo.setEasingCurve(QEasingCurve.Type.InCubic)
+        
+        # Opacity
+        anim_opa = QPropertyAnimation(self, b"windowOpacity")
+        anim_opa.setDuration(150) # Fade out very fast
         anim_opa.setStartValue(1.0)
         anim_opa.setEndValue(0.0)
-        anim_opa.setEasingCurve(QEasingCurve.Type.InCubic)
+        anim_opa.setEasingCurve(QEasingCurve.Type.OutQuad)
         
         def on_close_finished():
              self.hide()
              self._is_closing = False
              self.setWindowOpacity(1.0)
-             self.setGraphicsEffect(None) # Cleanup
+             # Reset geometry for next show so we don't shrink every time
+             self.setGeometry(current_geo) 
              
              # Reset MacOS blur view reference so it gets recreated on next show
              if sys.platform == 'darwin' and hasattr(self, 'mac_blur_view'):
@@ -858,7 +1069,7 @@ class OmniWindow(QWidget):
                  del self.mac_blur_view
         
         self.anim_close_group.finished.connect(on_close_finished)
-        self.anim_close_group.addAnimation(anim_pos)
+        self.anim_close_group.addAnimation(anim_geo)
         self.anim_close_group.addAnimation(anim_opa)
         self.anim_close_group.start()
 
@@ -919,6 +1130,7 @@ class OmniWindow(QWidget):
         if not text.strip():
             self.external_actions = []
             self.external_search_results = []
+            self.local_file_results = []
             self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             return
@@ -926,6 +1138,7 @@ class OmniWindow(QWidget):
         # Query changed, clear external results until new ones arrive
         self.external_actions = []
         self.external_search_results = []
+        self.local_file_results = []
         
         self.frame.set_minimal_mode(True)
         self.refresh_list(text)
@@ -936,6 +1149,7 @@ class OmniWindow(QWidget):
             self.list_widget.clear()
             self.external_actions = []
             self.external_search_results = []
+            self.local_file_results = []
             self.adjust_window_height(animate)
             return
 
@@ -984,9 +1198,16 @@ class OmniWindow(QWidget):
             
             new_items_data.append((key, data, create_app_widget))
 
-        # 3. External Search Results (Files)
-        for res in self.external_search_results:
+        # 3. File Results (Local + External)
+        # Combine lists, prioritizing local results. Deduplicate by path.
+        seen_paths = set()
+        all_file_results = self.local_file_results + self.external_search_results
+        
+        for res in all_file_results:
             if res.get('type') in ('file', 'folder'):
+                if res['path'] in seen_paths: continue
+                seen_paths.add(res['path'])
+
                 # Handle both files and folders from file search worker
                 data = {"type": "open_file", "path": res['path'], "name": res['name'], "is_dir": res.get('is_dir', False)}
                 key = self.get_item_key(data)
@@ -1172,8 +1393,8 @@ class OmniWindow(QWidget):
         """Handle file search results from the file search worker."""
         if self.input_field.text().strip() != query: return
         
-        # Convert file search results to the format used by external_search_results
-        self.external_search_results = results
+        # Store in separate list to avoid overwrite by slow search_worker
+        self.local_file_results = results
         self.refresh_list(query, animate=False)
 
     def on_entered(self, item=None):

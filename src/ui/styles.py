@@ -1,104 +1,142 @@
-STYLE_SHEET = """
-/* Global Reset */
-* {
-    outline: none;
+
+THEMES = {
+    "dark": {
+        "text_primary": "#FFFFFF",
+        "text_secondary": "#AAAAAA",
+        "text_input": "#FFFFFF",
+        "placeholder": "rgba(255, 255, 255, 0.3)",
+        "selection_bg": "#444444",
+        "selection_text": "#FFFFFF",
+        "divider": "#1AFFFFFF", # rgba(255, 255, 255, 0.1)
+        "list_item_hover": "rgba(255, 255, 255, 0.08)",
+        "list_item_selected": "rgba(255, 255, 255, 0.12)",
+        "scrollbar_handle": "#40FFFFFF", # rgba(255, 255, 255, 0.25)
+        "border_color": "#28FFFFFF", # rgba(255, 255, 255, 40/255=0.15) -> 0x28=40
+        "base_fill_color": "#0A000000", # rgba(0, 0, 0, 10/255=0.04) -> 0x0A=10. Pure black fill with low alpha.
+        "glass_tint_white": 0.08, # Restored to original value
+        "glass_tint_alpha": 0.40,  # Restored to original value
+        "selection_border": "rgba(255, 255, 255, 0.2)"
+    },
+    "light": {
+        "text_primary": "#111111",
+        "text_secondary": "#666666",
+        "text_input": "#111111",
+        "placeholder": "rgba(0, 0, 0, 0.3)",
+        "selection_bg": "#E0E0E0",
+        "selection_text": "#000000",
+        "divider": "#0D000000", # rgba(0, 0, 0, 0.05)
+        "list_item_hover": "rgba(0, 0, 0, 0.06)",
+        "list_item_selected": "rgba(0, 0, 0, 0.10)",
+        "scrollbar_handle": "#26000000", # rgba(0, 0, 0, 0.15)
+        "border_color": "#1E000000", # rgba(0, 0, 0, 30/255=0.11) -> 0x1E=30
+        "base_fill_color": "#80FFFFFF", # Semi-transparent white overlay (50%)
+        "glass_tint_white": 0.95,
+        "glass_tint_alpha": 0.35,
+        "selection_border": "rgba(0, 0, 0, 0.15)"
+    }
 }
+
+def get_style_sheet(theme="light"):
+    t = THEMES.get(theme, THEMES["light"])
+    return f"""
+/* Global Reset */
+* {{
+    outline: none;
+}}
 
 /* Main Window Container */
-QWidget {
+QWidget {{
     background-color: transparent;
-    color: #0F0F0F;
-}
+    color: {t['text_primary']};
+}}
 
-QFrame#MainFrame {
+QFrame#MainFrame {{
     /* Background handled by custom paintEvent for flowing gradient */
     border-radius: 24px;
     padding: 2px; /* The width of the border */
-}
+}}
 
-QWidget#ContentFrame {
+QWidget#ContentFrame {{
     background-color: transparent; /* Handled by GradientBorderFrame for glass effect */
     border-radius: 22px; /* 24px - 2px padding */
-}
+}}
 
 /* Input Field - Editorial Style */
-QLineEdit {
+QLineEdit {{
     background-color: transparent;
     border: none;
     padding: 12px 16px;
     font-family: "Instrument Serif";
     font-style: italic;
     font-size: 34px;
-    color: #111111;
-    selection-background-color: #E0E0E0;
-    selection-color: #000000;
-}
+    color: {t['text_input']};
+    selection-background-color: {t['selection_bg']};
+    selection-color: {t['selection_text']};
+}}
 
-QLineEdit::placeholder {
-    color: rgba(0, 0, 0, 0.25);
+QLineEdit::placeholder {{
+    color: {t['placeholder']};
     font-family: "Instrument Serif";
     font-style: italic;
-}
+}}
 
 /* Divider Line - Barely There */
-QFrame#Divider {
-    background-color: rgba(0, 0, 0, 0.03);
+QFrame#Divider {{
+    background-color: {t['divider']};
     min-height: 1px;
     max-height: 1px;
     margin: 0px 32px;
-}
+}}
 
 /* Result List */
-QListWidget {
+QListWidget {{
     background-color: transparent;
     border: none;
     padding: 12px 16px;
-}
+}}
 
-QListWidget::item {
+QListWidget::item {{
     padding: 0px;
     margin-bottom: 6px;
     border-radius: 16px;
-    color: #333333;
+    color: {t['text_primary']};
     font-family: "Manrope";
     font-size: 15px;
-}
+}}
 
-QListWidget::item:selected {
+QListWidget::item:selected {{
     background-color: transparent;
-}
+}}
 
-QListWidget::item:selected:hover {
+QListWidget::item:selected:hover {{
     background-color: transparent;
-}
+}}
 
-QListWidget::item:hover {
-    background-color: transparent;
-    font-weight: 500;
-    border: 1px solid transparent;
-    background-color: rgba(255, 255, 255, 0.0); /* Transparent by default */
-    transition: background-color 0.2s ease;
-}
+QListWidget::item:hover {{
+    background-color: {t['list_item_selected']};
+    color: {t['text_primary']};
+    border: 1px solid {t['selection_border']};
+}}
 
 /* Selected Item - Active State */
-QListWidget::item:selected {
-    background-color: rgba(0, 0, 0, 0.04); /* Very subtle selection */
-    color: #000000;
-    border: none;
-}
+QListWidget::item:selected {{
+    background-color: {t['list_item_selected']};
+    color: {t['text_primary']};
+    border: 1px solid {t['selection_border']};
+}}
 
 /* Custom Scrollbar - Invisible but functional */
-QScrollBar:vertical {
+QScrollBar:vertical {{
     border: none;
     background: transparent;
     width: 6px;
     margin: 0px;
-}
-QScrollBar::handle:vertical {
-    background: rgba(0, 0, 0, 0.15);
+}}
+QScrollBar::handle:vertical {{
+    background: {t['scrollbar_handle']};
     min-height: 40px;
     border-radius: 3px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 """

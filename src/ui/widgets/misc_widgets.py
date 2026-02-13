@@ -1,9 +1,12 @@
+
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider, QPushButton)
 from PyQt6.QtCore import (Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, 
                           QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo,
-                          QThreadPool, QRunnable, QObject, pyqtSignal)
+                          QThreadPool, QRunnable, QObject, pyqtSignal, QPoint)
 from PyQt6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap, QPainterPath
+
+from src.ui.styles import THEMES
 
 ICON_CACHE = {}
 
@@ -106,6 +109,7 @@ class ThinkingWidget(QWidget):
     def __init__(self, text, parent=None):
         super().__init__(parent)
         self.is_expanded = bool(text)
+        self.current_theme = "light"
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(24, 12, 24, 12)
         self.main_layout.setSpacing(8)
@@ -114,24 +118,37 @@ class ThinkingWidget(QWidget):
         self.header.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal))
         f = self.header.font(); f.setItalic(True); self.header.setFont(f)
 
-        self.header.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                color: #666666;
-                padding-left: 0px;
-            }
-        """)
-        self.header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Entire widget ignores mouse
+        # self.header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        # self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Entire widget ignores mouse
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.content_label = QLabel(text if text else "")
         self.content_label.setWordWrap(True)
         self.content_label.setFont(QFont("Manrope", 12))
-        self.content_label.setStyleSheet("color: #333333; padding: 4px 0px 4px 0px;")
         self.content_label.setVisible(self.is_expanded)
 
         self.main_layout.addWidget(self.header)
         self.main_layout.addWidget(self.content_label)
+        self.update_style()
+
+    def mousePressEvent(self, event):
+        self.toggle_expand(event)
+        super().mousePressEvent(event)
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        self.header.setStyleSheet(f"""
+            QLabel {{
+                background-color: transparent;
+                color: {t['text_secondary']};
+                padding-left: 0px;
+            }}
+        """)
+        self.content_label.setStyleSheet(f"color: {t['text_primary']}; padding: 4px 0px 4px 0px;")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
 
     def sizeHint(self):
         w = 616
@@ -142,7 +159,6 @@ class ThinkingWidget(QWidget):
 
     def toggle_expand(self, event):
         self.is_expanded = not self.is_expanded
-        self.content_label.setHidden(not self.is_expanded)
         self.content_label.setHidden(not self.is_expanded)
         self.update_item_size()
 
@@ -161,14 +177,22 @@ class SeparatorWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(24) 
+        self.current_theme = "light"
         
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        divider_color = QColor(t['divider'])
+
         grad = QLinearGradient(40, 0, self.width() - 40, 0)
-        c = QColor(0, 0, 0, 20)
-        transparent = QColor(0, 0, 0, 0)
+        c = divider_color
+        transparent = QColor(c.red(), c.green(), c.blue(), 0)
         grad.setColorAt(0, transparent)
         grad.setColorAt(0.2, c)
         grad.setColorAt(0.8, c)
@@ -205,6 +229,26 @@ class SmoothEntryWidget(QWidget):
             QTimer.singleShot(10, self.anim_group.start)
         else:
             self.opacity_eff.setOpacity(1)
+            
+    def set_theme(self, theme):
+        if hasattr(self.content_widget, 'set_theme'):
+            self.content_widget.set_theme(theme)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        parent = self.parent()
+        while parent and not isinstance(parent, QListWidget):
+            parent = parent.parent()
+            
+        if isinstance(parent, QListWidget):
+            if hasattr(parent, '_keyboard_locked'):
+                parent._keyboard_locked = False
+                
+            pos_in_viewport = self.mapTo(parent.viewport(), QPoint(0, 0))
+            item = parent.itemAt(pos_in_viewport + QPoint(5, 5))
+            
+            if item:
+                parent.setCurrentItem(item)
 
 class FollowUpWidget(QWidget):
     def __init__(self, parent=None):
@@ -222,7 +266,13 @@ class FollowUpWidget(QWidget):
         layout.addWidget(self.hint)
 
         self.hide() 
+        self.current_theme = "light"
     
+    def set_theme(self, theme):
+        self.current_theme = theme
+        t = THEMES.get(theme, THEMES["light"])
+        self.hint.setStyleSheet(f"color: {t['text_secondary']}; opacity: 0.5;")
+
     def sizeHint(self):
         return QSize(150, 32)
     
@@ -246,30 +296,13 @@ class CollapsibleThinkingWidget(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(4)
+        self.current_theme = "light"
         
         # Track if this is the first time we're setting thinking (for auto-expand on first update)
         self._first_thinking_set = True
 
         # Header button - minimal, text-only design
         self.header_button = QPushButton("Reasoning process")
-        self.header_button.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                padding: 2px 0px;
-                text-align: left;
-                font-family: Manrope;
-                font-size: 12px;
-                font-weight: 500;
-                color: #999999;
-            }
-            QPushButton:hover {
-                color: #666666;
-            }
-            QPushButton:checked {
-                color: #666666;
-            }
-        """)
         self.header_button.setCheckable(True)
         self.header_button.setChecked(False)
         self.header_button.clicked.connect(self.toggle_content)
@@ -287,8 +320,6 @@ class CollapsibleThinkingWidget(QWidget):
         self.thinking_text.setFrameStyle(QFrame.Shape.NoFrame)
         self.thinking_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.thinking_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Subtle styling: gray text, monospace font for technical feel
-        self.thinking_text.setStyleSheet("QTextEdit { background: transparent; color: #666666; padding: 0px; margin: 0px; line-height: 1.4; }")
         self.thinking_text.setPlainText(thinking_text)
 
         font = QFont("Manrope", 12, QFont.Weight.Normal)
@@ -302,6 +333,34 @@ class CollapsibleThinkingWidget(QWidget):
         # Initially hide content (collapsed)
         self.content_widget.setVisible(False)
         self.header_button.setText("▶ Reasoning process")
+        
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        self.header_button.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                padding: 2px 0px;
+                text-align: left;
+                font-family: Manrope;
+                font-size: 12px;
+                font-weight: 500;
+                color: {t['text_secondary']};
+            }}
+            QPushButton:hover {{
+                color: {t['text_primary']};
+            }}
+            QPushButton:checked {{
+                color: {t['text_primary']};
+            }}
+        """)
+        self.thinking_text.setStyleSheet(f"QTextEdit {{ background: transparent; color: {t['text_secondary']}; padding: 0px; margin: 0px; line-height: 1.4; }}")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
 
     def set_thinking_text(self, text):
         """Update the thinking text and ensure the widget is visible."""
@@ -379,6 +438,7 @@ class AnswerWidget(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(24, 4, 24, 4)
         self.layout.setSpacing(12)
+        self.current_theme = "light"
 
         # Add thinking section if provided (can be added later via ensure_thinking_widget)
         self.thinking_widget = None
@@ -392,7 +452,6 @@ class AnswerWidget(QWidget):
         self.text_edit.setFrameStyle(QFrame.Shape.NoFrame)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.text_edit.setStyleSheet("background: transparent; color: #222222;")
         self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
         self.text_edit.setMarkdown(text)
@@ -408,7 +467,6 @@ class AnswerWidget(QWidget):
         # Add small gray query label
         self.query_label = QLabel(query_text if query_text else "")
         self.query_label.setFont(QFont("Manrope", 12, QFont.Weight.Medium))
-        self.query_label.setStyleSheet("color: #666666; padding-top: 4px;")
         self.query_label.setWordWrap(True)
         self.query_label.setVisible(False) # Default hidden
         
@@ -416,6 +474,20 @@ class AnswerWidget(QWidget):
         
         if query_text:
             self.query_label.setText(query_text)
+
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        self.text_edit.setStyleSheet(f"background: transparent; color: {t['text_primary']};")
+        self.query_label.setStyleSheet(f"color: {t['text_secondary']}; padding-top: 4px;")
+        
+        if self.thinking_widget:
+            self.thinking_widget.set_theme(self.current_theme)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
 
     def set_query_visible(self, visible):
         self.query_label.setVisible(visible)
@@ -425,6 +497,7 @@ class AnswerWidget(QWidget):
         if self.thinking_widget is None:
             self.thinking_widget = CollapsibleThinkingWidget("")
             self.thinking_widget.size_changed.connect(self.update_item_size)
+            self.thinking_widget.set_theme(self.current_theme)
             self.layout.insertWidget(0, self.thinking_widget, 0, Qt.AlignmentFlag.AlignTop)
 
     def update_thinking(self, text):
@@ -488,15 +561,16 @@ class AnswerWidget(QWidget):
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(24, 0, 24, 0)
-        layout.setSpacing(4)
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(24, 0, 24, 0)
+        self.layout.setSpacing(4)
+        self.current_theme = "light"
         
         self.lbl_icon = QLabel()
         self.lbl_icon.setFixedSize(24, 24)
         
         if icon_name:
-            layout.addWidget(self.lbl_icon)
+            self.layout.addWidget(self.lbl_icon)
             
             if icon_name in ICON_CACHE:
                 self.lbl_icon.setPixmap(ICON_CACHE[icon_name].pixmap(24, 24))
@@ -510,14 +584,26 @@ class StandardItemWidget(QWidget):
         if font: self.lbl_text.setFont(font)
         else: self.lbl_text.setFont(QFont("Manrope", 15, QFont.Weight.Medium))
         
-        if color: self.lbl_text.setStyleSheet(f"color: {color};")
-        else: self.lbl_text.setStyleSheet("color: #333333;")
+        self.forced_color = color
         
-        layout.addWidget(self.lbl_text)
-        layout.addStretch()
+        self.layout.addWidget(self.lbl_text)
+        self.layout.addStretch()
         
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
         self.setStyleSheet("background: transparent;")
+        
+        if self.forced_color:
+            self.lbl_text.setStyleSheet(f"color: {self.forced_color};")
+        else:
+            self.lbl_text.setStyleSheet(f"color: {t['text_primary']};")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
 
     def on_icon_loaded(self, icon, name):
         if not icon.isNull():
@@ -606,6 +692,7 @@ class MicWidget(QLabel):
         self.setFixedSize(40, 40)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_theme = "light"
         
         # Load Mic Icon (ensure you have one or use text/unicode for now if needed, but we prefer icon)
         # Using a standard unicode mic for simplicity if icon fails, or better, draw it.
@@ -639,6 +726,26 @@ class MicWidget(QLabel):
         self.anim.setEndValue(1.0)
         self.anim.setEasingCurve(QEasingCurve.Type.InOutSine)
 
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+        
+    def update_style(self):
+        # Update hover color based on theme
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        hover_color = t['list_item_hover']
+        if not self.active:
+            self.setStyleSheet(f"""
+                QLabel {{
+                    background-color: transparent;
+                    border-radius: 20px;
+                    border: none;
+                }}
+                QLabel:hover {{
+                    background-color: {hover_color};
+                }}
+            """)
+
     def on_icon_loaded(self, icon, name):
         if not icon.isNull():
             self.setPixmap(icon.pixmap(24, 24))
@@ -666,16 +773,7 @@ class MicWidget(QLabel):
             """)
             self.anim.start()
         else:
-            self.setStyleSheet("""
-                QLabel {
-                    background-color: transparent;
-                    border-radius: 20px;
-                    border: none;
-                }
-                QLabel:hover {
-                    background-color: rgba(0, 0, 0, 0.05);
-                }
-            """)
+            self.update_style()
             self.anim.stop()
             self.opacity_effect.setOpacity(0.6)
 
@@ -688,6 +786,7 @@ class GradientBorderFrame(QFrame):
         self.current_speed = self.base_speed
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.animate)
+        self.current_theme = "light"
         
         self.minimal_mode = True 
         self._mode_progress = 0.0
@@ -704,6 +803,10 @@ class GradientBorderFrame(QFrame):
             QColor("#FF8533"), # Warm Orange
             QColor("#66B2FF")  # Light Blue/Cyan
         ]
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update()
 
     @pyqtProperty(float)
     def mode_progress(self):
@@ -766,11 +869,14 @@ class GradientBorderFrame(QFrame):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 24, 24)
 
-        base_alpha = 125
-        painter.fillPath(path, QColor(255, 255, 255, base_alpha)) 
+        t = THEMES.get(self.current_theme, THEMES["light"])
+
+        # Use theme base fill color (which includes opacity)
+        base_fill = QColor(t['base_fill_color'])
+        painter.fillPath(path, base_fill) 
         
         pen = painter.pen()
-        pen.setColor(QColor(255, 255, 255, 30))
+        pen.setColor(QColor(t['border_color']))
         pen.setWidth(1)
         painter.strokePath(path, pen)
 
