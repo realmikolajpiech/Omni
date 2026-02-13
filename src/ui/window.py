@@ -935,6 +935,25 @@ class OmniWindow(QWidget):
                         return True
             elif event.key() == Qt.Key.Key_Escape:
                 logging.info("Escape key pressed (Input Field)")
+                
+                # Check if we are streaming response
+                if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
+                    logging.info("Stopping AI stream...")
+                    # Abort the worker
+                    import src.services.llm.model_manager as mm
+                    mm.abort_fast_event.set()
+                    
+                    # Force stop worker thread safely
+                    try:
+                        self.ai_worker.finished.disconnect()
+                        self.ai_worker.partial_response.disconnect()
+                    except: pass
+                    self.ai_worker.terminate()
+                    self.ai_worker.wait()
+                    self.ai_worker = None
+                    self.logo_label.stop_spinning()
+                    return True
+
                 if self.is_history_mode:
                     self.reset_to_search_mode()
                 else:
@@ -1115,6 +1134,14 @@ class OmniWindow(QWidget):
                 self.animate_close()
         super().keyPressEvent(event)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            if not self.isActiveWindow():
+                # Window lost focus - close it to maintain state sync
+                if self.isVisible() and not self._is_closing:
+                    self.animate_close()
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         self._is_closing = False
         self.setWindowOpacity(1.0) # Reset for next show
@@ -1293,6 +1320,8 @@ class OmniWindow(QWidget):
                     # Re-insert at i
                     new_item = QListWidgetItem()
                     widget = factory() # Recreate widget
+                    if hasattr(widget, 'set_theme'):
+                        widget.set_theme(self.current_theme)
                     new_item.setSizeHint(widget.sizeHint())
                     new_item.setData(Qt.ItemDataRole.UserRole, data)
                     
@@ -1309,6 +1338,8 @@ class OmniWindow(QWidget):
                     # New Item: Insert with Animation
                     new_item = QListWidgetItem()
                     widget = factory()
+                    if hasattr(widget, 'set_theme'):
+                        widget.set_theme(self.current_theme)
                     new_item.setSizeHint(widget.sizeHint())
                     new_item.setData(Qt.ItemDataRole.UserRole, data)
                     
@@ -1318,6 +1349,8 @@ class OmniWindow(QWidget):
                     self.list_widget.setItemWidget(new_item, anim_w)
 
     def add_list_item(self, widget, data):
+        if hasattr(widget, 'set_theme'):
+            widget.set_theme(self.current_theme)
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)
@@ -1333,6 +1366,8 @@ class OmniWindow(QWidget):
         self.list_widget.setItemWidget(item, anim_w)
 
     def insert_list_item(self, index, widget, data):
+        if hasattr(widget, 'set_theme'):
+            widget.set_theme(self.current_theme)
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)

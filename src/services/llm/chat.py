@@ -649,6 +649,11 @@ Current Conversation:
                 accumulated_text = ""
                 external_thinking = ""
                 for chunk in streamer:
+                    # Check abortion
+                    if model_manager.abort_fast_event.is_set():
+                        logging.info("Chat Request Aborted during streaming.")
+                        break
+
                     # Handle both raw strings and ChatCompletionChunk objects
                     if hasattr(chunk, 'choices') and chunk.choices:
                         delta = chunk.choices[0].delta

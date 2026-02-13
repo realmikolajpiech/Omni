@@ -2,20 +2,20 @@
 THEMES = {
     "dark": {
         "text_primary": "#FFFFFF",
-        "text_secondary": "#AAAAAA",
+        "text_secondary": "#FFFFFF", # Changed from #AAAAAA to #FFFFFF for better visibility
         "text_input": "#FFFFFF",
-        "placeholder": "rgba(255, 255, 255, 0.3)",
+        "placeholder": "rgba(255, 255, 255, 0.6)", # Increased opacity from 0.3
         "selection_bg": "#444444",
         "selection_text": "#FFFFFF",
-        "divider": "#1AFFFFFF", # rgba(255, 255, 255, 0.1)
-        "list_item_hover": "rgba(255, 255, 255, 0.08)",
-        "list_item_selected": "rgba(255, 255, 255, 0.12)",
-        "scrollbar_handle": "#40FFFFFF", # rgba(255, 255, 255, 0.25)
-        "border_color": "#28FFFFFF", # rgba(255, 255, 255, 40/255=0.15) -> 0x28=40
+        "divider": "#30FFFFFF", # Increased opacity from 0.1
+        "list_item_hover": "rgba(255, 255, 255, 0.15)", # Increased opacity
+        "list_item_selected": "rgba(255, 255, 255, 0.20)", # Increased opacity
+        "scrollbar_handle": "#60FFFFFF", # Increased opacity
+        "border_color": "#40FFFFFF", # Increased opacity
         "base_fill_color": "#0A000000", # rgba(0, 0, 0, 10/255=0.04) -> 0x0A=10. Pure black fill with low alpha.
         "glass_tint_white": 0.08, # Restored to original value
         "glass_tint_alpha": 0.40,  # Restored to original value
-        "selection_border": "rgba(255, 255, 255, 0.2)"
+        "selection_border": "rgba(255, 255, 255, 0.3)" # Increased opacity
     },
     "light": {
         "text_primary": "#111111",

@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
+from src.ui.styles import THEMES
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
@@ -81,7 +82,64 @@ class LinkActionWidget(QWidget):
         card_layout.addWidget(self.title_label)
 
         layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+        
         self.fetch_icon()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+        
+        # Card Style
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            hover_bg = "rgba(255, 255, 255, 0.10)"
+            hover_border = "rgba(255, 255, 255, 0.2)"
+            title_color = "#FFFFFF"
+            action_color = "#CCCCCC"
+            icon_bg = "#444444"
+            icon_color = "#FFFFFF"
+            icon_border = "rgba(255, 255, 255, 0.2)"
+        else:
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(255, 255, 255, 0.4)"
+            hover_bg = "rgba(255, 255, 255, 0.45)"
+            hover_border = "rgba(255, 255, 255, 0.6)"
+            title_color = "#050505"
+            action_color = "#888888"
+            icon_bg = "#FFFFFF"
+            icon_color = "#333333"
+            icon_border = "rgba(0,0,0,0.05)"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+            QWidget#ActionCard:hover {{
+                background-color: {hover_bg};
+                border: 1px solid {hover_border};
+            }}
+        """)
+        
+        self.title_label.setStyleSheet(f"color: {title_color}; margin-top: 0px;")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
+        
+        self.icon_label.setStyleSheet(f"""
+            background-color: {icon_bg}; 
+            color: {icon_color}; 
+            font-size: 10px; 
+            border-radius: 5px; 
+            border: 1px solid {icon_border};
+        """)
 
     def fetch_icon(self):
         try:
@@ -134,6 +192,10 @@ class AppActionWidget(LinkActionWidget):
         # Customize icons/text for App Launcher
         self.action_label.setText("LAUNCH")
         self.icon_label.setText("🚀")
+        self.update_style()
+
+    def update_style(self):
+        super().update_style()
         self.icon_label.setStyleSheet("""
             background-color: #333333; 
             color: #FFFFFF; 
@@ -141,22 +203,6 @@ class AppActionWidget(LinkActionWidget):
             border-radius: 8px;
         """)
         
-        # Override layout for specific app styling if needed
-        # Re-using LinkActionWidget layout is fine, but let's customize the right side
-        
-        # We can add a visual cue like "Press Enter"
-        layout = self.card.layout() # It's a QVBoxLayout in LinkActionWidget
-        # We want to access the top row or just append to bottom?
-        # LinkActionWidget has:
-        # - Top Row (Icon + Label)
-        # - Title Label
-        
-        # Let's add a "Press Enter" hint at the bottom right?
-        # Or just rely on standard look.
-        
-        # Let's customize the title color to be more distinct
-        self.title_label.setStyleSheet("color: #111111; margin-top: 0px;")
-
 class InstallActionWidget(LinkActionWidget):
     def __init__(self, name, website_url, parent=None):
         url_for_icon = website_url if website_url else f"https://google.com/search?q={name}"
@@ -164,12 +210,6 @@ class InstallActionWidget(LinkActionWidget):
 
         self.action_label.setText("")
         self.icon_label.setText("↓")
-        self.icon_label.setStyleSheet("""
-            background-color: #333333; 
-            color: #FFFFFF; 
-            font-size: 14px; 
-            border-radius: 8px;
-        """)
 
         layout = QHBoxLayout(self.action_label)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -179,35 +219,75 @@ class InstallActionWidget(LinkActionWidget):
         def create_key(text):
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("""
-                background-color: #FFFFFF;
-                border: 1px solid #D6D6D6;
-                border-bottom: 2px solid #C0C0C0;
-                border-radius: 5px;
-                color: #333333;
-                padding: 3px 8px;
-                font-family: "Manrope";
-                font-size: 10px;
-                font-weight: 800;
-                min-width: 24px;
-            """)
+            lbl.setProperty("class", "keycap") # For easier styling if using qss, but here we use inline
+            # We'll style them in update_style, but need references?
+            # Creating many keys... simpler to style them here and just update colors?
+            # Or make a list of keys?
             return lbl
+            
+        self.keys = []
+        def add_key(text):
+            k = create_key(text)
+            self.keys.append(k)
+            layout.addWidget(k)
+            return k
 
-        layout.addWidget(create_key("TAB"))
+        add_key("TAB")
 
-        lbl_install = QLabel("INSTALL APP")
-        lbl_install.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        lbl_install.setStyleSheet("color: #000000; letter-spacing: 0.5px;")
-        layout.addWidget(lbl_install)
+        self.lbl_install = QLabel("INSTALL APP")
+        self.lbl_install.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        layout.addWidget(self.lbl_install)
 
         layout.addSpacing(12)
-        layout.addWidget(create_key("↵"))
+        add_key("↵")
 
-        lbl_web = QLabel("VISIT SITE")
-        lbl_web.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        lbl_web.setStyleSheet("color: #999999; letter-spacing: 0.5px;")
-        layout.addWidget(lbl_web)
+        self.lbl_web = QLabel("VISIT SITE")
+        self.lbl_web.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        layout.addWidget(self.lbl_web)
         layout.addStretch()
+        
+        self.update_style()
+
+    def update_style(self):
+        super().update_style()
+        
+        # Icon style override
+        self.icon_label.setStyleSheet("""
+            background-color: #333333; 
+            color: #FFFFFF; 
+            font-size: 14px; 
+            border-radius: 8px;
+        """)
+
+        is_dark = self.current_theme == "dark"
+        
+        text_color = "#FFFFFF" if is_dark else "#000000"
+        web_color = "#CCCCCC" if is_dark else "#999999"
+        
+        if hasattr(self, 'lbl_install'):
+            self.lbl_install.setStyleSheet(f"color: {text_color}; letter-spacing: 0.5px;")
+            self.lbl_web.setStyleSheet(f"color: {web_color}; letter-spacing: 0.5px;")
+            
+        # Update keys
+        key_bg = "#444444" if is_dark else "#FFFFFF"
+        key_text = "#FFFFFF" if is_dark else "#333333"
+        key_border = "#666666" if is_dark else "#D6D6D6"
+        key_border_bottom = "#444444" if is_dark else "#C0C0C0"
+        
+        if hasattr(self, 'keys'):
+            for k in self.keys:
+                k.setStyleSheet(f"""
+                    background-color: {key_bg};
+                    border: 1px solid {key_border};
+                    border-bottom: 2px solid {key_border_bottom};
+                    border-radius: 5px;
+                    color: {key_text};
+                    padding: 3px 8px;
+                    font-family: "Manrope";
+                    font-size: 10px;
+                    font-weight: 800;
+                    min-width: 24px;
+                """)
 
 class FileActionWidget(QWidget):
     """File action widget with space-to-preview functionality."""
@@ -271,71 +351,49 @@ class FileActionWidget(QWidget):
             else:
                 self.icon_label.setText("📄")
 
-        self.icon_label.setStyleSheet("""
-            background-color: #FFFFFF; 
-            border-radius: 6px; 
-            border: 1px solid rgba(0,0,0,0.05);
-        """)
-
         self.action_label = QLabel("FILE")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-        self.action_label.setStyleSheet("color: #888888; letter-spacing: 1.0px;")
 
         top_layout.addWidget(self.icon_label)
         top_layout.addWidget(self.action_label)
         top_layout.addStretch()
         
+        self.keys = []
+        self.hint_labels = []
+
+        def create_key(text):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setProperty("class", "keycap")
+            self.keys.append(lbl)
+            return lbl
+            
         # Keyboard hints (top right) - Similar to INSTALL widget
         if not os.path.isdir(path):
             # CTRL+S for preview
-            ctrl_s_key = QLabel("CTRL+S")
-            ctrl_s_key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ctrl_s_key = create_key("CTRL+S")
             ctrl_s_key.setFixedHeight(24)
             ctrl_s_key.setFixedWidth(50)
-            ctrl_s_key.setStyleSheet("""
-                background-color: #FFFFFF;
-                border: 1px solid #D6D6D6;
-                border-bottom: 2px solid #C0C0C0;
-                border-radius: 5px;
-                color: #333333;
-                padding: 0px;
-                font-family: "Manrope";
-                font-size: 8px;
-                font-weight: 800;
-            """)
             
             preview_label = QLabel("PREVIEW")
             preview_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-            preview_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
             preview_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
             preview_label.setFixedHeight(24)
+            self.hint_labels.append(preview_label)
             
             top_layout.addWidget(ctrl_s_key)
             top_layout.addWidget(preview_label)
         
         # ENTER hint
-        enter_key = QLabel("↵")
-        enter_key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        enter_key = create_key("↵")
         enter_key.setFixedHeight(24)
         enter_key.setFixedWidth(30)
-        enter_key.setStyleSheet("""
-            background-color: #FFFFFF;
-            border: 1px solid #D6D6D6;
-            border-bottom: 2px solid #C0C0C0;
-            border-radius: 5px;
-            color: #333333;
-            padding: 0px;
-            font-family: "Manrope";
-            font-size: 12px;
-            font-weight: 800;
-            line-height: 24px;
-        """)
         
         open_label = QLabel("OPEN")
         open_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-        open_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
         open_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         open_label.setFixedHeight(24)
+        self.hint_labels.append(open_label)
         
         top_layout.addWidget(enter_key)
         top_layout.addWidget(open_label)
@@ -344,14 +402,12 @@ class FileActionWidget(QWidget):
         self.title_label = QLabel(filename)
         self.title_label.setWordWrap(True)
         self.title_label.setFont(QFont("Instrument Serif", 20, QFont.Weight.Normal))
-        self.title_label.setStyleSheet("color: #050505; margin-top: 2px;")
 
         # Description (Path)
         display_path = path.replace(os.path.expanduser("~"), "~")
         self.desc_label = QLabel(display_path)
         self.desc_label.setWordWrap(True)
         self.desc_label.setFont(QFont("Manrope", 11, QFont.Weight.Medium))
-        self.desc_label.setStyleSheet("color: #555555;")
 
         card_layout.addWidget(top_row)
         card_layout.addWidget(self.title_label)
@@ -361,11 +417,13 @@ class FileActionWidget(QWidget):
         self.peek_label = QLabel()
         self.peek_label.setWordWrap(True)
         self.peek_label.setFont(QFont("Consolas", 10))
-        self.peek_label.setStyleSheet("color: #777777; background-color: rgba(0,0,0,0.03); border-radius: 8px; padding: 8px; margin-top: 4px;")
         self.peek_label.setHidden(True)
         card_layout.addWidget(self.peek_label)
 
         layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
         
         # Load preview automatically for images
         if not os.path.isdir(path):
@@ -376,6 +434,102 @@ class FileActionWidget(QWidget):
                 # Start loading content preview in background
                 threading.Thread(target=self.load_preview_content, daemon=True).start()
     
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+
+        # Colors
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            hover_bg = "rgba(255, 255, 255, 0.10)"
+            hover_border = "rgba(255, 255, 255, 0.2)"
+            
+            title_color = "#FFFFFF"
+            desc_color = "#CCCCCC"
+            action_color = "#AAAAAA"
+            hint_color = "#AAAAAA"
+            
+            icon_bg = "#444444"
+            icon_border = "rgba(255,255,255,0.2)"
+            
+            peek_color = "#DDDDDD"
+            peek_bg = "rgba(255,255,255,0.05)"
+            
+            key_bg = "#444444"
+            key_text = "#FFFFFF"
+            key_border = "#666666"
+            key_border_bottom = "#444444"
+        else:
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(255, 255, 255, 0.4)"
+            hover_bg = "rgba(255, 255, 255, 0.45)"
+            hover_border = "rgba(255, 255, 255, 0.6)"
+            
+            title_color = "#050505"
+            desc_color = "#555555"
+            action_color = "#888888"
+            hint_color = "#888888"
+            
+            icon_bg = "#FFFFFF"
+            icon_border = "rgba(0,0,0,0.05)"
+            
+            peek_color = "#777777"
+            peek_bg = "rgba(0,0,0,0.03)"
+            
+            key_bg = "#FFFFFF"
+            key_text = "#333333"
+            key_border = "#D6D6D6"
+            key_border_bottom = "#C0C0C0"
+
+        # Apply
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+            QWidget#ActionCard:hover {{
+                background-color: {hover_bg};
+                border: 1px solid {hover_border};
+            }}
+        """)
+        
+        self.title_label.setStyleSheet(f"color: {title_color}; margin-top: 2px;")
+        self.desc_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1.0px;")
+        
+        self.icon_label.setStyleSheet(f"""
+            background-color: {icon_bg}; 
+            border-radius: 6px; 
+            border: 1px solid {icon_border};
+        """)
+        
+        self.peek_label.setStyleSheet(f"color: {peek_color}; background-color: {peek_bg}; border-radius: 8px; padding: 8px; margin-top: 4px;")
+        
+        for k in self.keys:
+            fs = "12px" if "↵" in k.text() else "8px"
+            line_height = "line-height: 24px;" if "↵" in k.text() else ""
+            k.setStyleSheet(f"""
+                background-color: {key_bg};
+                border: 1px solid {key_border};
+                border-bottom: 2px solid {key_border_bottom};
+                border-radius: 5px;
+                color: {key_text};
+                padding: 0px;
+                font-family: "Manrope";
+                font-size: {fs};
+                font-weight: 800;
+                {line_height}
+            """)
+
+        for l in self.hint_labels:
+            l.setStyleSheet(f"color: {hint_color}; letter-spacing: 0.5px;")
+
     def load_preview_content(self):
         """Load preview content for various file types."""
         try:
@@ -696,11 +850,73 @@ class PersonActionWidget(QWidget):
 
         # Initials fallback
         self.avatar.setText(display_name[0])
-        self.avatar.setStyleSheet("background-color: #F7F7F7; color: #CCCCCC; font-family: 'Instrument Serif'; font-size: 56px; border-radius: 8px; border: 1px solid #EDEDED;")
+        
+        self.current_theme = "light"
+        self.update_style()
 
         if self.image_url:
             logging.info(f"Starting image download for {name}: {self.image_url}")
             threading.Thread(target=self._download_image, daemon=True).start()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+        
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            hover_bg = "rgba(255, 255, 255, 0.10)"
+            hover_border = "rgba(255, 255, 255, 0.2)"
+            
+            name_color = "#FFFFFF"
+            desc_color = "#CCCCCC"
+            link_color = "#AAAAAA"
+            avatar_bg = "#444444"
+            avatar_border = "#666666"
+            avatar_text = "#FFFFFF"
+        else:
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(255, 255, 255, 0.4)"
+            hover_bg = "rgba(255, 255, 255, 0.45)"
+            hover_border = "rgba(255, 255, 255, 0.6)"
+            
+            name_color = "#111111"
+            desc_color = "#555555"
+            link_color = "#999999"
+            avatar_bg = "#F7F7F7"
+            avatar_border = "#EDEDED"
+            avatar_text = "#CCCCCC"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+            QWidget#ActionCard:hover {{
+                background-color: {hover_bg};
+                border: 1px solid {hover_border};
+            }}
+        """)
+        
+        self.name_label.setStyleSheet(f"color: {name_color};")
+        self.desc_label.setStyleSheet(f"color: {desc_color}; line-height: 1.5;")
+        self.link_label.setStyleSheet(f"color: {link_color}; letter-spacing: 1px;")
+        
+        # Only update avatar style if it's text (not image)
+        # We can check if pixmap is set? Or just update anyway?
+        # If pixmap is set, we set bg transparent in update_image.
+        # But if we update style, we might overwrite it.
+        # Let's check if we have a pixmap?
+        if not self.avatar.pixmap() or self.avatar.pixmap().isNull():
+            self.avatar.setStyleSheet(f"background-color: {avatar_bg}; color: {avatar_text}; font-family: 'Instrument Serif'; font-size: 56px; border-radius: 8px; border: 1px solid {avatar_border};")
+        else:
+            # Maintain transparent bg for image
+            self.avatar.setStyleSheet("background-color: transparent;")
 
     def _download_image(self):
         try:
