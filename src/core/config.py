@@ -13,10 +13,10 @@ os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Models
 # Fast model: transformers (HF) for low-latency intents/actions
-FAST_MODEL_HF_ID = "Qwen/Qwen3-0.6B"
-FAST_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"  # legacy / fallback
+FAST_MODEL_HF_ID = "Qwen/Qwen3-0.6B-GGUF"
+FAST_MODEL_FILENAME = "qwen3-0.6b-q8_0.gguf"
 FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
-FAST_MODEL_URL = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+FAST_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 
 MAIN_MODEL_FILENAME = "Qwen3VL-4B-Thinking-Q4_K_M.gguf"
 MAIN_MODEL_PATH = os.path.join(MODEL_DIR, MAIN_MODEL_FILENAME)

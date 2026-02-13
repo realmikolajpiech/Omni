@@ -1069,6 +1069,11 @@ class OmniWindow(QWidget):
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)
+        
+        # Disable selection for thinking, answer, separator items
+        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+             
         self.list_widget.addItem(item)
         
         # Wrap in SmoothEntryWidget for fade-in
@@ -1079,6 +1084,11 @@ class OmniWindow(QWidget):
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)
+        
+        # Disable selection for thinking, answer, separator items
+        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+             
         self.list_widget.insertItem(index, item)
         
         # Wrap in SmoothEntryWidget for fade-in

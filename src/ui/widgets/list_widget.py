@@ -1,9 +1,34 @@
-from PyQt6.QtWidgets import QListWidget, QAbstractItemView
+from PyQt6.QtWidgets import QListWidget, QAbstractItemView, QStyledItemDelegate, QStyle
 from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+
+class SelectiveHoverDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        # Get data to check type
+        data = index.data(Qt.ItemDataRole.UserRole)
+        role_type = None
+        
+        # Handle dict data (actions) vs string data (internal types)
+        if isinstance(data, dict):
+             role_type = data.get('type') # e.g. 'link', 'install'
+        elif isinstance(data, str):
+             role_type = data # 'answer', 'thinking', 'separator'
+             
+        # If it's thinking or answer, we clear the hover/selected state from option
+        # This prevents the QListWidget stylesheet from applying the background
+        if role_type in ['thinking', 'answer', 'separator', 'history_ai']:
+            option.state &= ~QStyle.StateFlag.State_MouseOver
+            option.state &= ~QStyle.StateFlag.State_Selected
+            option.state &= ~QStyle.StateFlag.State_HasFocus
+            
+        super().paint(painter, option, index)
 
 class SmoothScrollListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        
+        # Use our custom delegate to control hover effects per-item
+        self.setItemDelegate(SelectiveHoverDelegate(self))
+        
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Prevent any horizontal scroll (range 0-0)

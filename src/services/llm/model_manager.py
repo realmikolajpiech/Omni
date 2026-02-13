@@ -4,6 +4,10 @@ import threading
 import requests
 import torch
 import sys
+import time
+import signal
+import subprocess
+import socket
 
 # Prefer external libllama if present
 try:
@@ -58,6 +62,57 @@ current_fast_request_id = None
 fast_request_queue = []
 fast_queue_lock = threading.Lock()
 
+# Idle Shutdown State
+last_main_activity = 0
+monitor_started = False
+
+def unload_main_model():
+    global llm
+    logging.info("Unloading Main Model due to inactivity...")
+    with main_lock:
+        if not llm: return
+
+        # Check if server
+        is_server = False
+        try:
+             if hasattr(llm, 'device') and llm.device == "server":
+                 is_server = True
+        except: pass
+
+        if is_server:
+            try:
+                pid_path = os.path.expanduser("~/.config/omni/qwen_server.pid")
+                if os.path.exists(pid_path):
+                    with open(pid_path, 'r') as f:
+                        pid = int(f.read().strip())
+                    os.kill(pid, signal.SIGTERM)
+                    logging.info(f"Killed llama-server (PID {pid})")
+            except Exception as e:
+                logging.error(f"Failed to kill server: {e}")
+
+        llm = None
+        
+        # Cleanup
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif sys.platform == "darwin" and hasattr(torch, 'mps'):
+            try: torch.mps.empty_cache()
+            except: pass
+            
+        logging.info("Main Model Unloaded.")
+
+def _monitor_idle():
+    global last_main_activity
+    while True:
+        time.sleep(30) # Check every 30s
+        if not llm: continue
+        
+        # 10 minutes (300s) timeout
+        if time.time() - last_main_activity > 300:
+             unload_main_model()
+
 def download_file(url, dest_path):
     logging.info(f"Downloading {url} to {dest_path}...")
     try:
@@ -85,180 +140,108 @@ def ensure_imports():
         return None
 
 def ensure_fast_model():
-    """Loads the smaller, faster model for actions (transformers), quantized in-code for speed."""
+    """Loads the smaller, faster model for actions using llama.cpp (GGUF) for minimal memory usage."""
     global fast_model, init_error
     if fast_model: return
 
     with fast_lock:
         if fast_model: return
-        logging.info(f"Loading Fast Model (Transformers, 4-bit quantized): {FAST_MODEL_HF_ID}")
+        logging.info(f"Loading Fast Model (llama.cpp): {FAST_MODEL_FILENAME}")
+        
+        # Ensure file exists
+        if not os.path.exists(FAST_MODEL_PATH):
+            logging.info(f"Fast model not found. Downloading from {FAST_MODEL_URL}...")
+            if not download_file(FAST_MODEL_URL, FAST_MODEL_PATH):
+                init_error = "Failed to download fast model."
+                return
+
         try:
-            cuda_ok = torch.cuda.is_available()
-            mps_ok = sys.platform == "darwin" and torch.backends.mps.is_available()
+            from llama_cpp import Llama
             
-            # MPS Safety: Avoid meta tensor issues on M4 by loading directly to CPU first if needed
-            # But AutoModel usually handles this. The error suggests "accelerate" library usage with device_map="auto" or similar might be failing on MPS.
-            # We will force standard loading without fancy offloading if on MPS to be safe.
+            # Load GGUF - highly optimized, mmap enabled (low active RAM)
+            model = Llama(
+                model_path=FAST_MODEL_PATH,
+                n_ctx=4096,        # Reasonable context for actions
+                n_threads=4,       # Efficient for background tasks
+                n_gpu_layers=-1,   # Use Metal if available
+                verbose=False,
+                embedding=False
+            )
             
-            if cuda_ok:
-                logging.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
-            elif mps_ok:
-                logging.info("MPS (Metal Performance Shaders) available.")
-
-            dtype = torch.bfloat16 if cuda_ok else (torch.float16 if mps_ok else torch.float32)
-            attn_implementation = "sdpa"  # sdpa is reliable with quantized models
-            
-            tokenizer = AutoTokenizer.from_pretrained(FAST_MODEL_HF_ID, trust_remote_code=True)
-
-            try:
-                # Explicitly disable device_map for MPS to avoid "meta tensor" copy errors
-                # This forces simple direct loading which is more stable on Mac
-                device_map = None 
-                if cuda_ok: device_map = "auto"
-                
-                model = AutoModelForCausalLM.from_pretrained(
-                    FAST_MODEL_HF_ID,
-                    torch_dtype=dtype,
-                    device_map=device_map, # None for MPS
-                    trust_remote_code=True,
-                    attn_implementation=attn_implementation,
-                    low_cpu_mem_usage=True
-                )
-                
-                if mps_ok:
-                    model = model.to("mps")
-                elif cuda_ok and not device_map:
-                    model = model.to("cuda:0")
-                
-                model.eval()
-                
-                if cuda_ok or mps_ok:
-                    logging.info("Warming up fast model...")
-                    warmup_input = tokenizer("Hi", return_tensors="pt").to(model.device)
-                    with torch.inference_mode():
-                         model.generate(**warmup_input, max_new_tokens=2)
-                    logging.info("Fast model warmup complete.")
-
-            except Exception as e:
-                logging.error(f"Fast Model Load Logic Error: {e}")
-                raise e # Re-raise to trigger fallback or logging
-
-            # Log where the model actually ended up
-            try:
-                where = next(model.parameters()).device
-                logging.info(f"Fast model device: {where} (dtype: {model.dtype})")
-            except Exception:
-                pass
-
-            class FastTransformersWrapper:
-                def __init__(self, model, tokenizer):
+            class FastLlamaWrapper:
+                def __init__(self, model):
                     self.model = model
-                    self.tokenizer = tokenizer
 
                 def reset(self):
-                    pass
+                    self.model.reset()
 
                 def create_chat_completion(self, messages, max_tokens=128, temperature=0.0, request_id=None, **kwargs):
                     """
-                    Create chat completion. Will check abort_fast_event frequently to allow cancellation.
-                    request_id: Used to cancel old requests when new ones arrive
+                    Create chat completion with abort support via streaming.
                     """
-                    text = self.tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+                    global current_fast_request_id
+                    
+                    # Default params for action model
+                    eff_temp = temperature if temperature > 0 else 0.1
+                    
+                    # Stream to allow abortion
+                    stream = self.model.create_chat_completion(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=eff_temp,
+                        stream=True,
+                        **kwargs
                     )
                     
-                    logging.info(f"[DEBUG] Chat template input:\n{text[:200]}...")
+                    full_content = ""
+                    completion_tokens = 0
                     
-                    # Ensure inputs are on the same device as the model
-                    inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
-                    input_len = inputs.input_ids.shape[1]
-                    
-                    logging.info(f"[DEBUG] Input tokens: {input_len}, device: {inputs.input_ids.device}")
+                    for chunk in stream:
+                        # Check abortion
+                        if abort_fast_event.is_set():
+                            logging.info(f"Fast request {request_id} aborted.")
+                            return None
+                        if request_id is not None and current_fast_request_id != request_id:
+                            return None
+                            
+                        try:
+                            if not chunk or 'choices' not in chunk or not chunk['choices']:
+                                continue
+                                
+                            delta = chunk['choices'][0]['delta'].get('content', '')
+                            if delta:
+                                full_content += delta
+                                completion_tokens += 1
+                        except Exception as e:
+                            logging.warning(f"Error processing chunk: {e}")
+                            continue
 
-                    # Use light sampling for fast model to avoid repetition/garbage (Qwen3 4-bit tends to loop with greedy)
-                    # When caller passes 0, use 0.5 so we still get diverse short outputs without loops
-                    eff_temp = temperature if temperature > 0 else 0.5
-                    do_sample = eff_temp > 0
-                    
-                    # Abortion support via StoppingCriteria - checks on every token
-                    from transformers import StoppingCriteria, StoppingCriteriaList
-                    class AbortCriteria(StoppingCriteria):
-                        def __init__(self, request_id):
-                            self.request_id = request_id
-                            self.check_count = 0
-                        
-                        def __call__(self, input_ids, scores, **kwargs):
-                            self.check_count += 1
-                            # Check abort every token
-                            if abort_fast_event.is_set():
-                                return True
-                            # Also check if this request is still current
-                            global current_fast_request_id
-                            if self.request_id is not None and current_fast_request_id != self.request_id:
-                                return True
-                            return False
-
-                    gen_kw = dict(
-                        max_new_tokens=max_tokens,
-                        do_sample=do_sample,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        use_cache=True,  # KV cache for speed
-                        stopping_criteria=StoppingCriteriaList([AbortCriteria(request_id)]),
-                        repetition_penalty=1.2,  # Reduce repetition/garbage from 4-bit fast model
-                    )
-                    
-                    if do_sample:
-                        gen_kw["temperature"] = eff_temp
-                        gen_kw["top_p"] = 0.8
-                        gen_kw["top_k"] = 20
-
-                    with torch.inference_mode():
-                        generated = self.model.generate(**inputs, **gen_kw)
-                    
-                    logging.info(f"[DEBUG] Generated shape: {generated.shape}")
-                    
-                    output_ids = generated[0][input_len:]
-                    logging.info(f"[DEBUG] Output token IDs (first 20): {output_ids[:20]}")
-                    
-                    # First decode WITH special tokens to see what we got
-                    output_text_with_special = self.tokenizer.decode(
-                        output_ids, skip_special_tokens=False
-                    )
-                    logging.info(f"[DEBUG] Raw output WITH special tokens: {repr(output_text_with_special[:300])}")
-                    
-                    output_text = self.tokenizer.decode(
-                        output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-                    )
-                    
-                    logging.info(f"[DEBUG] Raw decoded output (special filtered): '{output_text[:200]}'")
-                    
-                    completion_tokens = len(output_ids)
-
-                    # Strip input echo if present
-                    if output_text.startswith(text[: min(80, len(text))]):
-                        pass
-                    if "assistant\n" in output_text:
-                        output_text = output_text.split("assistant\n", 1)[-1].strip()
-                    
-                    logging.info(f"[DEBUG] Final output after processing: '{output_text[:200]}'")
-
+                            
                     return {
                         "choices": [{
-                            "message": {"role": "assistant", "content": output_text}
+                            "message": {"role": "assistant", "content": full_content}
                         }],
                         "usage": {"completion_tokens": completion_tokens},
                     }
 
-            fast_model = FastTransformersWrapper(model, tokenizer)
+            fast_model = FastLlamaWrapper(model)
             init_error = None
-            logging.info("Fast Model Loaded (Transformers).")
+            logging.info("Fast Model Loaded (llama.cpp).")
+
         except Exception as e:
             logging.error(f"Fast Model Load Error: {e}")
             init_error = str(e)
 
+
 def ensure_main_model():
     """Loads the larger, main model for chat."""
-    global llm, init_error, embed_model, db_conn
+    global llm, init_error, embed_model, db_conn, last_main_activity, monitor_started
+    
+    # Update activity timestamp and start monitor if needed
+    last_main_activity = time.time()
+    if not monitor_started:
+        threading.Thread(target=_monitor_idle, daemon=True).start()
+        monitor_started = True
     
     # 1. DB & Embeddings (Shared)
     if db_conn is None:
@@ -483,101 +466,117 @@ def ensure_main_model():
 
     # Qwen3-VL Special Handling: Use local llama.cpp server
     if "qwen3" in MAIN_MODEL_FILENAME.lower():
-        logging.info("Using Qwen3-VL Local Server Mode...")
-        # Start server if not running
-        import subprocess
-        import time
-        import socket
-        
-        server_port = 8081
-        server_url = f"http://127.0.0.1:{server_port}/v1"
-        
-        # Check if port is open
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        result = sock.connect_ex(('127.0.0.1', server_port))
-        sock.close()
-        
-        if result != 0:
-            logging.info("Starting local Qwen3-VL server...")
-            subprocess.Popen(["./start_model_server.sh"], shell=True)
-            # Wait for server to come up
-            for i in range(30):
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    if sock.connect_ex(('127.0.0.1', server_port)) == 0:
-                        sock.close()
-                        logging.info("Server is up!")
-                        break
-                    sock.close()
-                except: pass
-                time.sleep(1)
-        
-        # Create OpenAI client wrapper
-        from llama_cpp.llama_chat_format import Qwen25VLChatHandler # Placeholder if needed
-        try:
-            from openai import OpenAI
-            client = OpenAI(base_url=server_url, api_key="sk-no-key-required")
+        with main_lock:
+            # Re-check inside lock in case another thread started it
+            server_port = 8081
+            server_url = f"http://127.0.0.1:{server_port}/v1"
             
-            class OpenAIWrapper:
-                def __init__(self, client):
-                    self.client = client
-                    self.device = "server" # Mock
-                    
-                def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, **kwargs):
-                    # Filter out unsupported params or adjust
-                    
-                    # Convert OpenAI image_url format to llama-server supported format if needed
-                    # messages structure: [{'role': 'user', 'content': [{'type': 'text', ...}, {'type': 'image_url', ...}]}]
-                    # Qwen3-VL server via OpenAI API usually expects standard OpenAI format.
-                    # We ensure it's passed through correctly.
-                    
-                    # Ensure temperature is float
-                    temperature = float(temperature)
-                    
-                    response = self.client.chat.completions.create(
-                        model="qwen3vl", # Model name in server is often just alias
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        stream=stream,
-                        extra_body=kwargs
-                    )
-                    
-                    if stream:
-                        return response # It's already an iterator
-                    
-                    # Wrap non-stream response to match Llama object dict
-                    msg = response.choices[0].message
-                    content = msg.content
-                    # Try to get reasoning_content (DeepSeek/Qwen style)
-                    reasoning = getattr(msg, "reasoning_content", None)
-                    
-                    return {
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": content,
-                                "reasoning_content": reasoning
-                            }
-                        }]
-                    }
-                
-                def reset(self): pass
+            # Check if port is already open (server running)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('127.0.0.1', server_port))
+            sock.close()
+            
+            if result == 0:
+                logging.info("Qwen3-VL server already running on port 8081.")
+            else:
+                logging.info("Starting local Qwen3-VL server...")
+                # Check for stale PID file
+                pid_path = os.path.expanduser("~/.config/omni/qwen_server.pid")
+                if os.path.exists(pid_path):
+                    try:
+                        with open(pid_path, 'r') as f:
+                            old_pid = int(f.read().strip())
+                        # Check if process is running
+                        os.kill(old_pid, 0) # This raises OSError if process not found
+                        logging.warning(f"Found stale PID file {old_pid} but port closed. Killing it.")
+                        os.kill(old_pid, signal.SIGTERM)
+                        time.sleep(1)
+                    except (OSError, ValueError):
+                        # Process not running or invalid PID
+                        pass
+                    try:
+                        os.remove(pid_path)
+                    except: pass
 
-            llm = OpenAIWrapper(client)
+                subprocess.Popen(["./start_model_server.sh"], shell=True)
+                # Wait for server to come up
+                for i in range(30):
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        if sock.connect_ex(('127.0.0.1', server_port)) == 0:
+                            sock.close()
+                            logging.info("Server is up!")
+                            break
+                        sock.close()
+                    except: pass
+                    time.sleep(1)
             
-            # Reduce memory usage: clear cache if not using stream
-            if sys.platform == "darwin":
-                # Explicitly delete any large tensors if accessible
-                import gc
-                gc.collect()
-            
-            logging.info("Main Model Loaded (Local Server).")
-            return
-        except ImportError:
-            logging.error("openai package missing. Please install openai.")
-            init_error = "openai package missing"
-            return
+            # Create OpenAI client wrapper
+            from llama_cpp.llama_chat_format import Qwen25VLChatHandler # Placeholder if needed
+            try:
+                from openai import OpenAI
+                client = OpenAI(base_url=server_url, api_key="sk-no-key-required")
+                
+                class OpenAIWrapper:
+                    def __init__(self, client):
+                        self.client = client
+                        self.device = "server" # Mock
+                        
+                    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, **kwargs):
+                        # Filter out unsupported params or adjust
+                        
+                        # Convert OpenAI image_url format to llama-server supported format if needed
+                        # messages structure: [{'role': 'user', 'content': [{'type': 'text', ...}, {'type': 'image_url', ...}]}]
+                        # Qwen3-VL server via OpenAI API usually expects standard OpenAI format.
+                        # We ensure it's passed through correctly.
+                        
+                        # Ensure temperature is float
+                        temperature = float(temperature)
+                        
+                        response = self.client.chat.completions.create(
+                            model="qwen3vl", # Model name in server is often just alias
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            stream=stream,
+                            extra_body=kwargs
+                        )
+                        
+                        if stream:
+                            return response # It's already an iterator
+                        
+                        # Wrap non-stream response to match Llama object dict
+                        msg = response.choices[0].message
+                        content = msg.content
+                        # Try to get reasoning_content (DeepSeek/Qwen style)
+                        reasoning = getattr(msg, "reasoning_content", None)
+                        
+                        return {
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": content,
+                                    "reasoning_content": reasoning
+                                }
+                            }]
+                        }
+                    
+                    def reset(self): pass
+
+                llm = OpenAIWrapper(client)
+                
+                # Reduce memory usage: clear cache if not using stream
+                if sys.platform == "darwin":
+                    # Explicitly delete any large tensors if accessible
+                    import gc
+                    gc.collect()
+                
+                logging.info("Main Model Loaded (Local Server).")
+                return
+            except ImportError:
+                logging.error("openai package missing. Please install openai.")
+                init_error = "openai package missing"
+                return
 
     with main_lock:
         if llm: return

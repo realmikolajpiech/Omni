@@ -22,6 +22,13 @@ if [ ! -f "$MMPROJ_PATH" ]; then
 fi
 
 echo "Starting Qwen3-VL Server on port $PORT..."
+
+# Fail-safe: Check if port is already in use
+if lsof -i :$PORT >/dev/null; then
+    echo "Error: Port $PORT is already in use. Server already running?"
+    exit 0
+fi
+
 echo "Model: $MODEL_PATH"
 
 # -ngl -1: Offload all layers to GPU (Metal)
@@ -35,7 +42,9 @@ $SERVER_BIN \
     -m "$MODEL_PATH" \
     --mmproj "$MMPROJ_PATH" \
     -ngl -1 \
-    -c 8192 \
+    -c 4096 \
+    -ctk q8_0 \
+    -ctv q8_0 \
     --port $PORT \
     --host 127.0.0.1 \
     -np 1 \

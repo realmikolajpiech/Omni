@@ -121,8 +121,8 @@ class ThinkingWidget(QWidget):
                 padding-left: 0px;
             }
         """)
-        # Make text unclickable and transparent to mouse events
         self.header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Entire widget ignores mouse
 
         self.content_label = QLabel(text if text else "")
         self.content_label.setWordWrap(True)
@@ -435,6 +435,10 @@ class AnswerWidget(QWidget):
         self.thinking_widget.set_thinking_text(text)
         self.update_item_size()
 
+        # If text is empty (streaming phase), hide the text_edit to avoid taking up space
+        has_text = bool(self.text_edit.toPlainText().strip())
+        self.text_edit.setVisible(has_text)
+
     def set_thinking_collapsed(self, collapsed):
         """Collapse or expand the thinking section (e.g. after </think> when answer starts)."""
         if self.thinking_widget is not None:
@@ -457,16 +461,29 @@ class AnswerWidget(QWidget):
 
     def sizeHint(self):
         self.text_edit.document().setTextWidth(660)
-        h = self.text_edit.document().size().height()
-
-        # Add thinking widget height if present
-        if self.thinking_widget is not None:
-            h += self.thinking_widget.sizeHint().height() + 12  # spacing between thinking and text
-
+        
+        # Calculate heights of visible components
+        h = 0
+        
+        # Thinking Widget Height
+        if self.thinking_widget is not None and self.thinking_widget.isVisible():
+            h += self.thinking_widget.sizeHint().height()
+            
+        # Text Edit Height
+        has_text = bool(self.text_edit.toPlainText().strip())
+        if has_text:
+            if h > 0: h += 12 # Spacing between thinking and text
+            h += self.text_edit.document().size().height()
+            
+        # Query Label Height
         if self.query_label.isVisible():
-            h += self.query_label.heightForWidth(660) + 16  # Increased padding
+            if h > 0: h += 12 # Spacing
+            h += self.query_label.heightForWidth(660)
 
-        return QSize(660, int(h) + 48)  # Increased bottom padding even more to prevent cutoff
+        # Margins (Top 4 + Bottom 4 + Padding)
+        # If no text, reduce padding
+        bottom_padding = 48 if has_text else 12
+        return QSize(660, int(h + 8 + bottom_padding))
 
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):
