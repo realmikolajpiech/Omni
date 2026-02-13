@@ -105,21 +105,24 @@ QListWidget::item {{
 }}
 
 QListWidget::item:selected {{
-    background-color: transparent;
-}}
-
-QListWidget::item:selected:hover {{
-    background-color: transparent;
-}}
-
-QListWidget::item:hover {{
     background-color: {t['list_item_selected']};
     color: {t['text_primary']};
     border: 1px solid {t['selection_border']};
 }}
 
-/* Selected Item - Active State */
-QListWidget::item:selected {{
+QListWidget::item:selected:active {{
+    background-color: {t['list_item_selected']};
+    color: {t['text_primary']};
+    border: 1px solid {t['selection_border']};
+}}
+
+QListWidget::item:selected:!active {{
+    background-color: {t['list_item_selected']};
+    color: {t['text_primary']};
+    border: 1px solid {t['selection_border']};
+}}
+
+QListWidget::item:hover {{
     background-color: {t['list_item_selected']};
     color: {t['text_primary']};
     border: 1px solid {t['selection_border']};

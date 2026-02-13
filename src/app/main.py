@@ -122,6 +122,17 @@ def main():
     
     # Allow Ctrl+C to interrupt the Qt Event Loop
     from PyQt6.QtCore import QTimer
+    
+    # Handle Ctrl+C gracefully
+    def handle_sigint(signum, frame):
+        print("\nReceived SIGINT (Ctrl+C). Quitting Omni...")
+        if QApplication.instance():
+            QApplication.instance().quit()
+        else:
+            sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
     timer = QTimer()
     timer.timeout.connect(lambda: None)
     timer.start(100)

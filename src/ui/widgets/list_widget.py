@@ -2,6 +2,10 @@ from PyQt6.QtWidgets import QListWidget, QAbstractItemView, QStyledItemDelegate,
 from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 
 class SelectiveHoverDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._parent_list = parent
+
     def paint(self, painter, option, index):
         # Get data to check type
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -13,6 +17,10 @@ class SelectiveHoverDelegate(QStyledItemDelegate):
         elif isinstance(data, str):
              role_type = data # 'answer', 'thinking', 'separator'
              
+        if self._parent_list and getattr(self._parent_list, '_keyboard_locked', False):
+            # If keyboard is locked, force remove MouseOver state from ALL items
+            option.state &= ~QStyle.StateFlag.State_MouseOver
+
         # If it's thinking or answer, we clear the hover/selected state from option
         # This prevents the QListWidget stylesheet from applying the background
         if role_type in ['thinking', 'answer', 'separator', 'history_ai']:
@@ -58,9 +66,15 @@ class SmoothScrollListWidget(QListWidget):
 
     def mouseMoveEvent(self, event):
         """Handle mouse movement - unlocks keyboard lock."""
-        # Mouse movement resumes mouse control
-        self._keyboard_locked = False
-        # Let parent handle mouse move
+        # Only unlock if mouse actually moved significantly or entered new item
+        # But here we just unlock to allow hover effects to resume
+        if self._keyboard_locked:
+            self._keyboard_locked = False
+            # Force re-evaluation of hover state under cursor
+            item = self.itemAt(event.position().toPoint())
+            if item:
+                self._on_item_entered(item)
+                
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
@@ -95,4 +109,9 @@ class SmoothScrollListWidget(QListWidget):
         if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             # Keyboard navigation locks out the mouse cursor
             self._keyboard_locked = True
+            
+            # When using keyboard, we want to ensure the selection is visually clear
+            # The style sheet handles selected:!active vs selected:active
+            # But we need to ensure previous hover states are cleared if they persist
+            
         super().keyPressEvent(event)
