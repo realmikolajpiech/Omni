@@ -1191,7 +1191,16 @@ class OmniWindow(QWidget):
         # Sort matches: exact/prefix first
         matches.sort(key=lambda x: 0 if x[0].startswith(query_lower) else 1)
         
-        for name, data in matches[:5]:
+        # Deduplicate based on orig_name to prevent "Settings: Appearance" appearing twice
+        seen_orig_names = set()
+        unique_matches = []
+        for name, data in matches:
+            if data['orig_name'] in seen_orig_names:
+                continue
+            seen_orig_names.add(data['orig_name'])
+            unique_matches.append((name, data))
+        
+        for name, data in unique_matches[:5]:
             key = f"app:{data['orig_name']}"
             
             # Capture variables properly in lambda
@@ -1456,13 +1465,11 @@ class OmniWindow(QWidget):
                 self.animate_close()
             elif data.get('type') == 'open_file':
                 # Open file in default application
-                import subprocess
                 try:
                     file_path = data['path']
                     import platform
                     if platform.system() == 'Windows':
                         # Windows: Use os.startfile
-                        import os
                         os.startfile(file_path)
                     elif platform.system() == 'Darwin':
                         # macOS: Use open command
@@ -1478,9 +1485,11 @@ class OmniWindow(QWidget):
                     self.animate_close()
             elif 'cmd' in data: # App from cache
                 try:
-                    subprocess.Popen(data['cmd'], shell=True, start_new_session=True)
+                    logging.info(f"Executing command: {data['cmd']}")
+                    subprocess.Popen(data['cmd'], shell=True)
                     self.animate_close()
-                except: pass
+                except Exception as e:
+                    logging.error(f"Failed to execute command '{data['cmd']}': {e}")
             elif data.get('type') == 'ask_omni':
                 self.perform_ai_query(data['query'])
         else:

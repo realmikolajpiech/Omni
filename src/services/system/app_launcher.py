@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import logging
 import requests
@@ -57,6 +58,71 @@ def get_app_cache():
 
                         # Quote path to handle spaces
                         apps[clean_name] = {"cmd": f'"{full_path}"', "orig_name": name, "icon": icon_path}
+    elif sys.platform == 'darwin':
+        # macOS App Discovery
+        dirs = [
+            "/Applications",
+            "/System/Applications",
+            "/System/Applications/Utilities",
+            os.path.expanduser("~/Applications")
+        ]
+        
+        logging.info("Building App Cache (macOS)...")
+        for d in dirs:
+            if not os.path.exists(d): continue
+            try:
+                for f in os.listdir(d):
+                    if f.endswith(".app"):
+                        name = f[:-4]
+                        clean_name = name.lower()
+                        full_path = os.path.join(d, f)
+                        apps[clean_name] = {"cmd": f'open "{full_path}"', "orig_name": name, "icon": full_path}
+            except Exception as e:
+                logging.error(f"Error scanning {d}: {e}")
+
+        # Add Common System Settings (macOS 13+)
+        settings_map = {
+            "wifi": "x-apple.systempreferences:com.apple.wifi-settings-extension",
+            "bluetooth": "x-apple.systempreferences:com.apple.BluetoothSettings",
+            "network": "x-apple.systempreferences:com.apple.Network-Settings.extension",
+            "sound": "x-apple.systempreferences:com.apple.Sound-Settings.extension",
+            "display": "x-apple.systempreferences:com.apple.Displays-Settings.extension",
+            "wallpaper": "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension",
+            "appearance": "x-apple.systempreferences:com.apple.Appearance-Settings.extension",
+            "accessibility": "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
+            "privacy": "x-apple.systempreferences:com.apple.Privacy-Security-Settings.extension",
+            "security": "x-apple.systempreferences:com.apple.Privacy-Security-Settings.extension",
+            "update": "x-apple.systempreferences:com.apple.Software-Update-Settings.extension",
+            "users": "x-apple.systempreferences:com.apple.Users-Groups-Settings.extension",
+            "battery": "x-apple.systempreferences:com.apple.Battery-Settings.extension",
+            "mouse": "x-apple.systempreferences:com.apple.Mouse-Settings.extension",
+            "trackpad": "x-apple.systempreferences:com.apple.Trackpad-Settings.extension",
+            "keyboard": "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
+            "date": "x-apple.systempreferences:com.apple.Date-Time-Settings.extension",
+            "time": "x-apple.systempreferences:com.apple.Date-Time-Settings.extension",
+            "notifications": "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "focus": "x-apple.systempreferences:com.apple.Focus-Settings.extension",
+        }
+
+        for name, url in settings_map.items():
+            # Prefix with 'settings' to allow searching like "settings wifi"
+            # But also allow direct "wifi"
+            
+            # We'll just add the direct name
+            if name not in apps:
+                apps[name] = {
+                    "cmd": f'open "{url}"',
+                    "orig_name": f"Settings: {name.capitalize()}",
+                    "icon": "/System/Applications/System Settings.app"
+                }
+            
+            # Also add "settings [name]" alias
+            apps[f"settings {name}"] = {
+                "cmd": f'open "{url}"',
+                "orig_name": f"Settings: {name.capitalize()}",
+                "icon": "/System/Applications/System Settings.app"
+            }
+
     else:
         # Common locations for .desktop files
         dirs = [

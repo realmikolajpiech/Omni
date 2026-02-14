@@ -9,7 +9,7 @@ from src.services.llm import model_manager
 from src.services.llm.chat import process_chat_request, perform_calculation, should_see_screen
 from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
-from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata
+from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata, get_app_cache
 from src.services.system.installer import generate_install_plan, log_debug
 
 api_bp = Blueprint('api', __name__)
