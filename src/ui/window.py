@@ -146,6 +146,7 @@ class OmniWindow(QWidget):
             self.logo_label.setPixmap(logo_pix.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         self.input_field = QLineEdit()
+        self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.input_field.setPlaceholderText("Search or ask...")
         self.input_field.textChanged.connect(self.on_text_changed)
         self.input_field.returnPressed.connect(self.on_entered)
@@ -204,14 +205,7 @@ class OmniWindow(QWidget):
                 background-color: rgba(255, 255, 255, 0.15);
                 border-radius: 16px;
             }
-            QListWidget::item:hover {
-                background-color: rgba(255, 255, 255, 0.15);
-                border-radius: 16px;
-            }
-            QListWidget::item:selected:hover {
-                background-color: rgba(255, 255, 255, 0.15);
-                border-radius: 16px;
-            }
+            /* Hover style removed to prevent double-highlight during keyboard nav */
             QListWidget::item:focus {
                 background-color: rgba(255, 255, 255, 0.15);
                 outline: none;
@@ -610,6 +604,8 @@ class OmniWindow(QWidget):
         if hasattr(self, 'anim_group'): self.anim_group.stop()
         if hasattr(self, 'anim_close_group'): self.anim_close_group.stop()
         
+        self._is_closing = False # Reset closing flag in case we interrupted a close animation
+        
         self.is_history_mode = False
         self.follow_up_widget.set_active(False)
         self.frame.set_minimal_mode(True) # Minimal mode for search
@@ -631,7 +627,9 @@ class OmniWindow(QWidget):
     def toggle_visibility_safe(self, source="manual"):
         logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}, Source: {source}")
         
-        if self.isVisible():
+        # Check if visible AND not currently closing.
+        # If it's closing (animating out), we treat it as 'hidden' so we can immediately reopen it.
+        if self.isVisible() and not self._is_closing:
             # If already visible...
             if source == "voice":
                 # If voice triggered it again, just ensure we are listening (don't close)
@@ -795,7 +793,7 @@ class OmniWindow(QWidget):
                 list_h += item.sizeHint().height()
             
             base_h = 84 
-            extra_padding = 30
+            extra_padding = 12
             
             # Dynamic height calculation to prevent going behind taskbar
             screen = QGuiApplication.screenAt(self.pos()) or QApplication.primaryScreen()
@@ -825,6 +823,12 @@ class OmniWindow(QWidget):
         if current_h != new_h:
             # If we are already animating, force animation to continue to avoid snapping
             if self.anim.state() == QPropertyAnimation.State.Running:
+                # OPTIMIZATION: If already animating to the exact same height, do nothing.
+                # This prevents "jitters" when typing fast where height doesn't change but text does.
+                current_end = self.anim.endValue()
+                if isinstance(current_end, QRect) and current_end.height() == new_h:
+                    return
+
                 animate = True
             
             # Force animation when expanding from base state (e.g. first character typed)
@@ -913,20 +917,7 @@ class OmniWindow(QWidget):
                 
                 # Check if we are streaming response
                 if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
-                    logging.info("Stopping AI stream...")
-                    # Abort the worker
-                    import src.services.llm.model_manager as mm
-                    mm.abort_fast_event.set()
-                    
-                    # Force stop worker thread safely
-                    try:
-                        self.ai_worker.finished.disconnect()
-                        self.ai_worker.partial_response.disconnect()
-                    except: pass
-                    self.ai_worker.terminate()
-                    self.ai_worker.wait()
-                    self.ai_worker = None
-                    self.logo_label.stop_spinning()
+                    self.abort_ai_generation()
                     return True
 
                 if self.is_history_mode:
@@ -1107,6 +1098,12 @@ class OmniWindow(QWidget):
         
         if event.key() == Qt.Key.Key_Escape:
             logging.info("Escape key pressed (Global)")
+            
+            # Check if we are streaming response (Global Handler)
+            if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
+                self.abort_ai_generation()
+                return
+
             if self.is_history_mode:
                 self.reset_to_search_mode()
             else:
@@ -1147,7 +1144,7 @@ class OmniWindow(QWidget):
         self.local_file_results = []
         
         self.frame.set_minimal_mode(True)
-        self.refresh_list(text)
+        self.refresh_list(text, animate=True)
         self.debounce_timer.start()
 
     def refresh_list(self, query, animate=True):
@@ -1226,7 +1223,8 @@ class OmniWindow(QWidget):
         # Always add "Ask Omni" option at the end if there is a query
         if query:
             key = "ask_omni"
-            data = {"type": "ask_omni", "query": query}
+            is_only_item = (len(new_items_data) == 0)
+            data = {"type": "ask_omni", "query": query, "is_only_item": is_only_item}
             
             def create_omni_widget(q=query):
                 return StandardItemWidget(f"Ask Omni: {q}", icon_name=LOGO_PATH)
@@ -1288,6 +1286,9 @@ class OmniWindow(QWidget):
                 # Update data just in case
                 current_item.setData(Qt.ItemDataRole.UserRole, data)
                 
+
+
+                
             else:
                 # MISMATCH
                 if key in existing:
@@ -1303,6 +1304,8 @@ class OmniWindow(QWidget):
                         widget.set_theme(self.current_theme)
                     new_item.setSizeHint(widget.sizeHint())
                     new_item.setData(Qt.ItemDataRole.UserRole, data)
+                    
+
                     
                     self.list_widget.insertItem(i, new_item)
                     
@@ -1322,6 +1325,8 @@ class OmniWindow(QWidget):
                     new_item.setSizeHint(widget.sizeHint())
                     new_item.setData(Qt.ItemDataRole.UserRole, data)
                     
+
+                    
                     self.list_widget.insertItem(i, new_item)
                     
                     anim_w = SmoothEntryWidget(widget, animate=True)
@@ -1337,6 +1342,8 @@ class OmniWindow(QWidget):
         # Disable selection for thinking, answer, separator items
         if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
              item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+             
+
              
         self.list_widget.addItem(item)
         
@@ -1354,6 +1361,8 @@ class OmniWindow(QWidget):
         # Disable selection for thinking, answer, separator items
         if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
              item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+             
+
              
         self.list_widget.insertItem(index, item)
         
@@ -1546,9 +1555,60 @@ class OmniWindow(QWidget):
         self.install_worker.finished.connect(self.install_widget.set_finished)
         self.install_worker.start()
 
+    def abort_ai_generation(self):
+        """Abort current AI generation and restore UI state."""
+        if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
+            logging.info("Aborting AI stream...")
+            
+            # Abort the worker
+            import src.services.llm.model_manager as mm
+            mm.abort_fast_event.set()
+            
+            # Force stop worker thread safely
+            try:
+                self.ai_worker.finished.disconnect()
+                self.ai_worker.partial_response.disconnect()
+            except: pass
+            
+            # Use terminate() but don't wait() immediately on main thread to avoid freeze
+            # if the worker is stuck in a GIL-holding operation or I/O
+            self.ai_worker.terminate()
+            
+            # Move cleanup to a short timer or just let it die
+            self.ai_worker.wait(100) # Wait max 100ms
+            
+            self.ai_worker = None
+            self.logo_label.stop_spinning()
+            
+            # Re-enable input (resets color)
+            self.input_field.setReadOnly(False)
+            
+            # Remove "thinking" widgets
+            for i in range(self.list_widget.count() - 1, -1, -1):
+                item = self.list_widget.item(i)
+                role = item.data(Qt.ItemDataRole.UserRole)
+                if role == "thinking":
+                    self.list_widget.takeItem(i)
+
+            # Restore UI state
+            if not self.is_history_mode:
+                # If we were not in history mode, go back to minimal/search mode
+                self.frame.set_minimal_mode(True)
+                # Restore search results for the current query
+                self.refresh_list(self.input_field.text(), animate=True)
+            else:
+                # In history mode, just ensure height is correct after removing thinking
+                self.adjust_window_height(animate=True)
+            
+            return True
+        return False
+
     def perform_ai_query(self, query):
         # Stop debounce timer to prevent new fast searches from starting
         self.debounce_timer.stop()
+
+        # Disable input while thinking
+        self.input_field.setReadOnly(True)
 
         # Cancel any pending fast search/action requests to prevent race conditions and save resources
         self.cleanup_worker('search_worker')
@@ -1775,6 +1835,7 @@ class OmniWindow(QWidget):
 
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
+        self.input_field.setReadOnly(False)
 
         # Check if we already have a streaming answer widget
         has_streaming_answer = False

@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QListWidget, QAbstractItemView, QStyledItemDelegate, QStyle
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer
 
 class SelectiveHoverDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -20,10 +20,18 @@ class SelectiveHoverDelegate(QStyledItemDelegate):
         if self._parent_list and getattr(self._parent_list, '_keyboard_locked', False):
             # If keyboard is locked, force remove MouseOver state from ALL items
             option.state &= ~QStyle.StateFlag.State_MouseOver
+            # Also clear the HasFocus state if it's not the selected item?
+            # No, keep it simple first.
+            # print(f"DEBUG: Keyboard Locked. Removing MouseOver from row {index.row()}. New state: {option.state}")
 
         # If it's thinking or answer, we clear the hover/selected state from option
         # This prevents the QListWidget stylesheet from applying the background
         if role_type in ['thinking', 'answer', 'separator', 'history_ai']:
+            option.state &= ~QStyle.StateFlag.State_MouseOver
+            option.state &= ~QStyle.StateFlag.State_Selected
+            option.state &= ~QStyle.StateFlag.State_HasFocus
+            
+        if role_type == 'ask_omni' and isinstance(data, dict) and data.get('is_only_item'):
             option.state &= ~QStyle.StateFlag.State_MouseOver
             option.state &= ~QStyle.StateFlag.State_Selected
             option.state &= ~QStyle.StateFlag.State_HasFocus
@@ -48,6 +56,7 @@ class SmoothScrollListWidget(QListWidget):
         
         # Track keyboard vs mouse selection
         self._keyboard_locked = False  # When True, ignore mouse hover
+        self._last_mouse_pos = None
         self.itemEntered.connect(self._on_item_entered)
     
     def _on_item_entered(self, item):
@@ -66,15 +75,28 @@ class SmoothScrollListWidget(QListWidget):
 
     def mouseMoveEvent(self, event):
         """Handle mouse movement - unlocks keyboard lock."""
-        # Only unlock if mouse actually moved significantly or entered new item
-        # But here we just unlock to allow hover effects to resume
+        curr_pos = event.position().toPoint()
+        
+        # If we haven't tracked a position yet (first move), assume this is the start
+        if self._last_mouse_pos is None:
+            self._last_mouse_pos = curr_pos
+        
         if self._keyboard_locked:
+            # Check for significant movement (jitter protection)
+            if self._last_mouse_pos:
+                dist = (curr_pos - self._last_mouse_pos).manhattanLength()
+                if dist < 5: # Increased threshold slightly
+                    return
+
             self._keyboard_locked = False
+            self.viewport().update()
+            
             # Force re-evaluation of hover state under cursor
-            item = self.itemAt(event.position().toPoint())
+            item = self.itemAt(curr_pos)
             if item:
                 self._on_item_entered(item)
-                
+        
+        self._last_mouse_pos = curr_pos
         super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
@@ -109,6 +131,20 @@ class SmoothScrollListWidget(QListWidget):
         if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
             # Keyboard navigation locks out the mouse cursor
             self._keyboard_locked = True
+            
+            # Capture current mouse position to prevent immediate unlock on accidental jitter
+            from PyQt6.QtGui import QCursor
+            # Map global cursor to local coordinates for consistency with mouseMoveEvent
+            global_pos = QCursor.pos()
+            local_pos = self.mapFromGlobal(global_pos)
+            self._last_mouse_pos = local_pos
+            
+            # Force update of the viewport to apply the delegate change immediately
+            # We schedule it for next loop to ensure state is propagated
+            QTimer.singleShot(0, self.viewport().update)
+            
+            # Also update immediately
+            self.viewport().update()
             
             # When using keyboard, we want to ensure the selection is visually clear
             # The style sheet handles selected:!active vs selected:active

@@ -2,7 +2,7 @@
 THEMES = {
     "dark": {
         "text_primary": "#FFFFFF",
-        "text_secondary": "#FFFFFF", # Changed from #AAAAAA to #FFFFFF for better visibility
+        "text_secondary": "#AAAAAA", # Changed back to #AAAAAA for gray styling
         "text_input": "#FFFFFF",
         "placeholder": "rgba(255, 255, 255, 0.6)", # Increased opacity from 0.3
         "selection_bg": "#444444",
@@ -29,9 +29,9 @@ THEMES = {
         "list_item_selected": "rgba(0, 0, 0, 0.10)",
         "scrollbar_handle": "#26000000", # rgba(0, 0, 0, 0.15)
         "border_color": "#1E000000", # rgba(0, 0, 0, 30/255=0.11) -> 0x1E=30
-        "base_fill_color": "#80FFFFFF", # Semi-transparent white overlay (50%)
-        "glass_tint_white": 0.95,
-        "glass_tint_alpha": 0.35,
+        "base_fill_color": "#40FFFFFF", # Semi-transparent white overlay (25%)
+        "glass_tint_white": 0.90,
+        "glass_tint_alpha": 0.20,
         "selection_border": "rgba(0, 0, 0, 0.15)"
     }
 }
@@ -64,7 +64,8 @@ QWidget#ContentFrame {{
 /* Input Field - Editorial Style */
 QLineEdit {{
     background-color: transparent;
-    border: none;
+    border: 1px solid transparent;
+    outline: none;
     padding: 12px 16px;
     font-family: "Instrument Serif";
     font-style: italic;
@@ -72,6 +73,15 @@ QLineEdit {{
     color: {t['text_input']};
     selection-background-color: {t['selection_bg']};
     selection-color: {t['selection_text']};
+}}
+
+QLineEdit:focus {{
+    border: 1px solid transparent;
+    outline: none;
+}}
+
+QLineEdit[readOnly="true"] {{
+    color: {t['text_secondary']};
 }}
 
 QLineEdit::placeholder {{
@@ -93,6 +103,7 @@ QListWidget {{
     background-color: transparent;
     border: none;
     padding: 12px 16px;
+    outline: none; /* Removes the dotted focus line */
 }}
 
 QListWidget::item {{
@@ -102,6 +113,8 @@ QListWidget::item {{
     color: {t['text_primary']};
     font-family: "Manrope";
     font-size: 15px;
+    /* Explicitly set border to none for non-selected items to avoid layout shift */
+    border: 1px solid transparent; 
 }}
 
 QListWidget::item:selected {{
@@ -122,11 +135,21 @@ QListWidget::item:selected:!active {{
     border: 1px solid {t['selection_border']};
 }}
 
+/* 
+   UPDATE: We removed :hover style because "Hover IS Selection".
+   If we have both :selected and :hover, and we move selection with keyboard,
+   the item under mouse stays :hover but not :selected, causing double highlight.
+   By removing :hover style, only the Selected item is highlighted.
+   Since hovering an item triggers selection (via _on_item_entered), 
+   mouse users still get the highlight.
+*/
+/*
 QListWidget::item:hover {{
     background-color: {t['list_item_selected']};
     color: {t['text_primary']};
     border: 1px solid {t['selection_border']};
 }}
+*/
 
 /* Custom Scrollbar - Invisible but functional */
 QScrollBar:vertical {{

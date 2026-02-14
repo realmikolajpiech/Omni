@@ -30,10 +30,6 @@ class LinkActionWidget(QWidget):
                 border-radius: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.4);
             }
-            QWidget#ActionCard:hover {
-                background-color: rgba(255, 255, 255, 0.45);
-                border: 1px solid rgba(255, 255, 255, 0.6);
-            }
         """)
         
         card_layout = QVBoxLayout(self.card)
@@ -123,10 +119,6 @@ class LinkActionWidget(QWidget):
                 background-color: {bg};
                 border-radius: 16px;
                 border: 1px solid {border};
-            }}
-            QWidget#ActionCard:hover {{
-                background-color: {hover_bg};
-                border: 1px solid {hover_border};
             }}
         """)
         
@@ -315,10 +307,6 @@ class FileActionWidget(QWidget):
                 border-radius: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.4);
             }
-            QWidget#ActionCard:hover {
-                background-color: rgba(255, 255, 255, 0.45);
-                border: 1px solid rgba(255, 255, 255, 0.6);
-            }
         """)
         
         card_layout = QVBoxLayout(self.card)
@@ -492,10 +480,6 @@ class FileActionWidget(QWidget):
                 background-color: {bg};
                 border-radius: 16px;
                 border: 1px solid {border};
-            }}
-            QWidget#ActionCard:hover {{
-                background-color: {hover_bg};
-                border: 1px solid {hover_border};
             }}
         """)
         
@@ -794,10 +778,6 @@ class PersonActionWidget(QWidget):
                 border-radius: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.4);
             }
-            QWidget#ActionCard:hover {
-                background-color: rgba(255, 255, 255, 0.45);
-                border: 1px solid rgba(255, 255, 255, 0.6);
-            }
         """)
 
         card_layout = QHBoxLayout(self.card)
@@ -896,10 +876,6 @@ class PersonActionWidget(QWidget):
                 background-color: {bg};
                 border-radius: 16px;
                 border: 1px solid {border};
-            }}
-            QWidget#ActionCard:hover {{
-                background-color: {hover_bg};
-                border: 1px solid {hover_border};
             }}
         """)
         

@@ -120,7 +120,7 @@ class ThinkingWidget(QWidget):
 
         # self.header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Entire widget ignores mouse
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.content_label = QLabel(text if text else "")
         self.content_label.setWordWrap(True)
@@ -130,10 +130,6 @@ class ThinkingWidget(QWidget):
         self.main_layout.addWidget(self.header)
         self.main_layout.addWidget(self.content_label)
         self.update_style()
-
-    def mousePressEvent(self, event):
-        self.toggle_expand(event)
-        super().mousePressEvent(event)
 
     def update_style(self):
         t = THEMES.get(self.current_theme, THEMES["light"])
@@ -157,21 +153,6 @@ class ThinkingWidget(QWidget):
             h += self.content_label.heightForWidth(580) + 16
         return QSize(w, h)
 
-    def toggle_expand(self, event):
-        self.is_expanded = not self.is_expanded
-        self.content_label.setHidden(not self.is_expanded)
-        self.update_item_size()
-
-    def update_item_size(self):
-        list_widget = self.window().findChild(QListWidget)
-        if list_widget:
-            for i in range(list_widget.count()):
-                item = list_widget.item(i)
-                if list_widget.itemWidget(item) == self:
-                    item.setSizeHint(self.sizeHint())
-                    break
-            if hasattr(self.window(), "adjust_window_height"):
-                self.window().adjust_window_height()
 
 class SeparatorWidget(QWidget):
     def __init__(self, parent=None):
@@ -324,7 +305,7 @@ class CollapsibleThinkingWidget(QWidget):
 
         font = QFont("Manrope", 12, QFont.Weight.Normal)
         self.thinking_text.setFont(font)
-        self.thinking_text.document().setTextWidth(620)
+        self.thinking_text.document().setTextWidth(580)
         self.thinking_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
         content_layout.addWidget(self.thinking_text)
@@ -338,6 +319,15 @@ class CollapsibleThinkingWidget(QWidget):
 
     def update_style(self):
         t = THEMES.get(self.current_theme, THEMES["light"])
+        
+        # Use a distinct gray for thinking process to differentiate from main content
+        if self.current_theme == "dark":
+            thinking_color = "#888888"
+            hover_color = "#AAAAAA"
+        else:
+            thinking_color = "#666666"
+            hover_color = "#333333"
+
         self.header_button.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
@@ -347,16 +337,16 @@ class CollapsibleThinkingWidget(QWidget):
                 font-family: Manrope;
                 font-size: 12px;
                 font-weight: 500;
-                color: {t['text_secondary']};
+                color: {thinking_color};
             }}
             QPushButton:hover {{
-                color: {t['text_primary']};
+                color: {hover_color};
             }}
             QPushButton:checked {{
-                color: {t['text_primary']};
+                color: {hover_color};
             }}
         """)
-        self.thinking_text.setStyleSheet(f"QTextEdit {{ background: transparent; color: {t['text_secondary']}; padding: 0px; margin: 0px; line-height: 1.4; }}")
+        self.thinking_text.setStyleSheet(f"QTextEdit {{ background: transparent; color: {thinking_color}; padding: 0px; margin: 0px; line-height: 1.4; }}")
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -369,11 +359,11 @@ class CollapsibleThinkingWidget(QWidget):
         self._first_thinking_set = False
         
         self.thinking_text.setPlainText(text)
-        self.thinking_text.document().setTextWidth(620)
+        self.thinking_text.document().setTextWidth(580)
         
         # Force height update
         doc_height = self.thinking_text.document().size().height()
-        self.thinking_text.setFixedHeight(int(doc_height + 20))
+        self.thinking_text.setFixedHeight(int(doc_height + 24))
         
         # Ensure widget and button stay enabled and visible
         self.setVisible(True)
@@ -406,8 +396,9 @@ class CollapsibleThinkingWidget(QWidget):
         self.header_button.setChecked(new_visibility)
         
         if new_visibility:
+            self.thinking_text.document().setTextWidth(580)
             doc_height = self.thinking_text.document().size().height()
-            self.thinking_text.setFixedHeight(int(doc_height + 20))
+            self.thinking_text.setFixedHeight(int(doc_height + 24))
             
         self.size_changed.emit()
         self.updateGeometry()
@@ -425,10 +416,10 @@ class CollapsibleThinkingWidget(QWidget):
         base_height = self.header_button.sizeHint().height()
         if self.content_widget.isVisible():
             # Recalculate text width every time for accurate height
-            self.thinking_text.document().setTextWidth(620)
+            self.thinking_text.document().setTextWidth(580)
             content_height = self.thinking_text.document().size().height()
             # Add small padding for breathing room
-            return QSize(660, int(base_height + content_height + 24))
+            return QSize(660, int(base_height + content_height + 40))
         return QSize(660, base_height)
 
 
@@ -461,8 +452,8 @@ class AnswerWidget(QWidget):
 
         self.text_edit.document().setTextWidth(660)
 
-        # Add answer text with stretch
-        self.layout.addWidget(self.text_edit, 1)  # This widget takes remaining space
+        # Add answer text
+        self.layout.addWidget(self.text_edit)
         
         # Add small gray query label
         self.query_label = QLabel(query_text if query_text else "")
@@ -518,13 +509,59 @@ class AnswerWidget(QWidget):
             self.thinking_widget.set_collapsed(collapsed)
             self.update_item_size()
 
+    def sizeHint(self):
+        w = 660 # Default fallback
+        if self.parent() and self.parent().width() > 100:
+             w = self.parent().width()
+        
+        margins = self.layout.contentsMargins()
+        content_width = w - margins.left() - margins.right()
+        
+        h = margins.top() + margins.bottom()
+        
+        if self.thinking_widget and self.thinking_widget.isVisible():
+            h += self.thinking_widget.sizeHint().height()
+            h += self.layout.spacing()
+
+        if self.text_edit.isVisible():
+            self.text_edit.document().setTextWidth(content_width)
+            # Use idealWidth to ensure no wrapping issues? No, textWidth is set.
+            doc_h = self.text_edit.document().size().height()
+            h += int(doc_h)
+            # Force text edit to match content height
+            self.text_edit.setFixedHeight(int(doc_h))
+            
+        if self.query_label.isVisible():
+            h += self.layout.spacing()
+            # Label size hint might not be accurate if word wrap is on, need to set width
+            self.query_label.setFixedWidth(content_width)
+            h += self.query_label.sizeHint().height()
+            
+        return QSize(w, h)
+
     def update_item_size(self):
         """Updates the size hint in the parent QListWidget."""
-        list_widget = self.window().findChild(QListWidget)
+        list_widget = None
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QListWidget):
+                list_widget = parent
+                break
+            parent = parent.parent()
+            
         if list_widget:
+            # Find item corresponding to this widget
+            # Iterate is safer than indexAt/itemAt for widgets in scroll areas
             for i in range(list_widget.count()):
                 item = list_widget.item(i)
-                if list_widget.itemWidget(item) == self:
+                widget = list_widget.itemWidget(item)
+                
+                # Handle SmoothEntryWidget wrapper
+                real_widget = widget
+                if hasattr(widget, 'content_widget'):
+                    real_widget = widget.content_widget
+                    
+                if real_widget == self:
                     item.setSizeHint(self.sizeHint())
                     break
         
@@ -563,7 +600,7 @@ class StandardItemWidget(QWidget):
         super().__init__(parent)
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(24, 0, 24, 0)
-        self.layout.setSpacing(4)
+        self.layout.setSpacing(12) # Increased from 4
         self.current_theme = "light"
         
         self.lbl_icon = QLabel()
@@ -580,6 +617,7 @@ class StandardItemWidget(QWidget):
                 loader.signals.icon_loaded.connect(self.on_icon_loaded)
                 QThreadPool.globalInstance().start(loader)
 
+        self.raw_text = text
         self.lbl_text = QLabel(text)
         if font: self.lbl_text.setFont(font)
         else: self.lbl_text.setFont(QFont("Manrope", 15, QFont.Weight.Medium))
@@ -596,10 +634,25 @@ class StandardItemWidget(QWidget):
         t = THEMES.get(self.current_theme, THEMES["light"])
         self.setStyleSheet("background: transparent;")
         
-        if self.forced_color:
-            self.lbl_text.setStyleSheet(f"color: {self.forced_color};")
+        primary = self.forced_color if self.forced_color else t['text_primary']
+        
+        if self.raw_text.startswith("Ask Omni:"):
+            secondary = t['text_secondary']
+            parts = self.raw_text.split(":", 1)
+            label = parts[0] + ":"
+            query = parts[1] if len(parts) > 1 else ""
+            
+            import html
+            label = html.escape(label)
+            query = html.escape(query)
+            
+            # Use spans for colors
+            self.lbl_text.setText(f'<span style="color: {primary}">{label}</span><span style="color: {secondary}; font-weight: normal;">{query}</span>')
+            # Clear stylesheet color to let HTML styling take precedence
+            self.lbl_text.setStyleSheet("")
         else:
-            self.lbl_text.setStyleSheet(f"color: {t['text_primary']};")
+            self.lbl_text.setText(self.raw_text)
+            self.lbl_text.setStyleSheet(f"color: {primary};")
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -611,7 +664,8 @@ class StandardItemWidget(QWidget):
             self.lbl_icon.setPixmap(icon.pixmap(24, 24))
 
     def set_text(self, text):
-        self.lbl_text.setText(text)
+        self.raw_text = text
+        self.update_style()
 
     def sizeHint(self):
         return QSize(660, 72)
