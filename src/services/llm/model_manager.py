@@ -604,29 +604,46 @@ def ensure_main_model():
 def ensure_model_loaded():
     ensure_fast_model()
     ensure_main_model()
+    ensure_tts_model()
 
 def ensure_tts_model():
     global tts_model
     if tts_model: return
 
-    from src.core.config import TTS_MODEL_ID
+    from src.core.config import TTS_MODEL_ID, PROJECT_ROOT
     
+    if not TTS_MODEL_ID:
+        return # Skip if no model configured
+
     with tts_lock:
         if tts_model: return
         logging.info(f"Loading TTS Model: {TTS_MODEL_ID}")
         try:
-            from transformers import AutoTokenizer, AutoModel
-            
-            tokenizer = AutoTokenizer.from_pretrained(TTS_MODEL_ID, trust_remote_code=True)
-            # Use AutoModel to handle custom architectures (like Qwen3-TTS if it differs from VitsModel)
-            model = AutoModel.from_pretrained(TTS_MODEL_ID, trust_remote_code=True)
-            
-            if torch.cuda.is_available():
-                model = model.to("cuda")
-            elif sys.platform == "darwin" and torch.backends.mps.is_available():
-                model = model.to("mps")
+            if "kokoro" in TTS_MODEL_ID.lower():
+                # Ensure HF_HOME is set to project data dir to avoid permission issues
+                os.environ["HF_HOME"] = os.path.join(PROJECT_ROOT, "data", "hf_cache")
                 
-            tts_model = {"model": model, "tokenizer": tokenizer}
-            logging.info("TTS Model Loaded.")
+                from kokoro import KPipeline
+                # Initialize Kokoro Pipeline
+                # lang_code='a' is American English. 
+                pipeline = KPipeline(lang_code='a') 
+                tts_model = {"pipeline": pipeline, "type": "kokoro"}
+                logging.info("Kokoro TTS Model Loaded.")
+            else:
+                from transformers import SpeechT5Processor, SpeechT5ForTextToSpeech, SpeechT5HifiGan
+                
+                processor = SpeechT5Processor.from_pretrained(TTS_MODEL_ID)
+                model = SpeechT5ForTextToSpeech.from_pretrained(TTS_MODEL_ID)
+                vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan")
+                
+                if torch.cuda.is_available():
+                    model = model.to("cuda")
+                    vocoder = vocoder.to("cuda")
+                elif sys.platform == "darwin" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    model = model.to("mps")
+                    vocoder = vocoder.to("mps")
+                    
+                tts_model = {"model": model, "processor": processor, "vocoder": vocoder, "type": "transformers"}
+                logging.info("TTS Model Loaded (Transformers).")
         except Exception as e:
             logging.error(f"TTS Model Load Error: {e}")

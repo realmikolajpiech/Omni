@@ -8,22 +8,27 @@ command_exists() {
 }
 
 # Determine Python command
-# Check if venv exists and use it
-if [ -d "venv" ]; then
-    PYTHON_CMD="./venv/bin/python3"
-# Check for Python 3.12 (Homebrew) first
-elif command -v python3.12 >/dev/null 2>&1; then
-    PYTHON_CMD=python3.12
-elif [ -f "$(brew --prefix)/bin/python3.12" ]; then
-    PYTHON_CMD="$(brew --prefix)/bin/python3.12"
-elif command_exists python3; then
-    PYTHON_CMD=python3
-elif command_exists python; then
-    PYTHON_CMD=python
-else
-    echo "Error: Python is not installed."
-    exit 1
+# Check if venv exists
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment..."
+    # Try to find a good python3
+    if command -v python3.12 >/dev/null 2>&1; then
+        SYSTEM_PYTHON=python3.12
+    elif command -v python3 >/dev/null 2>&1; then
+        SYSTEM_PYTHON=python3
+    else
+        echo "Error: Python 3 is required but not found."
+        exit 1
+    fi
+    
+    $SYSTEM_PYTHON -m venv venv
+    if [ $? -ne 0 ]; then
+        echo "Error creating virtual environment."
+        exit 1
+    fi
 fi
+
+PYTHON_CMD="./venv/bin/python3"
 
 # Check dependencies
 echo "Checking dependencies..."

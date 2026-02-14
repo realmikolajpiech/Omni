@@ -24,7 +24,6 @@ from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, Smooth
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
                                        RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader, MicWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
-from src.ui.widgets.settings_panel import SettingsPanel
 
 from src.ui.workers.ai_worker import AIWorker
 from src.ui.workers.search_worker import SearchWorker
@@ -32,6 +31,7 @@ from src.ui.workers.action_worker import ActionWorker
 from src.ui.workers.screenshot_worker import ScreenshotWorker
 from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker
 from src.ui.workers.file_search_worker import FileSearchWorker
+from src.ui.workers.tts_worker import TTSWorker
 
 try:
     from BlurWindow.blurWindow import blur
@@ -94,6 +94,8 @@ class OmniWindow(QWidget):
     def __init__(self):
         super().__init__()
         
+        self.old_workers = []  # Keep references to running workers to prevent QThread destruction crash
+        
         self.toggle_requested.connect(self.toggle_visibility_safe)
         
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -130,11 +132,6 @@ class OmniWindow(QWidget):
         
         frame_layout.addWidget(self.content_frame)
 
-        self.settings_panel = SettingsPanel()
-        self.settings_panel.hide()
-        self.settings_panel.back_requested.connect(self.exit_settings_mode)
-        frame_layout.addWidget(self.settings_panel)
-
         self.input_container = QWidget()
         self.input_container.setFixedHeight(84) # Increased height to prevent clipping
         input_layout = QHBoxLayout(self.input_container)
@@ -143,7 +140,7 @@ class OmniWindow(QWidget):
 
         self.logo_label = RotatingLabel()
         self.logo_label.setFixedSize(50, 50)
-        self.logo_label.right_clicked.connect(self.enter_settings_mode)
+        # self.logo_label.right_clicked.connect(self.enter_settings_mode)
         logo_pix = QPixmap(LOGO_PATH)
         if not logo_pix.isNull():
             self.logo_label.setPixmap(logo_pix.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -231,7 +228,7 @@ class OmniWindow(QWidget):
 
         self.chat_history = []  
         self.is_history_mode = False
-        self.is_settings_mode = False
+        # self.is_settings_mode = False
 
         self.apps = self.load_apps()
         self.is_entry_animating = False
@@ -246,6 +243,8 @@ class OmniWindow(QWidget):
         self.action_worker = None
         self.ai_worker = None
         self.file_search_worker = None
+        self.tts_worker = None
+        self.is_tts_playing = False
 
         self.current_theme = "dark" # Default
         
@@ -630,10 +629,20 @@ class OmniWindow(QWidget):
         self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self, source="manual"):
-        logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}")
+        logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}, Source: {source}")
+        
         if self.isVisible():
-            self.animate_close()
-            # UDP command moved to animate_close to cover all closing paths (Escape, etc.)
+            # If already visible...
+            if source == "voice":
+                # If voice triggered it again, just ensure we are listening (don't close)
+                logging.info("Window already visible, voice trigger -> ensuring LISTENING mode")
+                self.send_udp_command("SET_MODE:LISTENING")
+                self.mic_widget.set_active(True)
+                # Maybe flash the logo or UI to acknowledge?
+                self.logo_label.boost_speed()
+            else:
+                # Manual toggle (hotkey/tray) -> Close
+                self.animate_close()
         else:
             self.reset_to_search_mode(animate=False)
             self.chat_history = [] # Start clean
@@ -661,9 +670,11 @@ class OmniWindow(QWidget):
 
     def toggle_listening(self):
         if self.mic_widget.active:
-            # Stop listening -> Go to PAUSED (since window is visible)
-            self.send_udp_command("SET_MODE:PAUSED")
+            # Stop listening -> Commit Audio (Process what was said)
+            self.send_udp_command("COMMIT_AUDIO")
             self.mic_widget.set_active(False)
+            # Since user manually recorded, we treat this as a voice query for TTS purposes
+            self.voice_triggered_query = True
         else:
             # Start listening -> Go to LISTENING
             self.send_udp_command("SET_MODE:LISTENING")
@@ -676,6 +687,8 @@ class OmniWindow(QWidget):
         elif status == "PAUSED":
             self.mic_widget.set_active(False)
             self.input_field.setPlaceholderText("Search or ask...")
+            # If we were expecting a voice query but it was just paused without query, maybe reset?
+            # But handle_ipc_query will come later if query was found.
         elif status == "IDLE":
             # Should happen when window is hidden, but if it happens while visible,
             # it means we are waiting for wake word.
@@ -704,9 +717,13 @@ class OmniWindow(QWidget):
         self.raise_()
         self.activateWindow()
         
+        # Clean up query if it has VOICE: prefix
+        if query.startswith("VOICE:"):
+            query = query[6:]
+            self.voice_triggered_query = True
+        
         # Set text and submit
         self.input_field.setText(query)
-        self.voice_triggered_query = True
         self.perform_ai_query(query)
 
     def animate_entry(self):
@@ -761,7 +778,7 @@ class OmniWindow(QWidget):
         self.raise_()
 
     def adjust_window_height(self, animate=True):
-        if self.is_settings_mode: return
+        # if self.is_settings_mode: return
 
         if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
             # Don't interrupt entry animation
@@ -822,80 +839,38 @@ class OmniWindow(QWidget):
             else:
                 self.setGeometry(self.x(), self.y(), self.width(), new_h)
 
-    def enter_settings_mode(self):
-        if self.is_settings_mode: return
-        self.is_settings_mode = True
+    def on_deactivate(self):
+        # Called when window loses focus
+        # On macOS, clicking outside the window (e.g. on desktop) triggers this.
+        # We want to close the window, but ensure we switch back to IDLE mode.
         
-        # Stop any ongoing animations
-        if hasattr(self, 'anim'): self.anim.stop()
-        
-        # Fade out content
-        self.content_frame_effect = QGraphicsOpacityEffect(self.content_frame)
-        self.content_frame.setGraphicsEffect(self.content_frame_effect)
-        
-        self.anim_out = QPropertyAnimation(self.content_frame_effect, b"opacity")
-        self.anim_out.setDuration(200)
-        self.anim_out.setStartValue(1.0)
-        self.anim_out.setEndValue(0.0)
-        self.anim_out.finished.connect(self._switch_to_settings)
-        self.anim_out.start()
+        # Prevent closing if Mic is active (User is speaking)
+        if self.mic_widget.active:
+            logging.info("Window deactivated but Mic is active - keeping window open.")
+            return
+            
+        # Prevent closing if TTS is playing (Assistant is speaking)
+        if self.is_tts_playing:
+             logging.info("Window deactivated but TTS is playing - keeping window open.")
+             return
+             
+        # Prevent closing if AI is thinking
+        if self.ai_worker and self.ai_worker.isRunning():
+             logging.info("Window deactivated but AI is thinking - keeping window open.")
+             return
 
-    def _switch_to_settings(self):
-        self.content_frame.hide()
-        self.content_frame.setGraphicsEffect(None)
-        
-        self.settings_panel.show()
-        
-        # Resize for settings
-        target_h = 550
-        self.anim.setStartValue(self.geometry())
-        self.anim.setEndValue(QRect(self.x(), self.y(), self.width(), target_h))
-        self.anim.start()
-        
-        # Fade in settings
-        self.settings_effect = QGraphicsOpacityEffect(self.settings_panel)
-        self.settings_panel.setGraphicsEffect(self.settings_effect)
-        
-        self.anim_in = QPropertyAnimation(self.settings_effect, b"opacity")
-        self.anim_in.setDuration(300)
-        self.anim_in.setStartValue(0.0)
-        self.anim_in.setEndValue(1.0)
-        self.anim_in.start()
+        if self.isVisible() and not self.is_entry_animating:
+            self.animate_close()
 
-    def exit_settings_mode(self):
-        # Reverse animation
-        self.settings_effect = QGraphicsOpacityEffect(self.settings_panel)
-        self.settings_panel.setGraphicsEffect(self.settings_effect)
-        
-        self.anim_out = QPropertyAnimation(self.settings_effect, b"opacity")
-        self.anim_out.setDuration(200)
-        self.anim_out.setStartValue(1.0)
-        self.anim_out.setEndValue(0.0)
-        self.anim_out.finished.connect(self._switch_to_content)
-        self.anim_out.start()
-        
-    def _switch_to_content(self):
-        self.settings_panel.hide()
-        self.settings_panel.setGraphicsEffect(None)
-        self.is_settings_mode = False
-        
-        self.content_frame.show()
-        self.adjust_window_height() # Reset height
-        
-        self.content_frame_effect = QGraphicsOpacityEffect(self.content_frame)
-        self.content_frame.setGraphicsEffect(self.content_frame_effect)
-        
-        self.anim_in = QPropertyAnimation(self.content_frame_effect, b"opacity")
-        self.anim_in.setDuration(300)
-        self.anim_in.setStartValue(0.0)
-        self.anim_in.setEndValue(1.0)
-        self.anim_in.finished.connect(lambda: self.content_frame.setGraphicsEffect(None))
-        self.anim_in.start()
+    def event(self, event):
+        # Detect deactivation (focus loss)
+        if event.type() == QEvent.Type.WindowDeactivate:
+             self.on_deactivate()
+        return super().event(event)
 
     def eventFilter(self, obj, event):
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Down:
-                # Navigate down in list
                 current_row = self.list_widget.currentRow()
                 if current_row < 0 and self.list_widget.count() > 0:
                     # No current selection, select first
@@ -1029,6 +1004,10 @@ class OmniWindow(QWidget):
                 first = False
         
         self.adjust_window_height()
+
+    def on_tts_finished(self):
+        self.is_tts_playing = False
+        logging.info("TTS Finished")
 
     def animate_close(self):
         if self._is_closing: return
@@ -1382,32 +1361,40 @@ class OmniWindow(QWidget):
         anim_w = SmoothEntryWidget(widget)
         self.list_widget.setItemWidget(item, anim_w)
 
+    def cleanup_worker(self, attr_name):
+        """Safely cleanup a worker thread by keeping a reference if it's still running."""
+        worker = getattr(self, attr_name, None)
+        if worker:
+            # Disconnect all signals to avoid side effects
+            try: worker.disconnect()
+            except: pass
+            
+            if worker.isRunning():
+                self.old_workers.append(worker)
+                # Connect finished signal to remove from old_workers list
+                # Use default arg to capture 'worker' variable
+                worker.finished.connect(lambda w=worker: self.old_workers.remove(w) if w in self.old_workers else None)
+            
+            setattr(self, attr_name, None)
+
     def trigger_async_searches(self):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
 
         # Start Search Worker
-        if self.search_worker:
-            try: self.search_worker.results_found.disconnect()
-            except: pass
-        # DO NOT terminate() - it can cause deadlocks if the worker holds a lock
+        self.cleanup_worker('search_worker')
         self.search_worker = SearchWorker(query)
         self.search_worker.results_found.connect(self.on_search_results)
         self.search_worker.start()
 
         # Start Action Worker
-        if self.action_worker:
-            try: self.action_worker.action_found.disconnect()
-            except: pass
-        # Disconnect any previous workers still running to ignore their results
+        self.cleanup_worker('action_worker')
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
         
         # Start File Search Worker (NEW) - OPTIMIZED FOR SPEED
-        if self.file_search_worker:
-            try: self.file_search_worker.results_found.disconnect()
-            except: pass
+        self.cleanup_worker('file_search_worker')
         self.file_search_worker = FileSearchWorker(query, max_results=8)  # Reduced for speed
         self.file_search_worker.results_found.connect(self.on_file_search_results)
         self.file_search_worker.start()
@@ -1564,13 +1551,9 @@ class OmniWindow(QWidget):
         self.debounce_timer.stop()
 
         # Cancel any pending fast search/action requests to prevent race conditions and save resources
-        if self.search_worker:
-            try: self.search_worker.results_found.disconnect()
-            except: pass
-            
-        if self.action_worker:
-            try: self.action_worker.action_found.disconnect()
-            except: pass
+        self.cleanup_worker('search_worker')
+        self.cleanup_worker('action_worker')
+        self.cleanup_worker('file_search_worker')
         
         # Signal workers to abort if they support it
         import src.services.llm.model_manager as mm
@@ -1588,6 +1571,10 @@ class OmniWindow(QWidget):
         # Only show query text if it's a followup
         thinking_text = query if is_followup else ""
         self.thinking_widget = ThinkingWidget(thinking_text)
+        
+        # Initialize streaming TTS state
+        self.tts_buffer = ""
+        self.tts_spoken_len = 0
         
         if is_followup:
             # For followup thinking, we want:
@@ -1648,6 +1635,7 @@ class OmniWindow(QWidget):
             self.start_ai_worker(self.input_field.text(), None)
 
     def start_ai_worker(self, query, screenshot_b64):
+        self.cleanup_worker('ai_worker')
         self.ai_worker = AIWorker(query, self.chat_history, screenshot_b64)
         self.ai_worker.finished.connect(self.on_ai_response)
         self.ai_worker.partial_response.connect(self.on_partial_response)
@@ -1668,6 +1656,47 @@ class OmniWindow(QWidget):
 
         thinking = data.get("thinking", "")
         answer = data.get("answer", "")
+        
+        # Streaming TTS Logic
+        if self.voice_triggered_query and answer:
+            if not self.tts_worker or not self.tts_worker.isRunning():
+                self.cleanup_worker('tts_worker')
+                self.tts_worker = TTSWorker() # Initialize empty streaming worker
+                self.tts_worker.finished_speaking.connect(self.on_tts_finished)
+                self.tts_worker.start()
+                self.is_tts_playing = True
+            
+            # Get new content
+            if len(answer) > self.tts_spoken_len:
+                new_content = answer[self.tts_spoken_len:]
+                self.tts_buffer += new_content
+                self.tts_spoken_len = len(answer)
+                
+                # Check for sentence boundaries
+                # Split by punctuation (. ! ?) followed by space or newline
+                # We use regex capture group to keep the delimiter
+                import re
+                
+                # More robust splitting to catch "Hello, how are you?" etc.
+                # Don't split on comma alone as it breaks flow too much, but .!? is good.
+                # User wants faster TTS start, so we include comma/colon/semicolon too.
+                parts = re.split(r'([.,!?;:]+[\s\n]+)', self.tts_buffer)
+                
+                # If we have at least one delimiter, we can process the sentence
+                # We need [Sentence, Delimiter, NextPart...]
+                
+                while len(parts) >= 2:
+                    segment = parts.pop(0)
+                    delimiter = parts.pop(0)
+                    
+                    full_sentence = segment + delimiter
+                    
+                    # Ignore short fragments that might be artifacts
+                    if len(full_sentence.strip()) > 2:
+                        self.tts_worker.add_text(full_sentence)
+                
+                # Keep the rest in buffer
+                self.tts_buffer = "".join(parts)
 
         # Find existing answer widget or create one
         answer_widget = None
@@ -1797,18 +1826,34 @@ class OmniWindow(QWidget):
                     has_streaming_answer = True
                     break
 
-        if has_streaming_answer:
-            return  # Already handled the response via streaming
-        
         answer = data.get("answer", "")
-        if answer and self.voice_triggered_query:
-            # TTS Trigger
-            from src.services.voice.tts import speak
-            import threading
-            threading.Thread(target=speak, args=(answer,), daemon=True).start()
+        
+        # TRIGGER TTS IF VOICE QUERY (Finalize Streaming)
+        if self.voice_triggered_query:
+            logging.info("Finalizing TTS for voice query response")
+            
+            # Send any remaining buffer
+            if hasattr(self, 'tts_buffer') and self.tts_buffer.strip():
+                 if not self.tts_worker or not self.tts_worker.isRunning():
+                     # If it was a short response that came all at once (no partials triggered worker)
+                     self.cleanup_worker('tts_worker')
+                     self.tts_worker = TTSWorker(self.tts_buffer)
+                     self.tts_worker.finished_speaking.connect(self.on_tts_finished)
+                     self.tts_worker.start()
+                     self.is_tts_playing = True
+                 else:
+                     self.tts_worker.add_text(self.tts_buffer)
+            
+            # Signal worker to stop when done with queue
+            if self.tts_worker:
+                 self.tts_worker.stop()
+            
             # Reset flag
             self.voice_triggered_query = False
 
+        if has_streaming_answer:
+            return  # Already handled the response via streaming
+        
         # Remove thinking widget and separator (iterate backwards)
         # Note: In perform_ai_query we removed the separator for followup, 
         # so there might not be one if it was a followup query.

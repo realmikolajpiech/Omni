@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import queue
 import sounddevice as sd
 import numpy as np
@@ -34,8 +35,8 @@ except ImportError:
 WAKE_WORDS = ["hey omni", "omni", "computer", "hey computer"]
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000  # 0.25s
-SILENCE_THRESHOLD = 0.005 # Adjusted from 0.00002 which was too low
-SILENCE_DURATION = 1.0 # Seconds of silence to consider end of utterance
+SILENCE_THRESHOLD = 0.001 # Less sensitive to ignore background noise
+SILENCE_DURATION = 2.0 # Wait 2s before cutting off
 UDP_PORT = 5557
 VAD_SENSITIVITY = 0.5 # For future use
 
@@ -58,11 +59,12 @@ class VoiceService:
         self.audio_queue = queue.Queue()
         self.vosk_model = None
         self.vosk_rec_wake = None # Recognizer for Wake Word
-        self.qwen_model = None
+        self.asr_pipeline = None
         self.audio_buffer = []
         self.is_speaking = False
         self.silence_frames = 0
         self.max_silence_frames = int(SILENCE_DURATION * SAMPLE_RATE / BLOCK_SIZE)
+        self.energy_history = []
         self.udp_sock = None
         
         self.setup_models()
@@ -87,8 +89,8 @@ class VoiceService:
         except Exception as e:
             logger.error(f"Vosk Init Failed: {e}")
 
-        # 2. Setup Qwen ASR
-        logger.info(f"Loading Qwen ASR: {ASR_MODEL_ID}...")
+        # 2. Setup ASR (Transformers / Whisper)
+        logger.info(f"Loading ASR Model: {ASR_MODEL_ID}...")
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             if sys.platform == "darwin" and torch.backends.mps.is_available():
@@ -96,18 +98,17 @@ class VoiceService:
             
             logger.info(f"Using device: {device}")
             
-            from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
-            self.qwen_model = Qwen3ASRModel.from_pretrained(
-                ASR_MODEL_ID,
-                device_map=device,
-                torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-                trust_remote_code=True
+            from transformers import pipeline
+            self.asr_pipeline = pipeline(
+                "automatic-speech-recognition",
+                model=ASR_MODEL_ID,
+                device=device,
+                torch_dtype=torch.float16 if device != "cpu" else torch.float32
             )
-            logger.info("Qwen3ASR initialized.")
+            logger.info("ASR Model initialized.")
         except Exception as e:
-            logger.error(f"Qwen Init Failed: {e}")
-            # Non-fatal? We can fall back to Vosk for everything if Qwen fails? 
-            # For now, let's assume it's critical.
+            logger.error(f"ASR Init Failed: {e}")
+            self.asr_pipeline = None
             
     def download_vosk(self):
         logger.info(f"Downloading Vosk Model to {VOSK_MODEL_PATH}...")
@@ -154,6 +155,11 @@ class VoiceService:
                     self.set_mode("LISTENING")
                     self.play_cue(active=True)
                 elif msg == "STOP_LISTENING":
+                    self.set_mode("PAUSED")
+                elif msg == "COMMIT_AUDIO":
+                    logger.info("Manual Commit Requested")
+                    if self.state["mode"] == "LISTENING":
+                        self.process_buffer()
                     self.set_mode("PAUSED")
                 elif msg == "SET_MODE:IDLE":
                     self.set_mode("IDLE")
@@ -215,37 +221,59 @@ class VoiceService:
     def run(self):
         logger.info("Starting Audio Loop...")
         
-        # Open stream
-        with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, 
-                            channels=1, callback=self.audio_callback):
-            
-            while self.state["running"]:
-                self.process_udp()
+        while self.state["running"]:
+            try:
+                # Open stream
+                # Using a single stream with 16kHz is standard for Vosk and Whisper.
+                # Changing sample rate dynamically is complex (requires closing/reopening stream).
+                # Keeping it simple at 16kHz is usually fine for quality and avoids microphone indicator flickering (if it did).
+                # The microphone indicator on macOS is persistent as long as ANY stream is open.
+                # To avoid it, we would need to close the stream entirely when IDLE, but then we can't listen for Wake Word.
+                # So we must keep it open.
                 
-                try:
-                    indata = self.audio_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                
-                # Check Mode
-                mode = self.state["mode"]
-                
-                if mode == "PAUSED":
-                    continue
-                
-                # Pre-processing (Normalization / Boost)
-                # Boost weak mic input slightly, but clip to avoid distortion
-                audio_data = indata.flatten() * 3.0 
-                
-                if mode == "IDLE":
-                    self.handle_idle(audio_data)
-                elif mode == "LISTENING":
-                    self.handle_listening(audio_data)
+                with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, 
+                                    channels=1, callback=self.audio_callback):
+                    
+                    logger.info("Audio Stream Started.")
+                    
+                    while self.state["running"]:
+                        self.process_udp()
+                        
+                        try:
+                            indata = self.audio_queue.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        
+                        # Check Mode
+                        mode = self.state["mode"]
+                        
+                        if mode == "PAUSED":
+                            continue
+                        
+                        # Pre-processing (Normalization / Boost)
+                        # Boost removed/reduced to avoid distortion for Whisper
+                        audio_data = indata.flatten()
+                        
+                        if mode == "IDLE":
+                            self.handle_idle(audio_data)
+                        elif mode == "LISTENING":
+                            self.handle_listening(audio_data)
+
+            except Exception as e:
+                logger.error(f"Audio Stream Error: {e}")
+                # Don't spam restarts on permanent failures
+                if "PortAudio" in str(e) or "PaErrorCode" in str(e):
+                     logger.warning("PortAudio conflict detected. Waiting longer...")
+                     time.sleep(5)
+                logger.info("Restarting audio stream in 2 seconds...")
+                time.sleep(2)
 
     def handle_idle(self, audio_data):
         if not self.vosk_rec_wake: return
         
         # Vosk expects int16 bytes
+        # Audio is float32 normalized (-1 to 1) usually.
+        # Scale to int16
         audio_int16 = (audio_data * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
         
         if self.vosk_rec_wake.AcceptWaveform(audio_int16):
@@ -264,17 +292,30 @@ class VoiceService:
         # 1. Accumulate
         self.audio_buffer.append(audio_data)
         
-        # 2. VAD (Energy based for now, but cleaner)
+        # 2. VAD (Energy based with rolling average)
         energy = np.sqrt(np.mean(audio_data**2))
         
-        if energy > SILENCE_THRESHOLD:
+        self.energy_history.append(energy)
+        if len(self.energy_history) > 5: # 0.5s smoothing window
+             self.energy_history.pop(0)
+        
+        avg_energy = sum(self.energy_history) / len(self.energy_history)
+        
+        if avg_energy > SILENCE_THRESHOLD:
             if not self.is_speaking:
-                logger.info("Speech detected...")
+                logger.info(f"Speech detected (Energy: {avg_energy:.5f})...")
                 self.is_speaking = True
             self.silence_frames = 0
         else:
             if self.is_speaking:
                 self.silence_frames += 1
+            else:
+                # We are in silence and NOT speaking yet.
+                # Limit buffer to keep only recent history (e.g. 1s) to prevent "Max duration" on long silence
+                # BLOCK_SIZE = 4000, SAMPLE_RATE = 16000. 1s = 4 blocks.
+                max_pre_speech_blocks = int(1.0 * SAMPLE_RATE / BLOCK_SIZE)
+                if len(self.audio_buffer) > max_pre_speech_blocks:
+                    self.audio_buffer = self.audio_buffer[-max_pre_speech_blocks:]
         
         # 3. Check End of Utterance
         if self.is_speaking and self.silence_frames > self.max_silence_frames:
@@ -294,29 +335,77 @@ class VoiceService:
         self.is_speaking = False
         self.silence_frames = 0
         
-        # Ignore short audio (< 0.5s)
-        if len(full_audio) < SAMPLE_RATE * 0.5:
+        # Ignore short audio (< 0.2s) - Reduced from 0.5s to capture short commands like "stop"
+        if len(full_audio) < SAMPLE_RATE * 0.2:
             return
 
-        if self.qwen_model:
+        if self.asr_pipeline:
             try:
                 # Transcribe
-                # Qwen expects list of (audio, sr) tuples
-                results = self.qwen_model.transcribe(
-                    audio=[(full_audio, SAMPLE_RATE)], 
-                    language="English" 
+                # Convert buffer to float32 numpy array as expected by transformers
+                # full_audio is already float32 from sounddevice (default)
+                
+                # Smart Normalization (Avoid boosting noise)
+                max_val = np.max(np.abs(full_audio))
+                if max_val > 0:
+                    # If peak is already decent (>0.5), leave it or just clamp
+                    # If peak is low (but not silence), boost it
+                    # If peak is noise floor (<0.02), DO NOT boost to 1.0
+                    
+                    if max_val < 0.9:
+                        if max_val > 0.02: # Signal exists
+                            target = 0.9
+                            gain = min(target / max_val, 3.0) # Cap gain at 3x to avoid boosting noise
+                            full_audio = full_audio * gain
+                            logger.info(f"Audio boosted by {gain:.2f}x")
+                        else:
+                            logger.info("Audio too quiet/noise, skipping boost.")
+                
+                # Use generate_kwargs if needed.
+                # Explicitly setting language to None to force auto-detection
+                # and ensuring task is transcribe.
+                # We can also try increasing beam size for better accuracy.
+                result = self.asr_pipeline(
+                    full_audio, 
+                    generate_kwargs={
+                        "task": "transcribe",
+                        "num_beams": 1, # Faster, less hallucinations
+                        "condition_on_prev_tokens": False,
+                        "temperature": 0.0 # Greedy decoding for accuracy
+                    }
                 )
-                text = results[0].text.strip()
+                text = result.get("text", "").strip()
                 logger.info(f"Transcribed: {text}")
                 
                 if text:
-                    self.send_ipc(f"QUERY:{text}".encode('utf-8'))
-                    self.play_cue(active=False) # Confirmation beep
-                    self.set_mode("PAUSED") # Stop listening after command
+                    # Clean up common hallucinations
+                    hallucinations = [
+                        "i", "i!", "i.", "you", "thanks", "thank you", "bye", ".", "...!", "...",
+                        "..!", "...?", "?", "!", "you.", "thank you.", "subtitles by", "mbc",
+                        "o!", "o.", "oh!", "oh.", "o", "oh", "a", "a!", "a.", "ok", "ok."
+                    ]
+                    
+                    if text.lower() in hallucinations:
+                        logger.info(f"Ignored hallucination: {text}")
+                        return
+
+                    # Ensure text contains at least one alphanumeric character
+                    if not re.search(r'[a-zA-Z0-9]', text):
+                        logger.info(f"Ignored non-alphanumeric text: {text}")
+                        return
+
+                    # Mark this query as coming from voice
+                    # Only if text length > 1
+                    if len(text) > 1 and not text.startswith("..."):
+                        self.send_ipc(f"QUERY:VOICE:{text}".encode('utf-8'))
+                        self.play_cue(active=False) # Confirmation beep
+                        self.set_mode("PAUSED") # Stop listening after command
+                    else:
+                         logger.info(f"Ignored too short text: {text}")
             except Exception as e:
                 logger.error(f"Transcription Failed: {e}")
         else:
-            logger.error("Qwen Model not loaded!")
+            logger.error("ASR Model not loaded!")
 
 if __name__ == "__main__":
     service = VoiceService()

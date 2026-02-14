@@ -1,14 +1,22 @@
 import os
 
+# Assets
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Set HF_HOME to a local directory to avoid permission issues
+os.environ["HF_HOME"] = os.path.join(PROJECT_ROOT, "data", "hf_cache")
+
 # Paths
 HOME = os.path.expanduser("~")
 MODEL_DIR = os.path.join(HOME, ".local/share/ai-models")
 DB_PATH = os.path.join(HOME, ".local/share/ai-memory-db")
-PERSONAL_MEM_PATH = os.path.join(HOME, ".config/omni/personal.mv2")
-LOG_PATH = os.path.expanduser("~/.config/omni/omni_debug.log")
+PERSONAL_MEM_PATH = os.path.join(PROJECT_ROOT, "data", "personal.mv2")
+LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "omni.log")
 
 # Ensure directories exist
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # Models
@@ -31,8 +39,8 @@ VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 VOSK_MODEL_PATH = os.path.join(MODEL_DIR, VOSK_MODEL_NAME)
 VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
-ASR_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
-TTS_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+ASR_MODEL_ID = "openai/whisper-small" # Multilingual support
+TTS_MODEL_ID = "hexgrad/Kokoro-82M" # Kokoro-82M for high quality and speed
 
 # URLs
 BRAIN_HOST = "127.0.0.1"
@@ -51,8 +59,6 @@ SEARXNG_URL = "http://127.0.0.1:8080/search"
 IPC_PORT = 5556
 
 # Assets
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOGO_PATH = os.path.join(PROJECT_ROOT, "assets", "omni.png")
 
 # Shortcuts
