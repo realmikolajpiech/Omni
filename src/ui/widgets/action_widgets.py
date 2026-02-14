@@ -3,8 +3,8 @@ import threading
 import logging
 import requests
 from urllib.parse import urlparse
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu, QFileIconProvider
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -323,23 +323,26 @@ class FileActionWidget(QWidget):
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Load icon - Try to get actual file icon
-        if not icon_name:
-            icon_name = self._get_best_icon_name(path)
+        # Load icon - Try to get actual file icon from system
+        provider = QFileIconProvider()
+        info = QFileInfo(path)
+        icon = provider.icon(info)
         
-        icon = self._load_file_icon(icon_name, path)
         if not icon.isNull():
-            self.icon_label.setPixmap(icon.pixmap(18, 18))
+            self.icon_label.setPixmap(icon.pixmap(24, 24))
         else:
-            # Fallback to generic icon
-            fallback_icon = "folder" if os.path.isdir(path) else "text-x-generic"
-            fallback = QIcon.fromTheme(fallback_icon)
-            if not fallback.isNull():
-                self.icon_label.setPixmap(fallback.pixmap(18, 18))
+            # Fallback to theme icon if system icon fails
+            if not icon_name:
+                icon_name = self._get_best_icon_name(path)
+            
+            icon = self._load_file_icon(icon_name, path)
+            if not icon.isNull():
+                self.icon_label.setPixmap(icon.pixmap(24, 24))
             else:
                 self.icon_label.setText("📄")
 
-        self.action_label = QLabel("FILE")
+        action_text = "FOLDER" if os.path.isdir(path) else "FILE"
+        self.action_label = QLabel(action_text)
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
 
         top_layout.addWidget(self.icon_label)
@@ -487,10 +490,9 @@ class FileActionWidget(QWidget):
         self.desc_label.setStyleSheet(f"color: {desc_color};")
         self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1.0px;")
         
-        self.icon_label.setStyleSheet(f"""
-            background-color: {icon_bg}; 
-            border-radius: 6px; 
-            border: 1px solid {icon_border};
+        self.icon_label.setStyleSheet("""
+            background-color: transparent; 
+            border: none;
         """)
         
         self.peek_label.setStyleSheet(f"color: {peek_color}; background-color: {peek_bg}; border-radius: 8px; padding: 8px; margin-top: 4px;")
