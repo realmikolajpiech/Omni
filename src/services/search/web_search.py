@@ -69,7 +69,8 @@ def search_api(query, categories='general', fast=False):
             'q': query,
             'format': 'json',
             'categories': categories,
-            'language': loc
+            'language': loc,
+            'safesearch': 0  # 0: None, 1: Moderate, 2: Strict
         }
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -228,7 +229,13 @@ def get_navigation_result(query, fast=False):
             # 1. Official Validation (Domain matches query)
             # e.g. query "whatsapp" matches "whatsapp.com"
             domain_match = False
-            if f"://{normalized_query}." in url or f".{normalized_query}." in url:
+            # Allow matching just the domain part (e.g. safelabs.pl matches safelabs)
+            # Logic: query must be a substring of the domain, bounded by dots or slashes
+            if f"://{normalized_query}." in url or f".{normalized_query}." in url or f"/{normalized_query}." in url:
+                score += 50
+                domain_match = True
+            # Special case for exact match at start of domain (e.g. safelabs.pl)
+            elif url.split('://')[-1].startswith(normalized_query + '.'):
                 score += 50
                 domain_match = True
             
@@ -241,7 +248,7 @@ def get_navigation_result(query, fast=False):
                 score -= 30
                 
             # 4. Boost "Home" or "Official" pages
-            if "official" in title or "home" in title:
+            if "official" in title.lower() or "home" in title.lower() or "strona główna" in title.lower():
                 score += 5
             
             # Keep track of best

@@ -535,18 +535,22 @@ engines:
   - name: bing
     engine: bing
     shortcut: bi
+    disabled: true
 
   - name: bing images
     engine: bing_images
     shortcut: bii
+    disabled: true
 
   - name: bing news
     engine: bing_news
     shortcut: bin
+    disabled: true
 
   - name: bing videos
     engine: bing_videos
     shortcut: biv
+    disabled: true
 
   - name: bitchute
     engine: bitchute
@@ -810,33 +814,28 @@ engines:
   - name: duckduckgo
     engine: duckduckgo
     shortcut: ddg
-    disabled: true
 
   - name: duckduckgo images
     engine: duckduckgo_extra
     categories: [images, web]
     ddg_category: images
     shortcut: ddi
-    disabled: true
 
   - name: duckduckgo videos
     engine: duckduckgo_extra
     categories: [videos, web]
     ddg_category: videos
     shortcut: ddv
-    disabled: true
 
   - name: duckduckgo news
     engine: duckduckgo_extra
     categories: [news, web]
     ddg_category: news
     shortcut: ddn
-    disabled: true
 
   - name: duckduckgo weather
     engine: duckduckgo_weather
     shortcut: ddw
-    disabled: true
 
   - name: apple maps
     engine: apple_maps
@@ -1023,6 +1022,7 @@ engines:
     shortcut: go
     # additional_tests:
     #   android: *test_android
+    disabled: true
 
   - name: google images
     engine: google_images
@@ -1035,22 +1035,26 @@ engines:
     #       lang: ['en', 'de', 'fr', 'zh-CN']
     #     result_container:
     #       - ['one_title_contains', 'Salvador']
+    disabled: true
 
   - name: google news
     engine: google_news
     shortcut: gon
     # additional_tests:
     #   android: *test_android
+    disabled: true
 
   - name: google videos
     engine: google_videos
     shortcut: gov
     # additional_tests:
     #   android: *test_android
+    disabled: true
 
   - name: google scholar
     engine: google_scholar
     shortcut: gos
+    disabled: true
 
   - name: google play apps
     engine: google_play
@@ -1761,6 +1765,7 @@ engines:
     shortcut: qwn
     categories: news
     network: qwant
+    disabled: true
 
   - name: qwant images
     qwant_categ: images
@@ -1768,6 +1773,7 @@ engines:
     shortcut: qwi
     categories: [images, web]
     network: qwant
+    disabled: true
 
   - name: qwant videos
     qwant_categ: videos
@@ -1775,6 +1781,7 @@ engines:
     shortcut: qwv
     categories: [videos, web]
     network: qwant
+    disabled: true
 
   # - name: library
   #   engine: recoll
@@ -1991,18 +1998,21 @@ engines:
     categories: [general, web]
     additional_tests:
       rosebud: *test_rosebud
+    disabled: true
 
   - name: startpage news
     engine: startpage
     startpage_categ: news
     categories: [news, web]
     shortcut: spn
+    disabled: true
 
   - name: startpage images
     engine: startpage
     startpage_categ: images
     categories: [images, web]
     shortcut: spi
+    disabled: true
 
   - name: steam
     engine: steam
@@ -2630,6 +2640,7 @@ engines:
     categories: [general, web]
     brave_category: search
     # brave_spellcheck: true
+    disabled: true
 
   - name: brave.images
     engine: brave
@@ -2637,6 +2648,7 @@ engines:
     shortcut: brimg
     categories: [images, web]
     brave_category: images
+    disabled: true
 
   - name: brave.videos
     engine: brave
@@ -2644,6 +2656,7 @@ engines:
     shortcut: brvid
     categories: [videos, web]
     brave_category: videos
+    disabled: true
 
   - name: brave.news
     engine: brave
@@ -2651,6 +2664,7 @@ engines:
     shortcut: brnews
     categories: news
     brave_category: news
+    disabled: true
 
   # - name: brave.goggles
   #   engine: brave

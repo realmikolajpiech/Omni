@@ -7,9 +7,10 @@ import time
 def main():
     # Get the directory of this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
     
     # Path to the extracted searxng source
-    searxng_src_dir = os.path.join(script_dir, 'searxng_local')
+    searxng_src_dir = os.path.join(project_root, 'searxng_local')
     
     # Ensure the source directory exists
     if not os.path.exists(searxng_src_dir):

@@ -162,10 +162,11 @@ def action_endpoint():
         old_request_id = model_manager.current_fast_request_id
         model_manager.current_fast_request_id = request_id
         
-        # Signal the old request to abort
+        # Log cancellation but rely on ID check in model loop to abort old request
         if old_request_id is not None:
             logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
-            model_manager.abort_fast_event.set()
+            # Do NOT set abort_fast_event here, as it kills the *current* request too in the check below.
+            # model_manager.abort_fast_event.set()
     
     # Check if abort was already set (meaning main AI model is starting)
     # If so, this action request should be aborted immediately

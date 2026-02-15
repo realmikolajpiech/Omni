@@ -46,15 +46,14 @@ class LinkActionWidget(QWidget):
         self.icon_label.setFixedSize(20, 20) # Smaller icon
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("""
-            background-color: #FFFFFF; 
+            background-color: transparent; 
             color: #333333; 
             font-size: 10px; 
-            border-radius: 5px; 
-            border: 1px solid rgba(0,0,0,0.05);
+            border: none;
         """)
 
         self.action_label = QLabel(f"WEBSITE")
-        self.action_label.setFont(QFont("Manrope", 8, QFont.Weight.Bold))
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
         self.action_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
 
         top_layout.addWidget(self.icon_label)
@@ -74,8 +73,16 @@ class LinkActionWidget(QWidget):
         self.title_label.setStyleSheet("color: #050505; margin-top: 0px;")
         self.title_label.setTextFormat(Qt.TextFormat.RichText) # Enable HTML for bold tags
 
+        # Description (URL)
+        self.desc_label = QLabel(url)
+        self.desc_label.setWordWrap(True)
+        self.desc_label.setFont(QFont("Manrope", 11, QFont.Weight.Medium))
+        if not url:
+            self.desc_label.hide()
+
         card_layout.addWidget(top_row)
         card_layout.addWidget(self.title_label)
+        card_layout.addWidget(self.desc_label)
 
         layout.addWidget(self.card)
         
@@ -99,20 +106,22 @@ class LinkActionWidget(QWidget):
             hover_bg = "rgba(255, 255, 255, 0.10)"
             hover_border = "rgba(255, 255, 255, 0.2)"
             title_color = "#FFFFFF"
+            desc_color = "#CCCCCC"
             action_color = "#CCCCCC"
-            icon_bg = "#444444"
+            icon_bg = "transparent"
             icon_color = "#FFFFFF"
-            icon_border = "rgba(255, 255, 255, 0.2)"
+            icon_border = "none"
         else:
             bg = "rgba(255, 255, 255, 0.25)"
             border = "rgba(255, 255, 255, 0.4)"
             hover_bg = "rgba(255, 255, 255, 0.45)"
             hover_border = "rgba(255, 255, 255, 0.6)"
             title_color = "#050505"
+            desc_color = "#555555"
             action_color = "#888888"
-            icon_bg = "#FFFFFF"
+            icon_bg = "transparent"
             icon_color = "#333333"
-            icon_border = "rgba(0,0,0,0.05)"
+            icon_border = "none"
 
         self.card.setStyleSheet(f"""
             QWidget#ActionCard {{
@@ -123,6 +132,8 @@ class LinkActionWidget(QWidget):
         """)
         
         self.title_label.setStyleSheet(f"color: {title_color}; margin-top: 0px;")
+        if hasattr(self, 'desc_label'):
+            self.desc_label.setStyleSheet(f"color: {desc_color};")
         self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
         
         self.icon_label.setStyleSheet(f"""
@@ -130,7 +141,7 @@ class LinkActionWidget(QWidget):
             color: {icon_color}; 
             font-size: 10px; 
             border-radius: 5px; 
-            border: 1px solid {icon_border};
+            border: {icon_border};
         """)
 
     def fetch_icon(self):
