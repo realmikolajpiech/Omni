@@ -123,29 +123,33 @@ def ask_llm():
 @api_bp.route('/search', methods=['POST'])
 def search_endpoint():
     model_manager.ensure_main_model()
-    if not model_manager.db_conn or not model_manager.embed_model:
-        return jsonify({"results": []})
+    
+    # Protect shared resource access with search_lock
+    with model_manager.search_lock:
+        if not model_manager.db_conn or not model_manager.embed_model:
+            return jsonify({"results": []})
 
-    try: req = request.get_json(force=True)
-    except: return jsonify({"results": []}), 400
+        try: req = request.get_json(force=True)
+        except: return jsonify({"results": []}), 400
 
-    query = req.get('query', "").strip()
-    if not query: return jsonify({"results": []})
+        query = req.get('query', "").strip()
+        if not query: return jsonify({"results": []})
 
-    results = []
-    try:
-        tbl = model_manager.db_conn.open_table("files")
-        res = tbl.search(model_manager.embed_model.encode(query)).limit(3).to_pandas()
-        if not res.empty:
-            for _, row in res.iterrows():
-                if row.get('_distance', 0) < 1.1:
-                    results.append({
-                        "name": row['filename'],
-                        "path": row['path'],
-                        "score": float(row.get('_distance', 0)),
-                        "type": "file"
-                    })
-    except: pass
+        results = []
+        try:
+            tbl = model_manager.db_conn.open_table("files")
+            # Encoding and searching must be thread-safe (hence the lock)
+            res = tbl.search(model_manager.embed_model.encode(query)).limit(3).to_pandas()
+            if not res.empty:
+                for _, row in res.iterrows():
+                    if row.get('_distance', 0) < 1.1:
+                        results.append({
+                            "name": row['filename'],
+                            "path": row['path'],
+                            "score": float(row.get('_distance', 0)),
+                            "type": "file"
+                        })
+        except: pass
 
     return jsonify({"results": results})
 

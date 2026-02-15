@@ -239,6 +239,15 @@ def get_navigation_result(query, fast=False):
                 score += 50
                 domain_match = True
             
+            # Prefer top-level domains (e.g. .pl, .com, .org) over .info if multiple matches
+            if domain_match:
+                # Add slight penalty to .info domains if we have other options
+                if ".info" in url and not normalized_query.endswith("info"):
+                     score -= 5
+                # Add slight boost to local TLDs (e.g. .pl if locale is pl)
+                if ".pl" in url:
+                     score += 5
+            
             # 2. Title Match
             if res.get('title', '').lower().startswith(normalized_query):
                 score += 10

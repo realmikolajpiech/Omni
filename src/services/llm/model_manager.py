@@ -55,6 +55,7 @@ init_error = None
 main_lock = threading.Lock()
 fast_lock = threading.Lock()
 tts_lock = threading.Lock()
+search_lock = threading.Lock() # For Embeddings/DB
 abort_fast_event = threading.Event()
 
 # Fast model request queue for cancellation
@@ -244,22 +245,24 @@ def ensure_main_model():
         monitor_started = True
     
     # 1. DB & Embeddings (Shared)
-    if db_conn is None:
-        try:
-            if os.path.exists(DB_PATH):
-                import lancedb
-                db_conn = lancedb.connect(DB_PATH)
-                logging.info(f"Connected to LanceDB at {DB_PATH}")
-        except Exception as e: logging.error(f"DB Error: {e}")
+    # Protect initialization with search_lock
+    with search_lock:
+        if db_conn is None:
+            try:
+                if os.path.exists(DB_PATH):
+                    import lancedb
+                    db_conn = lancedb.connect(DB_PATH)
+                    logging.info(f"Connected to LanceDB at {DB_PATH}")
+            except Exception as e: logging.error(f"DB Error: {e}")
 
-    if embed_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            # Force CPU for embeddings to avoid Metal conflicts and meta tensor issues
-            # We must be very careful about device placement on Mac
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
-            embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-        except Exception as e: logging.error(f"Embeddings Error: {e}")
+        if embed_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                # Force CPU for embeddings to avoid Metal conflicts and meta tensor issues
+                # We must be very careful about device placement on Mac
+                os.environ["TOKENIZERS_PARALLELISM"] = "false"
+                embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+            except Exception as e: logging.error(f"Embeddings Error: {e}")
 
     # 2. Main Model
     if llm: return
