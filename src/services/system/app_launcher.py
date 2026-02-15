@@ -3,6 +3,8 @@ import sys
 import subprocess
 import logging
 import requests
+import plistlib
+import re
 
 APP_CACHE = None
 
@@ -80,48 +82,203 @@ def get_app_cache():
             except Exception as e:
                 logging.error(f"Error scanning {d}: {e}")
 
-        # Add Common System Settings (macOS 13+)
-        settings_map = {
-            "wifi": "x-apple.systempreferences:com.apple.wifi-settings-extension",
-            "bluetooth": "x-apple.systempreferences:com.apple.BluetoothSettings",
-            "network": "x-apple.systempreferences:com.apple.Network-Settings.extension",
-            "sound": "x-apple.systempreferences:com.apple.Sound-Settings.extension",
-            "display": "x-apple.systempreferences:com.apple.Displays-Settings.extension",
-            "wallpaper": "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension",
-            "appearance": "x-apple.systempreferences:com.apple.Appearance-Settings.extension",
-            "accessibility": "x-apple.systempreferences:com.apple.Accessibility-Settings.extension",
-            "privacy": "x-apple.systempreferences:com.apple.Privacy-Security-Settings.extension",
-            "security": "x-apple.systempreferences:com.apple.Privacy-Security-Settings.extension",
-            "update": "x-apple.systempreferences:com.apple.Software-Update-Settings.extension",
-            "users": "x-apple.systempreferences:com.apple.Users-Groups-Settings.extension",
-            "battery": "x-apple.systempreferences:com.apple.Battery-Settings.extension",
-            "mouse": "x-apple.systempreferences:com.apple.Mouse-Settings.extension",
-            "trackpad": "x-apple.systempreferences:com.apple.Trackpad-Settings.extension",
-            "keyboard": "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
-            "date": "x-apple.systempreferences:com.apple.Date-Time-Settings.extension",
-            "time": "x-apple.systempreferences:com.apple.Date-Time-Settings.extension",
-            "notifications": "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
-            "focus": "x-apple.systempreferences:com.apple.Focus-Settings.extension",
-        }
+        system_settings_app = "/System/Applications/System Settings.app"
+        system_settings_icon = system_settings_app if os.path.exists(system_settings_app) else None
 
-        for name, url in settings_map.items():
-            # Prefix with 'settings' to allow searching like "settings wifi"
-            # But also allow direct "wifi"
+        # 1. Build a map of BundleID -> IconPath by scanning system extensions
+        bundle_id_to_icon = {}
+        
+        def _scan_extensions_for_icons(directory):
+            if not os.path.isdir(directory): return
+            try:
+                for entry in os.listdir(directory):
+                    if entry.endswith(".appex"):
+                        appex_path = os.path.join(directory, entry)
+                        # Read Info.plist for Bundle ID
+                        info_plist = os.path.join(appex_path, "Contents", "Info.plist")
+                        if not os.path.exists(info_plist): continue
+                        
+                        try:
+                            pl = _load_plist(info_plist)
+                            if not pl: continue
+                            bid = pl.get("CFBundleIdentifier")
+                            if not bid: continue
+                            
+                            # Check for .icns in Resources
+                            res_dir = os.path.join(appex_path, "Contents", "Resources")
+                            if os.path.isdir(res_dir):
+                                for f in os.listdir(res_dir):
+                                    if f.endswith(".icns"):
+                                        # Use the first .icns found
+                                        bundle_id_to_icon[bid] = os.path.join(res_dir, f)
+                                        break
+                        except: pass
+            except: pass
+
+        _scan_extensions_for_icons("/System/Applications/System Settings.app/Contents/PlugIns")
+        _scan_extensions_for_icons("/System/Library/ExtensionKit/Extensions")
+
+        def _normalize_setting_key(s: str) -> str:
+            s = (s or "").strip().lower()
+            s = s.replace("&", " and ")
+            s = re.sub(r"[^a-z0-9\s]+", " ", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        def _add_setting_entry(key: str, title: str, bundle_id: str):
+            if not key:
+                return
             
-            # We'll just add the direct name
-            if name not in apps:
-                apps[name] = {
-                    "cmd": f'open "{url}"',
-                    "orig_name": f"Settings: {name.capitalize()}",
-                    "icon": "/System/Applications/System Settings.app"
-                }
+            # Use specific icon if found, else generic System Settings icon
+            icon_path = bundle_id_to_icon.get(bundle_id) or system_settings_icon or system_settings_app
             
-            # Also add "settings [name]" alias
-            apps[f"settings {name}"] = {
+            url = f"x-apple.systempreferences:{bundle_id}"
+            apps[key] = {
                 "cmd": f'open "{url}"',
-                "orig_name": f"Settings: {name.capitalize()}",
-                "icon": "/System/Applications/System Settings.app"
+                "orig_name": f"Settings: {title}",
+                "icon": icon_path
             }
+
+        def _add_setting_aliases(title: str, bundle_id: str):
+            raw = (title or "").strip()
+            if not raw:
+                return
+            raw_key = raw.lower()
+            norm = _normalize_setting_key(raw)
+
+            for k in {raw_key, norm}:
+                if k:
+                    _add_setting_entry(k, raw, bundle_id)
+                    _add_setting_entry(f"settings {k}", raw, bundle_id)
+                    _add_setting_entry(f"system settings {k}", raw, bundle_id)
+                    _add_setting_entry(f"preferences {k}", raw, bundle_id)
+
+        def _load_plist(path: str):
+            try:
+                with open(path, "rb") as f:
+                    return plistlib.load(f)
+            except Exception:
+                return None
+
+        def _humanize_settings_title(bundle_id: str) -> str:
+            s = (bundle_id or "").strip()
+            if not s:
+                return "System Settings"
+
+            # Some identifiers end with a standalone ".extension" segment.
+            # Strip it before selecting the final component.
+            s = re.sub(r"\.extension$", "", s, flags=re.IGNORECASE)
+
+            part = s.split(".")[-1]
+
+            part = re.sub(r"-settings-extension$", "", part, flags=re.IGNORECASE)
+            part = re.sub(r"-settings\.extension$", "", part, flags=re.IGNORECASE)
+            part = re.sub(r"settings\.extension$", "", part, flags=re.IGNORECASE)
+            part = re.sub(r"settings-extension$", "", part, flags=re.IGNORECASE)
+            part = re.sub(r"SettingsExtension$", "", part)
+            part = re.sub(r"SettingsUIExtension$", "", part)
+            part = re.sub(r"Settings$", "", part)
+            part = part.replace("_", " ").replace("-", " ")
+
+            part = re.sub(r"([a-z])([A-Z])", r"\1 \2", part)
+            part = re.sub(r"\s+", " ", part).strip()
+
+            low = part.lower()
+            if low in {"wifi", "wi fi"}:
+                return "Wi‑Fi"
+            if low in {"apple id", "appleid"}:
+                return "Apple ID"
+            if low == "touch id":
+                return "Touch ID & Password"
+            if low == "privacy security":
+                return "Privacy & Security"
+            if low == "users groups":
+                return "Users & Groups"
+            if low == "date time":
+                return "Date & Time"
+            if low == "internet accounts":
+                return "Internet Accounts"
+            if low == "print scan":
+                return "Printers & Scanners"
+            if low == "wallet":
+                return "Wallet & Apple Pay"
+            if low == "desktop":
+                return "Desktop & Dock"
+            if low == "siri":
+                return "Apple Intelligence & Siri"
+            if low == "control center":
+                return "Control Center"  # Will also alias "Menu Bar" below
+            if low == "cd dvd":
+                return "CDs & DVDs"
+            if low == "game controller":
+                return "Game Controllers"
+
+            return part.title()
+
+        def _discover_settings_bundle_ids_from_sidebar():
+            ids = []
+            sidebar_plist = os.path.join(system_settings_app, "Contents", "Resources", "Sidebar.plist")
+            pl = _load_plist(sidebar_plist)
+            if not pl:
+                return ids
+
+            def walk(x):
+                if isinstance(x, dict):
+                    for v in x.values():
+                        walk(v)
+                elif isinstance(x, list):
+                    for v in x:
+                        walk(v)
+                elif isinstance(x, str):
+                    s = x.strip()
+                    if s.startswith("com.apple.") and "." in s:
+                        ids.append(s)
+
+            walk(pl)
+            seen = set()
+            out = []
+            for bid in ids:
+                if bid in seen:
+                    continue
+                seen.add(bid)
+                out.append(bid)
+            return out
+
+        sidebar_ids = _discover_settings_bundle_ids_from_sidebar()
+        if sidebar_ids:
+            logging.info(f"Discovered {len(sidebar_ids)} System Settings deeplinks via Sidebar.plist")
+            for bundle_id in sidebar_ids:
+                title = _humanize_settings_title(bundle_id)
+                _add_setting_aliases(title, bundle_id)
+                
+                # Extra Aliases for specific items
+                if title == "Control Center":
+                    _add_setting_aliases("Menu Bar", bundle_id)
+                elif title == "Desktop & Dock":
+                    _add_setting_aliases("Stage Manager", bundle_id)
+        else:
+            fallback = {
+                "Wi‑Fi": "com.apple.wifi-settings-extension",
+                "Bluetooth": "com.apple.BluetoothSettings",
+                "Network": "com.apple.Network-Settings.extension",
+                "Sound": "com.apple.Sound-Settings.extension",
+                "Displays": "com.apple.Displays-Settings.extension",
+                "Wallpaper": "com.apple.Wallpaper-Settings.extension",
+                "Appearance": "com.apple.Appearance-Settings.extension",
+                "Accessibility": "com.apple.Accessibility-Settings.extension",
+                "Privacy & Security": "com.apple.settings.PrivacySecurity.extension",
+                "Software Update": "com.apple.Software-Update-Settings.extension",
+                "Users & Groups": "com.apple.Users-Groups-Settings.extension",
+                "Battery": "com.apple.Battery-Settings.extension",
+                "Mouse": "com.apple.Mouse-Settings.extension",
+                "Trackpad": "com.apple.Trackpad-Settings.extension",
+                "Keyboard": "com.apple.Keyboard-Settings.extension",
+                "Date & Time": "com.apple.Date-Time-Settings.extension",
+                "Notifications": "com.apple.Notifications-Settings.extension",
+                "Focus": "com.apple.Focus-Settings.extension",
+            }
+            for title, bid in fallback.items():
+                _add_setting_aliases(title, bid)
 
     else:
         # Common locations for .desktop files
@@ -159,7 +316,6 @@ def get_app_cache():
                             
                             if name and exec_cmd:
                                 # Clean Exec command
-                                import re
                                 # Remove field codes like %u, %F, etc.
                                 exec_cmd = re.sub(r'%[fFuUikc]', '', exec_cmd).strip()
                                 

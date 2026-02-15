@@ -185,6 +185,9 @@ class SeparatorWidget(QWidget):
         y = self.height() // 2
         painter.drawLine(40, y, self.width() - 40, y)
 
+    def sizeHint(self):
+        return QSize(660, 24)
+
 class SmoothEntryWidget(QWidget):
     def __init__(self, content_widget, parent=None, animate=True):
         super().__init__(parent)

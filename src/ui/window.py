@@ -790,10 +790,10 @@ class OmniWindow(QWidget):
             self.list_widget.show()
             for i in range(count):
                 item = self.list_widget.item(i)
-                list_h += item.sizeHint().height()
+                list_h += item.sizeHint().height() + 6 # Add margin-bottom from CSS
             
             base_h = 84 
-            extra_padding = 12
+            extra_padding = 12 # 24px padding + 1px divider + 3px safety
             
             # Dynamic height calculation to prevent going behind taskbar
             screen = QGuiApplication.screenAt(self.pos()) or QApplication.primaryScreen()
@@ -1188,8 +1188,8 @@ class OmniWindow(QWidget):
             if query_lower in name:
                 matches.append((name, data))
         
-        # Sort matches: exact/prefix first
-        matches.sort(key=lambda x: 0 if x[0].startswith(query_lower) else 1)
+        # Sort matches: exact/prefix first, then stable by key
+        matches.sort(key=lambda x: (0 if x[0].startswith(query_lower) else 1, x[0]))
         
         # Deduplicate based on orig_name to prevent "Settings: Appearance" appearing twice
         seen_orig_names = set()
@@ -1200,7 +1200,43 @@ class OmniWindow(QWidget):
             seen_orig_names.add(data['orig_name'])
             unique_matches.append((name, data))
         
-        for name, data in unique_matches[:5]:
+        settings_matches = []
+        app_matches = []
+        
+        # Heuristic: Is the user explicitly asking for settings?
+        # Check if query starts with "settings", "system settings", or "preferences"
+        is_explicit_settings = (query_lower.startswith('settings') or 
+                               query_lower.startswith('system settings') or 
+                               query_lower.startswith('preferences'))
+                               
+        for name, data in unique_matches:
+            is_settings = str(data.get('orig_name', '')).startswith('Settings:')
+            
+            if is_settings:
+                # If explicit "settings" query, add all settings matches
+                if is_explicit_settings:
+                    settings_matches.append((name, data))
+                else:
+                    # If NOT explicit, only add if the match is a "strong" match for the section name
+                    # e.g. "wifi" -> "Settings: Wi-Fi" is good.
+                    # "a" -> "Settings: Accessibility" is weak/spammy.
+                    # We define "strong" as: query is a prefix of the section name (stripped of "Settings: ")
+                    section_name = data.get('orig_name', '').replace('Settings: ', '').lower()
+                    if section_name.startswith(query_lower):
+                        settings_matches.append((name, data))
+            else:
+                app_matches.append((name, data))
+
+        max_app_results = 5
+        if is_explicit_settings:
+            max_app_results = 12
+            # Prioritize Settings if explicit
+            final_matches = settings_matches + app_matches
+        else:
+            # Prioritize Apps if implicit (e.g. "a" -> Arc, App Store, THEN Settings: Accessibility)
+            final_matches = app_matches + settings_matches
+
+        for name, data in final_matches[:max_app_results]:
             key = f"app:{data['orig_name']}"
             
             # Capture variables properly in lambda
