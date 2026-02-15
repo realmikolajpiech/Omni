@@ -42,6 +42,8 @@ fi
 echo "Cleaning up old instances..."
 pkill -f "run.py" || true
 pkill -f "src/services/voice/listener.py" || true
+pkill -f "src/services/search/indexer.py" || true
+pkill -f "src/services/search/watcher.py" || true
 
 if [ -d "searxng_local" ] && [ -f "searxng/start_searxng.py" ]; then
     echo "Ensuring local SearXNG is running..."
@@ -82,6 +84,15 @@ if [ -f "$LLAMA_LIB_PATH" ]; then
   export LLAMA_CPP_LIB="$LLAMA_LIB_PATH"
   export LLAMA_CPP_LOG=1
 fi
+
+# Start Indexer in background
+echo "Starting File Indexer in background..."
+mkdir -p logs
+nohup $PYTHON_CMD src/services/search/indexer.py > logs/indexer.log 2>&1 &
+
+# Start File Watcher in background
+echo "Starting File Watcher in background..."
+nohup $PYTHON_CMD src/services/search/watcher.py > logs/watcher.log 2>&1 &
 
 # Run
 if [[ "$OSTYPE" == "darwin"* ]]; then

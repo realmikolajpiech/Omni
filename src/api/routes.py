@@ -105,8 +105,8 @@ def ask_llm():
                         # content is dict with "thinking" and "answer"
                         thinking = content.get("thinking", "")
                         answer = content.get("answer", "")
-                        if thinking or answer:
-                            logging.info(f"[STREAM] sending partial (thinking={len(thinking)} chars, answer={len(answer)} chars)")
+                        # if thinking or answer:
+                        #     logging.info(f"[STREAM] sending partial (thinking={len(thinking)} chars, answer={len(answer)} chars)")
                         yield f'data: {json.dumps({"type": "partial", "thinking": thinking, "answer": answer})}\n\n'
                     elif msg_type == "final":
                         # Send final response
@@ -149,7 +149,17 @@ def search_endpoint():
                             "score": float(row.get('_distance', 0)),
                             "type": "file"
                         })
-        except: pass
+            
+            # Log results for debugging
+            if results:
+                logging.info(f"Search found {len(results)} files for '{query}':")
+                for r in results:
+                    logging.info(f" - {r['name']} ({r['score']:.4f})")
+            else:
+                logging.info(f"Search found NO files for '{query}'")
+
+        except Exception as e:
+            logging.error(f"Search error: {e}")
 
     return jsonify({"results": results})
 
@@ -288,6 +298,12 @@ Examples:
 
     try:
         logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
+        
+        # FAIL FAST: Check if we are already obsolete before waiting for the lock
+        if model_manager.current_fast_request_id != request_id:
+            logging.info(f"Request {request_id} superseded before lock acquisition.")
+            return jsonify({"actions": []})
+
         # Use a timeout for the lock to prevent permanent deadlocks
         # If we can't get the lock in 5 seconds, it's likely stuck or very busy.
         if not model_manager.fast_lock.acquire(timeout=5.0):
@@ -319,6 +335,10 @@ Examples:
             out = model_manager.fast_model.create_chat_completion(
                 messages=messages, max_tokens=64, temperature=0.0, request_id=request_id
             )
+            
+            if out is None:
+                logging.info(f"Fast request {request_id} returned None (aborted).")
+                return jsonify({"actions": []})
             
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -438,6 +458,8 @@ Output exactly one word."""
                         classification = model_manager.fast_model.create_chat_completion(
                             messages=classify_messages, max_tokens=8, temperature=0.0, request_id=request_id
                         )
+                        if classification is None: raise Exception("Classification aborted")
+                        
                         classification_text = classification['choices'][0]['message']['content'].strip().upper()
                         # Strip non-ASCII (Qwen can emit Chinese/garbage when confused); then match PERSON/PLACE/SEARCH
                         import re
@@ -469,6 +491,8 @@ Output exactly one word."""
                                 write_out = model_manager.fast_model.create_chat_completion(
                                     messages=write_messages, max_tokens=120, temperature=0.3, request_id=request_id
                                 )
+                                if write_out is None: raise Exception("Writing aborted")
+                                
                                 card_text = write_out['choices'][0]['message']['content'].strip()
                                 logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
                                 # Parse NAME: and DESCRIPTION:

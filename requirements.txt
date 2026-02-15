@@ -8,6 +8,8 @@ memvid_sdk
 PyQt6
 Pillow
 packaging
+pypdf
+python-docx
 
 # Keyboard handling
 keyboard

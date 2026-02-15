@@ -22,7 +22,7 @@ from src.ui.widgets.command_widget import CommandLogWidget
 import socket
 from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, 
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
-                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconLoader, MicWidget)
+                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 
 from src.ui.workers.ai_worker import AIWorker
@@ -258,10 +258,9 @@ class OmniWindow(QWidget):
         # Start IPC Listener
         start_ipc_listener(self)
 
-        # Warm up IconLoader (initializes QFileIconProvider/CoInitialize/etc)
+        # Warm up IconManager (initializes QFileIconProvider/CoInitialize/etc)
         # We use sys.executable to trigger the heavy path for EXE icons to prevent freeze on first type
-        warmup_loader = IconLoader(sys.executable)
-        QThreadPool.globalInstance().start(warmup_loader)
+        IconManager.instance().request(sys.executable)
 
         # Apply initial blur
         self.apply_blur()

@@ -8,7 +8,13 @@ from watchdog.events import FileSystemEventHandler
 from sentence_transformers import SentenceTransformer
 from PIL import Image
 
+# Ensure project root is in path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
 from src.core.config import DB_PATH, HOME
+from src.services.search.utils import process_file_content, is_text_file
 
 # Setup logging - Silent for production unless error
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,6 +22,7 @@ logger = logging.getLogger("watcher")
 logger.setLevel(logging.INFO)
 
 TABLE_NAME = "files"
+CHUNKS_TABLE_NAME = "file_chunks"
 
 # Directories to strictly ignore to avoid feedback loops and noise
 IGNORE_DIRS = {
@@ -33,11 +40,12 @@ BLOCKED_EXTENSIONS = {
 }
 
 class IndexHandler(FileSystemEventHandler):
-    def __init__(self, db_table, model, img_table, vision_model):
+    def __init__(self, db_table, model, img_table, vision_model, chunk_table):
         self.table = db_table
         self.model = model
         self.img_table = img_table
         self.vision_model = vision_model
+        self.chunk_table = chunk_table
 
     def on_created(self, event):
         if event.is_directory or self._should_ignore(event.src_path): return
@@ -108,7 +116,7 @@ class IndexHandler(FileSystemEventHandler):
         if not filename: return
         
         try:
-            logger.info(f"Indexing: {path}")
+            logger.info(f"Indexing Filename: {path}")
             vector = self.model.encode(filename).tolist()
             
             # Remove old entry if exists to avoid duplicates
@@ -121,13 +129,45 @@ class IndexHandler(FileSystemEventHandler):
                 "path": path
             }])
         except Exception as e:
-            logger.error(f"Error indexing {path}: {e}")
+            logger.error(f"Error indexing filename {path}: {e}")
+
+        # CONTENT INDEXING
+        if self.chunk_table and is_text_file(path):
+            try:
+                chunks = process_file_content(path)
+                if not chunks: return
+
+                logger.info(f"Indexing Content: {path} ({len(chunks)} chunks)")
+                
+                # Encode chunks
+                vectors = self.model.encode(chunks).tolist()
+                
+                # Remove old chunks
+                self.chunk_table.delete(f'path = "{path}"')
+                
+                # Add new chunks
+                chunk_data = []
+                for i, chunk in enumerate(chunks):
+                    chunk_data.append({
+                        "vector": vectors[i],
+                        "filename": filename,
+                        "path": path,
+                        "chunk_id": i,
+                        "content": chunk
+                    })
+                
+                self.chunk_table.add(chunk_data)
+                
+            except Exception as e:
+                logger.error(f"Error indexing content for {path}: {e}")
 
     def _remove_file(self, path):
         try:
             logger.info(f"Removing: {path}")
             self.table.delete(f'path = "{path}"')
             self.img_table.delete(f'path = "{path}"')
+            if self.chunk_table:
+                self.chunk_table.delete(f'path = "{path}"')
         except Exception as e:
             logger.error(f"Error removing {path}: {e}")
 
@@ -143,17 +183,35 @@ def main():
         table = db.open_table(TABLE_NAME)
         # Create or open images table
         img_table = db.create_table("images", schema=None, mode="overwrite") if "images" not in db.table_names() else db.open_table("images")
+        
+        # Open chunks table if exists
+        chunk_table = None
+        if CHUNKS_TABLE_NAME in db.table_names():
+            chunk_table = db.open_table(CHUNKS_TABLE_NAME)
+        else:
+            logger.warning(f"{CHUNKS_TABLE_NAME} table not found. Content indexing will be skipped until indexer is run.")
+
     except Exception as e:
         logger.error(f"Failed to open tables: {e}")
         sys.exit(1)
 
-    # Force CPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # Force CPU only if strictly necessary, but for Gemma 300M we want speed (MPS)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "" 
     logging.info("Loading models...")
-    model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-    vision_model = SentenceTransformer('clip-ViT-B-32', device='cpu')
+    
+    # Use Centralized Model Manager
+    import src.services.llm.model_manager as model_manager
+    model_manager.ensure_main_model()
+    
+    if model_manager.embed_model is None:
+        logging.error("Failed to load embedding model.")
+        return
 
-    event_handler = IndexHandler(table, model, img_table, vision_model)
+    model = model_manager.embed_model
+
+    vision_model = SentenceTransformer('clip-ViT-B-32', device='cpu') # Keep Vision on CPU for now to save VRAM/Unified Memory
+
+    event_handler = IndexHandler(table, model, img_table, vision_model, chunk_table)
     observer = Observer()
     observer.schedule(event_handler, HOME, recursive=True)
     observer.start()

@@ -33,8 +33,8 @@ class AIWorker(QThread):
                             if data.get("type") == "partial":
                                 thinking = data.get("thinking", "")
                                 answer = data.get("answer", "")
-                                if thinking or answer:
-                                    logging.info(f"[STREAM] client received partial (thinking={len(thinking)}, answer={len(answer)} chars)")
+                                # if thinking or answer:
+                                #     logging.info(f"[STREAM] client received partial (thinking={len(thinking)}, answer={len(answer)} chars)")
                                 self.partial_response.emit({
                                     "answer": answer,
                                     "actions": [],

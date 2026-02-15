@@ -12,9 +12,15 @@ import socket
 # Prefer external libllama if present
 try:
     from src.core.config import PROJECT_ROOT
-    _ll_path = os.path.join(PROJECT_ROOT, ".deps", "llama.cpp", "build", "lib", "libllama.dylib")
-    if os.path.exists(_ll_path):
-        os.environ["LLAMA_CPP_LIB"] = _ll_path
+    # Check bin first (make build), then lib (cmake build)
+    _ll_path_bin = os.path.join(PROJECT_ROOT, ".deps", "llama.cpp", "build", "bin", "libllama.dylib")
+    _ll_path_lib = os.path.join(PROJECT_ROOT, ".deps", "llama.cpp", "build", "lib", "libllama.dylib")
+    
+    if os.path.exists(_ll_path_bin):
+        os.environ["LLAMA_CPP_LIB"] = _ll_path_bin
+        os.environ["LLAMA_CPP_LOG"] = "1"
+    elif os.path.exists(_ll_path_lib):
+        os.environ["LLAMA_CPP_LIB"] = _ll_path_lib
         os.environ["LLAMA_CPP_LOG"] = "1"
 except Exception:
     pass
@@ -39,6 +45,8 @@ from src.core.config import (
     FAST_MODEL_HF_ID,
     MAIN_MODEL_PATH, MAIN_MODEL_FILENAME, MAIN_MODEL_URL,
     MMPROJ_PATH, MMPROJ_URL, MMPROJ_FILENAME,
+    EMBED_MODEL_PATH, EMBED_MODEL_FILENAME, EMBED_MODEL_URL,
+    EMBED_MODEL_HF_ID,
     DB_PATH
 )
 
@@ -185,39 +193,67 @@ def ensure_fast_model():
                     # Default params for action model
                     eff_temp = temperature if temperature > 0 else 0.1
                     
-                    # Stream to allow abortion
-                    stream = self.model.create_chat_completion(
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=eff_temp,
-                        stream=True,
-                        **kwargs
-                    )
+                    # 1. Pre-check abortion to save resources and avoid race conditions
+                    if abort_fast_event.is_set():
+                        return None
+                    if request_id is not None and current_fast_request_id != request_id:
+                        return None
+
+                    # 2. Stream creation with error handling
+                    try:
+                        stream = self.model.create_chat_completion(
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=eff_temp,
+                            stream=True,
+                            **kwargs
+                        )
+                    except Exception as e:
+                        logging.error(f"Failed to create chat completion stream: {e}")
+                        return None
                     
                     full_content = ""
                     completion_tokens = 0
                     
-                    for chunk in stream:
-                        # Check abortion
-                        if abort_fast_event.is_set():
-                            logging.info(f"Fast request {request_id} aborted.")
-                            return None
-                        if request_id is not None and current_fast_request_id != request_id:
-                            return None
-                            
-                        try:
-                            if not chunk or 'choices' not in chunk or not chunk['choices']:
-                                continue
+                    try:
+                        for chunk in stream:
+                            # Check abortion
+                            if abort_fast_event.is_set():
+                                logging.info(f"Fast request {request_id} aborted.")
+                                return None
+                            if request_id is not None and current_fast_request_id != request_id:
+                                logging.info(f"Fast request {request_id} superseded by {current_fast_request_id}.")
+                                return None
                                 
-                            delta = chunk['choices'][0]['delta'].get('content', '')
-                            if delta:
-                                full_content += delta
-                                completion_tokens += 1
-                        except Exception as e:
-                            logging.warning(f"Error processing chunk: {e}")
-                            continue
+                            try:
+                                if not chunk or 'choices' not in chunk or not chunk['choices']:
+                                    continue
+                                    
+                                delta = chunk['choices'][0]['delta'].get('content', '')
+                                if delta:
+                                    full_content += delta
+                                    completion_tokens += 1
+                            except Exception as e:
+                                logging.warning(f"Error processing chunk: {e}")
+                                continue
+                    except Exception as e:
+                         logging.error(f"Error during stream iteration: {e}")
+                         return None
+                    finally:
+                        # 3. Robust Cleanup in finally block
+                        # Ensure stream is closed and resources freed to prevent race conditions
+                        try:
+                            stream.close()
+                        except:
+                            pass
+                        
+                        # 4. Explicitly delete stream object to trigger C++ cleanup immediately
+                        try: del stream
+                        except: pass
+                        
+                        # 5. Small delay to allow C++ backend (thread pool) to settle before next request
+                        time.sleep(0.01)
 
-                            
                     return {
                         "choices": [{
                             "message": {"role": "assistant", "content": full_content}
@@ -233,6 +269,52 @@ def ensure_fast_model():
             logging.error(f"Fast Model Load Error: {e}")
             init_error = str(e)
 
+
+class LlamaEmbeddingWrapper:
+    def __init__(self, model_path):
+        from llama_cpp import Llama
+        self.model = Llama(
+            model_path=model_path,
+            embedding=True,
+            n_threads=4,
+            n_gpu_layers=-1, # Use Metal
+            verbose=False
+        )
+
+    def encode(self, sentences, batch_size=32, show_progress_bar=False, **kwargs):
+        """
+        Mimic SentenceTransformer.encode
+        Input: list of strings (or single string)
+        Output: list of numpy arrays (embeddings)
+        """
+        import numpy as np
+        
+        if isinstance(sentences, str):
+            sentences = [sentences]
+            
+        embeddings = []
+        for text in sentences:
+            # llama-cpp-python create_embedding returns a list of floats
+            # by default it embeds the whole prompt.
+            # Gemma embedding models usually expect just the text.
+            try:
+                # Note: create_embedding returns specific structure or list depending on version
+                # In recent versions: returns { "data": [ { "embedding": [...] } ], ... }
+                # OR if using lower level, just list. 
+                # Let's use the high level `create_embedding`
+                resp = self.model.create_embedding(text)
+                if isinstance(resp, dict) and "data" in resp:
+                     emb = resp["data"][0]["embedding"]
+                else:
+                     emb = resp # older versions?
+                
+                embeddings.append(np.array(emb, dtype=np.float32))
+            except Exception as e:
+                logging.error(f"Embedding error for text '{text[:20]}...': {e}")
+                # Return zero vector fallback
+                embeddings.append(np.zeros(768, dtype=np.float32)) # Assuming 768 dim for 300M model
+                
+        return np.array(embeddings)
 
 def ensure_main_model():
     """Loads the larger, main model for chat."""
@@ -258,11 +340,29 @@ def ensure_main_model():
         if embed_model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-                # Force CPU for embeddings to avoid Metal conflicts and meta tensor issues
-                # We must be very careful about device placement on Mac
+                import torch
+                
+                model_id = EMBED_MODEL_HF_ID
+                
+                # Try MPS for speed on Mac, but fallback to CPU if likely to conflict with llama.cpp
+                # Recent observation: running PyTorch MPS + llama.cpp Metal in same process causes malloc/double-free crashes.
+                # We prioritize GPU for the Main LLM (llama.cpp), so we force Embeddings to CPU for stability.
+                device = "cpu" 
+                logging.info(f"Loading Embedding Model ({model_id}) on {device}...")
+                
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-                embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-            except Exception as e: logging.error(f"Embeddings Error: {e}")
+                
+                try:
+                    # BAAI/bge-m3 requires trust_remote_code=True for some versions/configurations
+                    embed_model = SentenceTransformer(model_id, device=device, trust_remote_code=True)
+                except Exception as e:
+                    logging.warning(f"Failed to load {model_id} on {device}: {e}")
+                    # fallback is same since we are already on cpu, but keeping structure
+                    embed_model = SentenceTransformer(model_id, device='cpu', trust_remote_code=True)
+                    
+            except Exception as e: 
+                logging.error(f"Embeddings Error: {e}")
+
 
     # 2. Main Model
     if llm: return

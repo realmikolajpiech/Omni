@@ -4,75 +4,109 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdi
 from PyQt6.QtCore import (Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, 
                           QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo,
                           QThreadPool, QRunnable, QObject, pyqtSignal, QPoint)
-from PyQt6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap, QPainterPath
+from PyQt6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap, QPainterPath, QImage
 
 from src.ui.styles import THEMES
 
 ICON_CACHE = {}
 
-class IconLoaderSignals(QObject):
-    icon_loaded = pyqtSignal(QIcon, str)
+class IconManager(QObject):
+    icon_loaded = pyqtSignal(str, QPixmap)
+    _instance = None
 
-class IconLoader(QRunnable):
-    def __init__(self, icon_name):
+    @classmethod
+    def instance(cls):
+        if not cls._instance:
+            cls._instance = IconManager()
+        return cls._instance
+
+    def __init__(self):
         super().__init__()
-        self.icon_name = icon_name
-        self.signals = IconLoaderSignals()
+        self.queue = []
+        self.is_processing = False
 
-    def run(self):
-        try:
-            import pythoncom
-            pythoncom.CoInitialize()
-        except: pass
+    def request(self, name):
+        if name in ICON_CACHE:
+            self.icon_loaded.emit(name, ICON_CACHE[name])
+            return
 
-        icon = QIcon()
-        icon_name = self.icon_name
-        
+        if name not in self.queue:
+            self.queue.append(name)
+            if not self.is_processing:
+                self.process_next()
+
+    def process_next(self):
         try:
-            if os.path.isabs(icon_name) and os.path.exists(icon_name):
-                 # Try loading as standard image first
-                 icon = QIcon(icon_name)
-                 # If it fails or is a system file type (exe/lnk), use QFileIconProvider
-                 if icon.isNull() or icon_name.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
-                     provider = QFileIconProvider()
-                     icon = provider.icon(QFileInfo(icon_name))
-            else:
-                 icon = QIcon.fromTheme(icon_name)
-                 if icon.isNull():
-                     pixmap_path = f"/usr/share/pixmaps/{icon_name}.png"
-                     if os.path.exists(pixmap_path):
-                         icon = QIcon(pixmap_path)
-                     elif os.path.exists(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png"):
-                         icon = QIcon(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png")
-                     
+            if not self.queue:
+                self.is_processing = False
+                return
+
+            self.is_processing = True
+            icon_name = self.queue.pop(0)
+
+            # Loading Logic (Main Thread)
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except: pass
+
+            icon = QIcon()
+            try:
+                if os.path.isabs(icon_name) and os.path.exists(icon_name):
+                     # Try loading as standard image first
+                     icon = QIcon(icon_name)
+                     # If it fails or is a system file type (exe/lnk), use QFileIconProvider
+                     if icon.isNull() or icon_name.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                         provider = QFileIconProvider()
+                         icon = provider.icon(QFileInfo(icon_name))
+                else:
+                     icon = QIcon.fromTheme(icon_name)
                      if icon.isNull():
-                         flatpak_dirs = [
-                             os.path.expanduser("~/.local/share/flatpak/exports/share/icons/hicolor"),
-                             "/var/lib/flatpak/exports/share/icons/hicolor"
-                         ]
-                         sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "512x512", "scalable"]
+                         pixmap_path = f"/usr/share/pixmaps/{icon_name}.png"
+                         if os.path.exists(pixmap_path):
+                             icon = QIcon(pixmap_path)
+                         elif os.path.exists(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png"):
+                             icon = QIcon(f"/usr/share/icons/hicolor/48x48/apps/{icon_name}.png")
                          
-                         for d in flatpak_dirs:
-                             if not icon.isNull(): break
-                             if not os.path.exists(d): continue
-                             for s in sizes:
-                                 p = os.path.join(d, s, "apps", f"{icon_name}.png")
-                                 if os.path.exists(p):
-                                     icon = QIcon(p)
-                                     break
-                                 p_svg = os.path.join(d, s, "apps", f"{icon_name}.svg")
-                                 if os.path.exists(p_svg):
-                                     icon = QIcon(p_svg)
-                                     break
-        except Exception:
-            pass
-        
-        try:
-            import pythoncom
-            pythoncom.CoUninitialize()
-        except: pass
+                         if icon.isNull():
+                             flatpak_dirs = [
+                                 os.path.expanduser("~/.local/share/flatpak/exports/share/icons/hicolor"),
+                                 "/var/lib/flatpak/exports/share/icons/hicolor"
+                             ]
+                             sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "512x512", "scalable"]
+                             
+                             for d in flatpak_dirs:
+                                 if not icon.isNull(): break
+                                 if not os.path.exists(d): continue
+                                 for s in sizes:
+                                     p = os.path.join(d, s, "apps", f"{icon_name}.png")
+                                     if os.path.exists(p):
+                                         icon = QIcon(p)
+                                         break
+                                     p_svg = os.path.join(d, s, "apps", f"{icon_name}.svg")
+                                     if os.path.exists(p_svg):
+                                         icon = QIcon(p_svg)
+                                         break
+            except Exception:
+                pass
 
-        self.signals.icon_loaded.emit(icon, self.icon_name)
+            if not icon.isNull():
+                # Create pixmap directly on main thread
+                pixmap = icon.pixmap(48, 48)
+                pixmap.setDevicePixelRatio(2.0)
+                ICON_CACHE[icon_name] = pixmap
+                self.icon_loaded.emit(icon_name, pixmap)
+            
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except: pass
+        except Exception as e:
+            # Prevent loop crash
+            print(f"Error in IconManager: {e}")
+        finally:
+            # Schedule next item with a small delay to keep UI responsive
+            QTimer.singleShot(5, self.process_next)
 
 class ReplyActionWidget(QWidget):
     def __init__(self, title, content, parent=None):
@@ -610,15 +644,16 @@ class StandardItemWidget(QWidget):
         self.lbl_icon.setFixedSize(24, 24)
         
         if icon_name:
+            self.icon_name_requested = icon_name
             self.layout.addWidget(self.lbl_icon)
+            self.lbl_icon.setScaledContents(True) # Allow scaling of high-res icons
             
             if icon_name in ICON_CACHE:
-                self.lbl_icon.setPixmap(ICON_CACHE[icon_name].pixmap(24, 24))
+                self.lbl_icon.setPixmap(ICON_CACHE[icon_name])
             else:
-                # Load asynchronously
-                loader = IconLoader(icon_name)
-                loader.signals.icon_loaded.connect(self.on_icon_loaded)
-                QThreadPool.globalInstance().start(loader)
+                # Load asynchronously via Main Thread Manager
+                IconManager.instance().icon_loaded.connect(self.on_icon_loaded)
+                IconManager.instance().request(icon_name)
 
         self.raw_text = text
         self.lbl_text = QLabel(text)
@@ -661,10 +696,17 @@ class StandardItemWidget(QWidget):
         self.current_theme = theme
         self.update_style()
 
-    def on_icon_loaded(self, icon, name):
-        if not icon.isNull():
-            ICON_CACHE[name] = icon
-            self.lbl_icon.setPixmap(icon.pixmap(24, 24))
+    def on_icon_loaded(self, name, pixmap):
+        try:
+            if hasattr(self, 'icon_name_requested') and self.icon_name_requested != name:
+                 return
+                 
+            if not pixmap.isNull():
+                ICON_CACHE[name] = pixmap
+                self.lbl_icon.setPixmap(pixmap)
+        except RuntimeError:
+            # Widget likely deleted (wrapped C/C++ object has been deleted)
+            pass
 
     def set_text(self, text):
         self.raw_text = text
@@ -757,9 +799,8 @@ class MicWidget(QLabel):
         self.icon_name = "audio-input-microphone"
         self.active = False
         
-        loader = IconLoader(self.icon_name)
-        loader.signals.icon_loaded.connect(self.on_icon_loaded)
-        QThreadPool.globalInstance().start(loader)
+        IconManager.instance().icon_loaded.connect(self.on_icon_loaded)
+        IconManager.instance().request(self.icon_name)
         
         self.setStyleSheet("""
             QLabel {
@@ -803,13 +844,18 @@ class MicWidget(QLabel):
                 }}
             """)
 
-    def on_icon_loaded(self, icon, name):
-        if not icon.isNull():
-            self.setPixmap(icon.pixmap(24, 24))
-        else:
-            # Fallback text
-            self.setText("🎤")
-            self.setFont(QFont("Segoe UI Emoji", 20))
+    def on_icon_loaded(self, name, pixmap):
+        try:
+            if name != self.icon_name: return
+            
+            if not pixmap.isNull():
+                self.setPixmap(pixmap)
+            else:
+                # Fallback text
+                self.setText("🎤")
+                self.setFont(QFont("Segoe UI Emoji", 20))
+        except RuntimeError:
+            pass
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

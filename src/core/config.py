@@ -34,6 +34,12 @@ MMPROJ_FILENAME = "mmproj-Qwen3VL-4B-Thinking-F16.gguf"
 MMPROJ_PATH = os.path.join(MODEL_DIR, MMPROJ_FILENAME)
 MMPROJ_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-4B-Thinking-F16.gguf"
 
+# Embedding Model
+EMBED_MODEL_HF_ID = "BAAI/bge-m3" # Multi-functionality embedding model (Dense, Sparse, ColBERT)
+EMBED_MODEL_FILENAME = "bge-m3.onnx" # Placeholder
+EMBED_MODEL_PATH = os.path.join(MODEL_DIR, EMBED_MODEL_FILENAME)
+EMBED_MODEL_URL = "" 
+
 # Voice Models
 VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
 VOSK_MODEL_PATH = os.path.join(MODEL_DIR, VOSK_MODEL_NAME)
