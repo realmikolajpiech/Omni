@@ -68,7 +68,8 @@ def main():
     # Initialize table
     try:
         db.drop_table(TABLE_NAME)
-    except: pass
+    except Exception as e:
+        logging.warning(f"Could not drop table {TABLE_NAME}: {e}")
     table = None
     
     total_files = 0
@@ -81,7 +82,7 @@ def main():
                 if file.startswith("."): continue
                 _, ext = os.path.splitext(file)
                 if ext.lower() in BLOCKED_EXTENSIONS: continue
-                if not ext: continue
+                # if not ext: continue # Allow files without extension (e.g. 'dreams', 'TODO')
                 yield os.path.join(root, file), file
 
     for full_path, filename in file_generator(HOME):

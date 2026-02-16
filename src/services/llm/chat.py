@@ -25,7 +25,12 @@ def perform_calculation(expression):
                 expression = expression[len(prefix):]
         s = SimpleEval()
         result = s.eval(expression)
-        return (f"Expression: {expression}\nResult: {result}")
+        # Return both the result and a LaTeX formatted version of the equation
+        latex_expr = expression.replace("*", " \\cdot ").replace("/", " \\div ").replace("^", "^{").replace("**", "^{")
+        # Add closing brace for powers if needed
+        if "^{" in latex_expr and latex_expr.count("{") > latex_expr.count("}"):
+            latex_expr += "}"
+        return (f"Expression: {expression}\nResult: {result}\nLaTeX: ${latex_expr} = {result}$")
     except Exception as e:
         return f"Error calculating '{expression}': {str(e)}"
 

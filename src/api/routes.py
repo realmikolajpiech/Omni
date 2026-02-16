@@ -180,7 +180,8 @@ def ask_llm():
 
 @api_bp.route('/search', methods=['POST'])
 def search_endpoint():
-    model_manager.ensure_main_model()
+    # Only ensure resources (DB/Embeddings) are loaded, NOT the main LLM
+    model_manager.ensure_resources()
     
     # Protect shared resource access with search_lock
     with model_manager.search_lock:
@@ -312,14 +313,35 @@ def action_endpoint():
         logging.info(f"Regex Install: {app}")
         return jsonify({"actions": [{"type": "install", "name": app}]})
 
-    # Calculate
+    # 1.7.5 Implicit Calculation
+    # Check for simple math expressions like "12*3", "100/4", "5+5", "10-2"
+    # We want to avoid matching dates or phone numbers if possible, but strict math is usually fine.
+    # Regex: Start with digits/parens, contains at least one operator, ends with digits/parens.
+    # Allowed chars: 0-9 . ( ) + - * / ^ % space
+    if any(op in query for op in ['+', '-', '*', '/', '^', '%']):
+         # clean check
+         import re
+         # Allow digits, operators, parens, spaces, dots
+         if re.match(r'^[\d\s\.\(\)\+\-\*\/\^\%]+$', query):
+             # Ensure at least one digit and one operator
+             if re.search(r'\d', query) and re.search(r'[\+\-\*\/\^\%]', query):
+                 try:
+                     res = perform_calculation(query)
+                     if "Error" not in res:
+                         val = res.split("Result: ")[1].strip() if "Result: " in res else res
+                         logging.info(f"Implicit Calc: {query} -> {val}")
+                         # Return immediately to avoid search
+                         return jsonify({"actions": [{"type": "calc", "content": val, "equation": query}]})
+                 except: pass
+
+    # Calculate (Explicit)
     calc_match = re.search(r"^(?:calculate|calc|solve|what is)\s+([\d\+\-\*\/\(\)\.\s]+)$", query, re.IGNORECASE)
     if calc_match:
         expr = calc_match.group(1).strip()
         res = perform_calculation(expr)
         val = res.split("Result: ")[1].strip() if "Result: " in res else res
         logging.info(f"Regex Calc: {expr} -> {val}")
-        return jsonify({"actions": [{"type": "calc", "content": val}]})
+        return jsonify({"actions": [{"type": "calc", "content": val, "equation": expr}]})
         
     # Open URL
     url_match = re.search(r"^(?:open|go to|visit)\s+(https?://[^\s]+|www\.[^\s]+|[a-z0-9]+\.[a-z]{2,}[^\s]*)$", query, re.IGNORECASE)
@@ -330,24 +352,56 @@ def action_endpoint():
         title = url.replace("https://", "").replace("www.", "").split('/')[0]
         return jsonify({"actions": [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]})
 
+    # 1.8 SEARCH FIRST (Workflow Optimization)
+    # Perform general search immediately to provide context for the LLM.
+    # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
+    from src.services.search.web_search import search_api
+    
+    logging.info(f"Performing pre-emptive search for: '{query}'")
+    search_results = search_api(query, categories='general', fast=True)
+    
+    # Build search context for LLM
+    search_context = ""
+    if search_results:
+        search_context = "Search results:\n"
+        for i, res in enumerate(search_results[:4], 1): # Top 4 results
+            title = res.get('title', 'N/A')
+            content = (res.get('content') or res.get('snippet', '') or 'N/A')
+            if len(content) > 300: content = content[:300] + "..."
+            url = res.get('url', 'N/A')
+            search_context += f"\n--- Result {i} ---\nTitle: {title}\nDescription: {content}\nURL: {url}\n"
+    else:
+        search_context = "Search results: No results found."
+
+    logging.info(f"Search Context prepared ({len(search_context)} chars)")
+
     # 2. LLM Inference
     # Better prompt with more examples for different command types
-    system_prompt = """Extract the user's intent and output ONE command:
-- PERSON:Name (for "who is", "biography of", names)
-- PLACE:Name (for "where is", "find", locations)  
-- OPEN:url (for "open", "go to", URLs)
-- OPEN_APP:name (for "run", "launch", desktop apps)
-- INSTALL:name (for "install", "download", software)
-- SEARCH:query (default for general queries)
+    system_prompt = """You are an intelligent action classifier.
+Analyze the user query and the provided search results to decide the best action.
+
+Output ONE command:
+- PERSON:Name (if search results confirm it's a real person/biography)
+- PLACE:Name (if results confirm it's a physical location/city/landmark)
+- OPEN:url (if results show a specific official website for the query, e.g. 'safelabs.info')
+- INSTALL:name (if results show it's downloadable software)
+- SEARCH:query (if it's a general topic or unclear)
+
+Rules:
+1. If the user asks for a website (e.g. "safelabs"), and Result 1 is the official site, output OPEN:url.
+2. If the user asks "who is...", output PERSON:Name.
+3. If the user asks "where is...", output PLACE:Name.
+4. If the results clearly show software/app, output INSTALL:Name.
+5. Otherwise, default to SEARCH:query.
 
 Examples:
-'who is elon' → PERSON:Elon Musk
-'where is paris' → PLACE:Paris
-'open google' → OPEN:google.com
-'install chrome' → INSTALL:Chrome
-'youtube' → SEARCH:youtube"""
+'safelabs' + [Result 1: Safe Labs Official Site...] -> OPEN:https://safelabs.info
+'elon musk' + [Result 1: Elon Musk - Wikipedia...] -> PERSON:Elon Musk
+'paris' + [Result 1: Paris - Capital of France...] -> PLACE:Paris
+'vscode' + [Result 1: Visual Studio Code - Code Editing...] -> INSTALL:vscode
+"""
     
-    user_prompt = f"Query: {query}"
+    user_prompt = f"Query: {query}\n\n{search_context}"
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -455,8 +509,11 @@ Examples:
                 try:
                     expr = line.split("CALC:")[1].strip()
                     res = perform_calculation(expr)
+                    # Extract result and LaTeX
                     val = res.split("Result: ")[1].strip() if "Result: " in res else res
-                    actions.append({"type": "calc", "content": val})
+                    latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+                    latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
+                    actions.append({"type": "calc", "content": val, "equation": latex_eq})
                 except: pass
 
             if "FA:" in line:
@@ -482,10 +539,20 @@ Examples:
                 if q != raw_q:
                     logging.info(f"Fast model SEARCH query sanitized: '{raw_q[:80]}' -> '{q}'")
                 
-                # Get search results to analyze
-                from src.services.search.web_search import search_api
-                results = search_api(q, categories='general', fast=True)
-                logging.info(f"[DEBUG] Got {len(results) if results else 0} raw search results for: '{q}'")
+                # Use EXISTING results if query matches (or if LLM kept original query)
+                # If LLM changed query significantly, we might need new search, 
+                # but usually it's just "SEARCH:original_query".
+                # To be safe: if q is similar to original query, reuse.
+                # Since we already searched for 'query', if q == query, we reuse.
+                
+                results = []
+                if q.lower() == query.lower() and search_results:
+                     logging.info(f"Reusing {len(search_results)} existing search results for SEARCH action")
+                     results = search_results
+                else:
+                     logging.info(f"Refetching search results for new query: '{q}'")
+                     from src.services.search.web_search import search_api
+                     results = search_api(q, categories='general', fast=True)
                 
                 if results:
                     # Build rich context from top 5 results - full descriptions for model to decide
@@ -602,29 +669,38 @@ Output exactly one word."""
                                 # Optional: get image
                                 img_url = None
                                 try:
-                                    img_results = search_api(person_name, categories='images')
-                                    if img_results:
-                                        img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
+                                    # Use existing results for image if possible?
+                                    # No, search_api needs explicit categories='images'.
+                                    # But we can try to find image in current results?
+                                    # Usually general results don't have good image URLs unless enriched.
+                                    # Let's check existing results first if we have them.
+                                    pass
                                 except Exception:
                                     pass
-                                actions.append({
-                                    "type": "person",
-                                    "name": person_name or q,
-                                    "description": person_desc or results[0].get('content', results[0].get('snippet', ''))[:200],
-                                    "url": first_url,
-                                    "image": img_url
-                                })
+                                
+                                # Use get_person_result with fallback to avoid re-search
+                                person_res_fallback = get_person_result(person_name, existing_results=results)
+                                if person_res_fallback:
+                                     actions.append(person_res_fallback)
+                                else:
+                                     actions.append({
+                                        "type": "person",
+                                        "name": person_name or q,
+                                        "description": person_desc or results[0].get('content', results[0].get('snippet', ''))[:200],
+                                        "url": first_url,
+                                        "image": None
+                                    })
                                 continue
                             except Exception as e:
                                 logging.error(f"[DEBUG] Person card generation failed: {e}, falling back to get_person_result")
-                                person_result = get_person_result(q)
+                                person_result = get_person_result(q, existing_results=results)
                                 if person_result:
                                     actions.append(person_result)
                                     continue
                         
                         elif first_word == "PLACE":
                             logging.info(f"[DEBUG] Model chose PLACE for: {q}")
-                            place_result = get_place_result(q)
+                            place_result = get_place_result(q, existing_results=results)
                             if place_result:
                                 actions.append(place_result)
                                 continue
@@ -635,14 +711,14 @@ Output exactly one word."""
                 # If query still looks like a person, prefer person card over website link.
                 person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
                 if person_candidate:
-                    person_result = get_person_result(person_candidate)
+                    person_result = get_person_result(person_candidate, existing_results=results)
                     if person_result:
                         logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
                         actions.append(person_result)
                         continue
 
                 # Fallback: treat as website search
-                nav = get_navigation_result(q, fast=True)
+                nav = get_navigation_result(q, fast=True, existing_results=results)
                 if nav:
                     logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
@@ -652,12 +728,12 @@ Output exactly one word."""
 
             elif "PERSON:" in line:
                 name = line.split("PERSON:")[1].strip()
-                res = get_person_result(name)
+                res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
                 if res: actions.append(res)
 
             elif "PLACE:" in line:
                 name = line.split("PLACE:")[1].strip()
-                res = get_place_result(name)
+                res = get_place_result(name, existing_results=search_results if name.lower() in query.lower() else None)
                 if res: actions.append(res)
 
             elif "INSTALL:" in line:

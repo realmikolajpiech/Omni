@@ -101,7 +101,7 @@ def process_file_content(path, chunk_size=1000, overlap=100):
 TEXT_EXTENSIONS = {
     '.txt', '.md', '.py', '.js', '.html', '.css', '.c', '.cpp', '.h', '.sh', 
     '.json', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.conf', '.java', '.rs', '.go',
-    '.pdf', '.docx', '.rtf'
+    '.pdf', '.docx', '.rtf', ''
 }
 
 def is_text_file(path):

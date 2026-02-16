@@ -9,6 +9,7 @@ from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiAppli
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from src.ui.styles import THEMES
+from src.ui.widgets.math_widget import MathWidget
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
@@ -291,6 +292,120 @@ class InstallActionWidget(LinkActionWidget):
                     font-weight: 800;
                     min-width: 24px;
                 """)
+
+class CalcActionWidget(QWidget):
+    def __init__(self, content, equation="", parent=None):
+        super().__init__(parent)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Card Container
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        self.card.setStyleSheet("""
+            QWidget#ActionCard {
+                background-color: rgba(255, 255, 255, 0.25);
+                border-radius: 16px;
+                border: 1px solid rgba(255, 255, 255, 0.4);
+            }
+        """)
+        
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(12, 10, 12, 10)
+        card_layout.setSpacing(4)
+        
+        # Top Row: Icon + Label
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        
+        self.icon_label = QLabel("=")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("""
+            background-color: transparent; 
+            color: #333333; 
+            font-size: 10px; 
+            border: none;
+        """)
+        
+        self.action_label = QLabel("CALCULATION")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.action_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
+        
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        
+        # Math Widget for result and equation
+        self.math_widget = MathWidget(content, equation)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.math_widget)
+        
+        layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+    
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.math_widget.set_theme(theme)
+        self.update_style()
+    
+    def update_style(self):
+        """Update the widget style based on current theme."""
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+        
+        # Card Style
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            icon_color = "#FFFFFF"
+            action_color = "#CCCCCC"
+        else:
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(255, 255, 255, 0.4)"
+            icon_color = "#333333"
+            action_color = "#888888"
+        
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        
+        self.icon_label.setStyleSheet(f"""
+            background-color: transparent; 
+            color: {icon_color}; 
+            font-size: 10px; 
+            border: none;
+        """)
+        
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
+    
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+    def update_style(self):
+        super().update_style()
+        self.icon_label.setStyleSheet("""
+            background-color: #333333; 
+            color: #FFFFFF; 
+            font-size: 14px; 
+            border-radius: 8px;
+        """)
 
 class FileActionWidget(QWidget):
     """File action widget with space-to-preview functionality."""

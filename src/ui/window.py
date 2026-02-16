@@ -16,7 +16,7 @@ from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
 from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, FileActionWidget, 
-                                         PersonActionWidget, PlaceActionWidget, AppActionWidget)
+                                         PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -147,6 +147,19 @@ class OmniWindow(QWidget):
 
         self.input_field = QLineEdit()
         self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        # Force no border/outline via style sheet and properties to kill blue ring
+        self.input_field.setStyleSheet("""
+            QLineEdit {
+                border: none;
+                outline: none;
+                background: transparent;
+            }
+            QLineEdit:focus {
+                border: none;
+                outline: none;
+            }
+        """)
+        self.input_field.setFrame(False) # Important for Qt widgets to remove native frame
         self.input_field.setPlaceholderText("Search or ask...")
         self.input_field.textChanged.connect(self.on_text_changed)
         self.input_field.returnPressed.connect(self.on_entered)
@@ -588,12 +601,31 @@ class OmniWindow(QWidget):
                 
     def center(self):
         cursor_pos = QCursor.pos()
-        screen = QGuiApplication.screenAt(cursor_pos) or QApplication.primaryScreen()
-        if screen:
-            geo = screen.availableGeometry()
+        
+        # Robustly find the screen containing the cursor
+        target_screen = None
+        for screen in QGuiApplication.screens():
+            if screen.geometry().contains(cursor_pos):
+                target_screen = screen
+                break
+        
+        # Fallback to screenAt if manual check fails
+        if not target_screen:
+            target_screen = QGuiApplication.screenAt(cursor_pos)
+            
+        # Fallback to primary
+        if not target_screen:
+            target_screen = QApplication.primaryScreen()
+            
+        if target_screen:
+            geo = target_screen.availableGeometry()
             x = geo.x() + (geo.width() - self.width()) // 2
             y = geo.y() + (geo.height() - self.height()) // 2
-            y = max(40, y - 150)
+            
+            # Ensure y is relative to screen top! 
+            # We want it slightly higher than center (y-150), but at least 40px from top of screen
+            y = max(geo.y() + 40, y - 150)
+            
             self.move(int(x), int(y))
         else:
             self.move(100, 100)
@@ -1176,6 +1208,8 @@ class OmniWindow(QWidget):
                     return PlaceActionWidget(a['name'], a['address'], a.get('image'), a.get('url'), a.get('latitude'), a.get('longitude'))
                 elif a.get('type') == 'status':
                     return StandardItemWidget(a['description'], icon_name="dialog-information")
+                elif a.get('type') == 'calc':
+                    return CalcActionWidget(a['content'], a.get('equation', ''))
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
@@ -1286,6 +1320,7 @@ class OmniWindow(QWidget):
         if data.get('type') == 'link': return f"link:{data.get('url')}"
         if data.get('type') == 'person': return f"person:{data.get('url') or data.get('name')}"
         if data.get('type') == 'place': return f"place:{data.get('url') or data.get('name')}"
+        if data.get('type') == 'calc': return f"calc:{data.get('content')}"
         # Fallback for others
         return str(data)
 

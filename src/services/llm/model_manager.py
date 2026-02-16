@@ -322,17 +322,10 @@ class LlamaEmbeddingWrapper:
                 
         return np.array(embeddings)
 
-def ensure_main_model():
-    """Loads the larger, main model for chat."""
-    global llm, init_error, embed_model, db_conn, last_main_activity, monitor_started
+def ensure_resources():
+    """Loads shared resources (DB & Embeddings) without loading the Main LLM."""
+    global embed_model, db_conn
     
-    # Update activity timestamp and start monitor if needed
-    last_main_activity = time.time()
-    if not monitor_started:
-        threading.Thread(target=_monitor_idle, daemon=True).start()
-        monitor_started = True
-    
-    # 1. DB & Embeddings (Shared)
     # Protect initialization with search_lock
     with search_lock:
         if db_conn is None:
@@ -369,6 +362,18 @@ def ensure_main_model():
             except Exception as e: 
                 logging.error(f"Embeddings Error: {e}")
 
+def ensure_main_model():
+    """Loads the larger, main model for chat."""
+    global llm, init_error, last_main_activity, monitor_started
+    
+    # Ensure shared resources are loaded first
+    ensure_resources()
+    
+    # Update activity timestamp and start monitor if needed
+    last_main_activity = time.time()
+    if not monitor_started:
+        threading.Thread(target=_monitor_idle, daemon=True).start()
+        monitor_started = True
 
     # 2. Main Model
     if llm: return

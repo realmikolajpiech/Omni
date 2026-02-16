@@ -116,8 +116,9 @@ def perform_file_search(query):
                         continue
 
                     # Only read text-like files (updated list to include RTF)
-                    # Better to reuse is_text_file from utils but for now hardcode extended list
-                    if any(path.lower().endswith(ext) for ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.c', '.cpp', '.h', '.sh', '.rtf']):
+                    # Reuse is_text_file from utils which now includes empty extensions
+                    from src.services.search.utils import is_text_file
+                    if is_text_file(path):
                         try:
                             # Use utils to process content (handles RTF stripping)
                             from src.services.search.utils import process_file_content
@@ -137,6 +138,40 @@ def perform_file_search(query):
     except Exception as e:
         logging.error(f"Filename search failed: {e}")
     
+    # 3. Fallback: OS-level search (mdfind/locate) if nothing found
+    if not file_contexts:
+        logging.info("LanceDB returned no results. Attempting fallback OS search...")
+        try:
+            import subprocess
+            import os
+            from src.services.search.utils import is_text_file, process_file_content
+            
+            # Simple keyword extraction (naive)
+            # Remove "search", "find", "my" etc.
+            keywords = query.replace("search", "").replace("find", "").replace("my", "").strip()
+            if keywords and len(keywords) > 2:
+                # Use mdfind on macOS
+                if sys.platform == 'darwin':
+                    cmd = ['mdfind', '-name', keywords]
+                    # Limit to 3 results
+                    proc = subprocess.run(cmd, capture_output=True, text=True)
+                    if proc.returncode == 0:
+                        paths = proc.stdout.strip().split('\n')[:3]
+                        for path in paths:
+                            if not path or not os.path.exists(path): continue
+                            if os.path.isdir(path): continue
+                            if "/Library/" in path or "/." in path: continue # Skip system/hidden
+                            
+                            if is_text_file(path):
+                                try:
+                                    chunks = process_file_content(path, chunk_size=1000)
+                                    content = chunks[0] if chunks else ""
+                                    if content:
+                                        file_contexts.append(f"--- File: {path} (OS Search Match) ---\n{content}\n...")
+                                except: pass
+        except Exception as e:
+            logging.error(f"Fallback search failed: {e}")
+
     result_text = "\n\n".join(file_contexts) if file_contexts else "No relevant files found."
     logging.info(f"Final File Context Length: {len(result_text)} chars")
     return result_text

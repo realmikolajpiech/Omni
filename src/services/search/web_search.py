@@ -180,7 +180,7 @@ def perform_web_search(query):
     except Exception as e:
         return f"Search failed: {str(e)}"
 
-def get_navigation_result(query, fast=False):
+def get_navigation_result(query, fast=False, existing_results=None):
     # Check for common apps first (instant!)
     query_lower = query.lower().strip()
     if query_lower in COMMON_APPS:
@@ -200,8 +200,13 @@ def get_navigation_result(query, fast=False):
         return cached
     
     try:
-        # Fetch results from LOCAL SearXNG only
-        results = search_api(query, categories='general', fast=fast)
+        # Use existing results if provided, otherwise fetch
+        if existing_results:
+             results = existing_results
+             logging.info(f"Using {len(results)} existing results for navigation check")
+        else:
+             # Fetch results from LOCAL SearXNG only
+             results = search_api(query, categories='general', fast=fast)
         
         if not results:
             logging.error(f"No search results found for: '{query}' - SearXNG may not be running")
@@ -312,13 +317,16 @@ def get_navigation_result(query, fast=False):
     _set_cache_nav(query, None, fast)
     return None
 
-def get_person_result(name):
+import concurrent.futures
+
+def get_person_result(name, existing_results=None):
     # 1. Try Wikipedia API first (Better images/summaries)
+    # Use shorter timeout for instant feel
     try:
         wiki_name = name.strip().replace(" ", "_")
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_name}"
         headers = {"User-Agent": "OmniOS/1.0"}
-        r = requests.get(url, headers=headers, timeout=4)
+        r = requests.get(url, headers=headers, timeout=1.5)
         if r.status_code == 200:
             data = r.json()
             if data.get('type') == 'standard':
@@ -333,9 +341,26 @@ def get_person_result(name):
     except Exception as e: 
         logging.warning(f"Wiki Person Error: {e}")
 
-    # 2. Fallback: SearXNG general search
+    # 2. Fallback: SearXNG general search + Image Search (Parallel)
     try:
-        results = search_api(name, categories='general')
+        # Use existing results if provided, otherwise fetch
+        results = []
+        if existing_results:
+             results = existing_results
+             logging.info(f"Using {len(results)} existing results for person fallback")
+             # Only fetch images if we have existing results but need image
+             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                 future_img = executor.submit(search_api, name, categories='images')
+                 img_results = future_img.result()
+        else:
+             # Run general search and image search in parallel to save time
+             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                 future_gen = executor.submit(search_api, name, categories='general')
+                 future_img = executor.submit(search_api, name, categories='images')
+                 
+                 results = future_gen.result()
+                 img_results = future_img.result()
+
         if results:
             best = results[0]
             # Extract name - remove common suffixes
@@ -357,17 +382,15 @@ def get_person_result(name):
                 "image": None
             }
             
-            # Try to get image from image search (use original query, not long title)
-            logging.info(f"Searching for image of: {name}")
-            try:
-                img_results = search_api(name, categories='images')
-                if img_results:
+            # Use image result if available
+            if img_results:
+                try:
                     img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
                     if img_url:
                         result['image'] = img_url
                         logging.info(f"Found image for {name_clean}: {img_url[:80]}")
-            except:
-                pass
+                except:
+                    pass
             
             return result
     except Exception as e: 
@@ -375,11 +398,23 @@ def get_person_result(name):
 
     return None
 
-def get_place_result(query):
+def get_place_result(query, existing_results=None):
     try:
-        results = search_api(query, categories='map')
+        # Prefer map-specific search if not provided, but accept general fallback
+        if existing_results:
+             results = existing_results
+             # Filter for map-like results if possible? Or just use first.
+             # Ideally we want lat/lon which general search might lack.
+             # If existing results have lat/lon, use them.
+             # Otherwise, maybe re-search with map category?
+             # For speed, let's try to use existing first.
+             pass
+        else:
+             results = search_api(query, categories='map')
+             
         if results:
             best = results[0]
+            # Check if we have minimal place info
             return {
                 "type": "place",
                 "name": best.get('title', query),
