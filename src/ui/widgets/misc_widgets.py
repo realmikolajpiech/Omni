@@ -788,7 +788,7 @@ class MicWidget(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(40, 40)
+        self.setFixedSize(32, 32)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.current_theme = "light"
@@ -805,7 +805,7 @@ class MicWidget(QLabel):
         self.setStyleSheet("""
             QLabel {
                 background-color: transparent;
-                border-radius: 20px;
+                border-radius: 16px;
             }
             QLabel:hover {
                 background-color: rgba(0, 0, 0, 0.05);
@@ -836,7 +836,7 @@ class MicWidget(QLabel):
             self.setStyleSheet(f"""
                 QLabel {{
                     background-color: transparent;
-                    border-radius: 20px;
+                    border-radius: 16px;
                     border: none;
                 }}
                 QLabel:hover {{
@@ -849,11 +849,13 @@ class MicWidget(QLabel):
             if name != self.icon_name: return
             
             if not pixmap.isNull():
-                self.setPixmap(pixmap)
+                target = int(min(self.width(), self.height()) * 0.7)
+                scaled = pixmap.scaled(target, target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.setPixmap(scaled)
             else:
                 # Fallback text
                 self.setText("🎤")
-                self.setFont(QFont("Segoe UI Emoji", 20))
+                self.setFont(QFont("Segoe UI Emoji", 16))
         except RuntimeError:
             pass
 
@@ -870,7 +872,7 @@ class MicWidget(QLabel):
             self.setStyleSheet("""
                 QLabel {
                     background-color: rgba(255, 59, 48, 0.1); /* Red tint */
-                    border-radius: 20px;
+                    border-radius: 16px;
                     border: 1px solid rgba(255, 59, 48, 0.3);
                 }
             """)

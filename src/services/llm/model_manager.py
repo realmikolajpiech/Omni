@@ -189,6 +189,7 @@ def ensure_fast_model():
                     Create chat completion with abort support via streaming.
                     """
                     global current_fast_request_id
+                    import gc
                     
                     # Default params for action model
                     eff_temp = temperature if temperature > 0 else 0.1
@@ -238,6 +239,7 @@ def ensure_fast_model():
                                 continue
                     except Exception as e:
                          logging.error(f"Error during stream iteration: {e}")
+                         # If we encounter a critical error like llama_decode -1, we should try to clean up aggressively
                          return None
                     finally:
                         # 3. Robust Cleanup in finally block
@@ -251,7 +253,11 @@ def ensure_fast_model():
                         try: del stream
                         except: pass
                         
-                        # 5. Small delay to allow C++ backend (thread pool) to settle before next request
+                        # 5. Force GC to ensure C++ objects are released
+                        try: gc.collect()
+                        except: pass
+                        
+                        # 6. Small delay to allow C++ backend (thread pool) to settle before next request
                         time.sleep(0.01)
 
                     return {

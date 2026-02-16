@@ -1284,6 +1284,8 @@ class OmniWindow(QWidget):
         if 'orig_name' in data and 'cmd' in data: return f"app:{data['orig_name']}" # App
         if data.get('type') == 'open_file': return f"file:{data.get('path')}"
         if data.get('type') == 'link': return f"link:{data.get('url')}"
+        if data.get('type') == 'person': return f"person:{data.get('url') or data.get('name')}"
+        if data.get('type') == 'place': return f"place:{data.get('url') or data.get('name')}"
         # Fallback for others
         return str(data)
 
@@ -1489,6 +1491,11 @@ class OmniWindow(QWidget):
         if isinstance(data, dict):
             if data.get('type') == 'link':
                 QDesktopServices.openUrl(QUrl(data['url']))
+                self.animate_close()
+            elif data.get('type') in ('person', 'place'):
+                url = data.get('url')
+                if url:
+                    QDesktopServices.openUrl(QUrl(url))
                 self.animate_close()
             elif data.get('type') == 'install':
                 self.start_install(data['name'])
@@ -1911,6 +1918,21 @@ class OmniWindow(QWidget):
                                     w = LinkActionWidget(act['title'], act['url'], act['description'])
                                     self.insert_list_item(insert_pos, w, act)
                                     insert_pos += 1
+                                elif act.get('type') == 'person':
+                                    w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
+                                    self.insert_list_item(insert_pos, w, act)
+                                    insert_pos += 1
+                                elif act.get('type') == 'place':
+                                    w = PlaceActionWidget(
+                                        act['name'],
+                                        act.get('address', ''),
+                                        act.get('image'),
+                                        act.get('url'),
+                                        act.get('latitude'),
+                                        act.get('longitude')
+                                    )
+                                    self.insert_list_item(insert_pos, w, act)
+                                    insert_pos += 1
                                 elif act.get('type') == 'install':
                                     w = InstallActionWidget(act['name'], act.get('website'))
                                     self.insert_list_item(insert_pos, w, act)
@@ -2129,6 +2151,19 @@ class OmniWindow(QWidget):
             if isinstance(act, dict):
                 if act.get('type') == 'link':
                     w = LinkActionWidget(act['title'], act['url'], act['description'])
+                    add_item(w, act)
+                elif act.get('type') == 'person':
+                    w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
+                    add_item(w, act)
+                elif act.get('type') == 'place':
+                    w = PlaceActionWidget(
+                        act['name'],
+                        act.get('address', ''),
+                        act.get('image'),
+                        act.get('url'),
+                        act.get('latitude'),
+                        act.get('longitude')
+                    )
                     add_item(w, act)
                 elif act.get('type') == 'install':
                     w = InstallActionWidget(act['name'], act.get('website'))

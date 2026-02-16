@@ -1,6 +1,8 @@
 import time
 import json
 import logging
+import re
+from typing import Optional
 import torch
 from flask import Blueprint, request, jsonify, Response
 
@@ -46,6 +48,62 @@ def _sanitize_search_query(extracted: str, original: str) -> str:
     if alnum_or_space < len(s) * 0.5:
         return original.strip()
     return s
+
+
+def _extract_person_candidate(query: str) -> Optional[str]:
+    """Return a cleaned person-name candidate when the query looks person-oriented."""
+    if not query:
+        return None
+
+    raw = query.strip()
+    q = raw.lower()
+
+    # Skip command-like queries that should follow other action paths.
+    command_prefixes = (
+        "open ", "go to ", "visit ", "install ", "run ", "launch ", "start ",
+        "calculate ", "calc ", "solve ", "set brightness", "increase brightness",
+        "reduce brightness", "search ", "find ", "near "
+    )
+    if q.startswith(command_prefixes):
+        return None
+
+    # Skip URLs / domains / handles.
+    if re.search(r"https?://|www\.", q):
+        return None
+    if re.search(r"\b[\w-]+\.(com|net|org|io|app|dev|ai|gov|edu|co)\b", q):
+        return None
+    if "@" in raw:
+        return None
+
+    explicit_prefix = False
+    for prefix in ("who is ", "who was ", "tell me about ", "biography of ", "bio of ", "about "):
+        if q.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            explicit_prefix = True
+            break
+
+    if not raw:
+        return None
+
+    if any(ch.isdigit() for ch in raw):
+        return None
+    if any(ch in raw for ch in "/\\|#%&*=_+[]{}<>"):
+        return None
+
+    tokens = [t for t in raw.split() if t]
+    if not tokens or len(tokens) > 4:
+        return None
+
+    # For implicit person queries (just typing a name), require at least two words.
+    if not explicit_prefix and len(tokens) < 2:
+        return None
+
+    for token in tokens:
+        cleaned = token.replace(".", "").replace("'", "").replace("-", "")
+        if not cleaned or not cleaned.isalpha():
+            return None
+
+    return " ".join(tokens)
 
 
 @api_bp.route('/ask_llm', methods=['POST'])
@@ -296,72 +354,85 @@ Examples:
         {"role": "user", "content": user_prompt}
     ]
 
-    try:
-        logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
-        
-        # FAIL FAST: Check if we are already obsolete before waiting for the lock
+    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False):
+        """Run fast model inference under lock with request-abort checks."""
         if model_manager.current_fast_request_id != request_id:
-            logging.info(f"Request {request_id} superseded before lock acquisition.")
-            return jsonify({"actions": []})
+            logging.info(f"{step_name}: request {request_id} superseded before lock.")
+            return None
 
-        # Use a timeout for the lock to prevent permanent deadlocks
-        # If we can't get the lock in 5 seconds, it's likely stuck or very busy.
         if not model_manager.fast_lock.acquire(timeout=5.0):
-             logging.error("Failed to acquire fast_lock after 5 seconds.")
-             return jsonify({"actions": [], "error": "Fast model busy"})
+            logging.error(f"{step_name}: failed to acquire fast_lock after 5 seconds.")
+            return None
 
         try:
-            # Check if this request was already cancelled
             if model_manager.current_fast_request_id != request_id:
-                logging.info(f"Request {request_id} was cancelled before starting")
-                return jsonify({"actions": []})
-            
+                logging.info(f"{step_name}: request {request_id} cancelled before inference.")
+                return None
             if not model_manager.fast_model:
-                 logging.error("Fast model is not loaded after ensure_fast_model() call.")
-                 return jsonify({"actions": [], "error": "Fast model not loaded"})
-
-            start_t = time.time()
-            if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
-            
-            # Debug: Check device and ensure GPU
-            try:
-                dev = model_manager.fast_model.model.device
-                if "cpu" in str(dev).lower() and torch.cuda.is_available():
-                    logging.warning(f"Fast model is on CPU ({dev})! Attempting to move to GPU...")
-                    model_manager.fast_model.model.to("cuda:0")
-                    torch.cuda.synchronize()
-            except: pass
+                logging.error(f"{step_name}: fast model is not loaded.")
+                return None
+            if reset_model and hasattr(model_manager.fast_model, 'reset'):
+                model_manager.fast_model.reset()
 
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages, max_tokens=64, temperature=0.0, request_id=request_id
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                request_id=request_id
             )
-            
             if out is None:
-                logging.info(f"Fast request {request_id} returned None (aborted).")
-                return jsonify({"actions": []})
-            
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            
-            # Check if this request was cancelled during inference
-            if model_manager.current_fast_request_id != request_id:
-                logging.info(f"Request {request_id} was cancelled during inference")
-                return jsonify({"actions": []})
-            
-            end_t = time.time()
-            dur = end_t - start_t
-            tok_count = out.get('usage', {}).get('completion_tokens', 0)
-            tps = tok_count / dur if dur > 0 else 0
-            logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
-            result_text = out['choices'][0]['message']['content'].strip()
-            
-            # Remove thinking blocks from Qwen (Handle unclosed tags too)
-            import re
-            result_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
-            
-            logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
+                logging.info(f"{step_name}: completion aborted/empty for request {request_id}.")
+                return None
+            return out
+        except Exception as e:
+            logging.error(f"{step_name}: fast model inference failed: {e}")
+            return None
         finally:
             model_manager.fast_lock.release()
+
+    try:
+        logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
+        start_t = time.time()
+
+        # Debug: Check device and ensure GPU
+        try:
+            dev = model_manager.fast_model.model.device
+            if "cpu" in str(dev).lower() and torch.cuda.is_available():
+                logging.warning(f"Fast model is on CPU ({dev})! Attempting to move to GPU...")
+                model_manager.fast_model.model.to("cuda:0")
+                torch.cuda.synchronize()
+        except:
+            pass
+
+        out = _safe_fast_completion(
+            messages=messages,
+            max_tokens=64,
+            temperature=0.0,
+            step_name="Action intent",
+            reset_model=True
+        )
+        if out is None:
+            return jsonify({"actions": []})
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Check if this request was cancelled during inference
+        if model_manager.current_fast_request_id != request_id:
+            logging.info(f"Request {request_id} was cancelled during inference")
+            return jsonify({"actions": []})
+
+        end_t = time.time()
+        dur = end_t - start_t
+        tok_count = out.get('usage', {}).get('completion_tokens', 0)
+        tps = tok_count / dur if dur > 0 else 0
+        logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
+        result_text = out['choices'][0]['message']['content'].strip()
+
+        # Remove thinking blocks from Qwen (Handle unclosed tags too)
+        result_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
+
+        logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
 
         # Fallback: if output is empty, default to search
         if not result_text or not result_text.strip():
@@ -455,10 +526,14 @@ Output exactly one word."""
                     ]
                     
                     try:
-                        classification = model_manager.fast_model.create_chat_completion(
-                            messages=classify_messages, max_tokens=8, temperature=0.0, request_id=request_id
+                        classification = _safe_fast_completion(
+                            messages=classify_messages,
+                            max_tokens=8,
+                            temperature=0.0,
+                            step_name="Search classification"
                         )
-                        if classification is None: raise Exception("Classification aborted")
+                        if classification is None:
+                            raise Exception("Classification aborted")
                         
                         classification_text = classification['choices'][0]['message']['content'].strip().upper()
                         # Strip non-ASCII (Qwen can emit Chinese/garbage when confused); then match PERSON/PLACE/SEARCH
@@ -488,10 +563,14 @@ Output exactly one word."""
                                 }
                             ]
                             try:
-                                write_out = model_manager.fast_model.create_chat_completion(
-                                    messages=write_messages, max_tokens=120, temperature=0.3, request_id=request_id
+                                write_out = _safe_fast_completion(
+                                    messages=write_messages,
+                                    max_tokens=120,
+                                    temperature=0.3,
+                                    step_name="Person card generation"
                                 )
-                                if write_out is None: raise Exception("Writing aborted")
+                                if write_out is None:
+                                    raise Exception("Writing aborted")
                                 
                                 card_text = write_out['choices'][0]['message']['content'].strip()
                                 logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
@@ -553,6 +632,15 @@ Output exactly one word."""
                     except Exception as e:
                         logging.error(f"[DEBUG] Classification failed: {e}")
                 
+                # If query still looks like a person, prefer person card over website link.
+                person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
+                if person_candidate:
+                    person_result = get_person_result(person_candidate)
+                    if person_result:
+                        logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
+                        actions.append(person_result)
+                        continue
+
                 # Fallback: treat as website search
                 nav = get_navigation_result(q, fast=True)
                 if nav:
