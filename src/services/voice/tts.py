@@ -17,27 +17,35 @@ def _tts_player_worker():
     global _player_running
     logging.info("TTS Player Worker Started")
     
-    try:
-        # Open stream once (Kokoro default: 24000Hz)
-        with sd.OutputStream(samplerate=24000, channels=1, dtype='float32') as stream:
-            while _player_running:
-                try:
-                    # Get chunk with timeout to check running flag
-                    chunk = _audio_queue.get(timeout=0.5)
-                    if chunk is None: continue
-                    
-                    # Write to stream (blocking if buffer full)
-                    stream.write(chunk)
-                    _audio_queue.task_done()
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logging.error(f"TTS Stream Write Error: {e}")
-                    
-    except Exception as e:
-        logging.error(f"TTS Player Init Error: {e}")
-    finally:
-        logging.info("TTS Player Worker Stopped")
+    while _player_running:
+        try:
+            # Open stream once (Kokoro default: 24000Hz)
+            # Using blocksize=0 (auto) for optimal latency
+            with sd.OutputStream(samplerate=24000, channels=1, dtype='float32') as stream:
+                logging.info("TTS Audio Stream Opened")
+                
+                while _player_running:
+                    try:
+                        # Get chunk with timeout to check running flag
+                        chunk = _audio_queue.get(timeout=0.5)
+                        if chunk is None: continue
+                        
+                        # Write to stream (blocking if buffer full)
+                        stream.write(chunk)
+                        _audio_queue.task_done()
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        logging.error(f"TTS Stream Write Error: {e}")
+                        break # Break inner loop to recreate stream
+                        
+        except Exception as e:
+            logging.error(f"TTS Player Init/Stream Error: {e}")
+            if _player_running:
+                import time
+                time.sleep(1) # Wait before retry to avoid spamming
+                
+    logging.info("TTS Player Worker Stopped")
 
 def _ensure_player_running():
     global _player_thread, _player_running

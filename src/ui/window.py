@@ -1510,7 +1510,13 @@ class OmniWindow(QWidget):
         self.refresh_list(query, animate=False)
 
     def on_entered(self, item=None):
+        # We assume manual entry if on_entered is called
+        # If it was voice, voice_triggered_query would be set by handle_ipc_query or toggle_listening
+        # But if user types and hits enter, we should clear it.
+        # Wait, handle_ipc_query calls perform_ai_query directly.
+        # So on_entered is only for manual keyboard interaction.
         self.voice_triggered_query = False
+        
         if not item:
             item = self.list_widget.currentItem()
         
@@ -1803,7 +1809,6 @@ class OmniWindow(QWidget):
         thinking = data.get("thinking", "")
         answer = data.get("answer", "")
         
-        # Streaming TTS Logic
         if self.voice_triggered_query and answer:
             if not self.tts_worker or not self.tts_worker.isRunning():
                 self.cleanup_worker('tts_worker')
@@ -1819,13 +1824,14 @@ class OmniWindow(QWidget):
                 self.tts_spoken_len = len(answer)
                 
                 # Check for sentence boundaries
-                # Split by punctuation (. ! ?) followed by space or newline
+                # Split by punctuation (. ! ? , : ;) followed by space or newline
                 # We use regex capture group to keep the delimiter
                 import re
                 
                 # More robust splitting to catch "Hello, how are you?" etc.
                 # Don't split on comma alone as it breaks flow too much, but .!? is good.
                 # User wants faster TTS start, so we include comma/colon/semicolon too.
+                # Added comma to make it more responsive
                 parts = re.split(r'([.,!?;:]+[\s\n]+)', self.tts_buffer)
                 
                 # If we have at least one delimiter, we can process the sentence
@@ -1839,6 +1845,7 @@ class OmniWindow(QWidget):
                     
                     # Ignore short fragments that might be artifacts
                     if len(full_sentence.strip()) > 2:
+                        logging.info(f"Queueing TTS chunk: {full_sentence[:30]}...")
                         self.tts_worker.add_text(full_sentence)
                 
                 # Keep the rest in buffer

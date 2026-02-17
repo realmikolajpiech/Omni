@@ -12,6 +12,10 @@ import json
 import time
 import zipfile
 import urllib.request
+try:
+    import scipy.signal
+except ImportError:
+    scipy = None
 from typing import Optional, List
 
 # Add project root to path
@@ -32,7 +36,7 @@ except ImportError:
     VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
 # --- CONFIGURATION ---
-WAKE_WORDS = ["hey omni", "omni", "computer", "hey computer"]
+WAKE_WORDS = ["hey omni"]
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000  # 0.25s
 SILENCE_THRESHOLD = 0.001 # Less sensitive to ignore background noise
@@ -66,6 +70,7 @@ class VoiceService:
         self.max_silence_frames = int(SILENCE_DURATION * SAMPLE_RATE / BLOCK_SIZE)
         self.energy_history = []
         self.udp_sock = None
+        self.native_rate = SAMPLE_RATE
         
         self.setup_models()
         self.setup_udp()
@@ -201,22 +206,7 @@ class VoiceService:
 
     def play_cue(self, active=True):
         """Play a subtle synthesized beep instead of system sound"""
-        try:
-            fs = 44100
-            duration = 0.15
-            f = 880.0 if active else 440.0
-            t = np.linspace(0, duration, int(fs * duration), False)
-            # Sine wave with envelope to avoid clicking
-            audio = np.sin(f * 2 * np.pi * t) * 0.3
-            # Simple fade in/out
-            fade_len = int(0.01 * fs)
-            audio[:fade_len] *= np.linspace(0, 1, fade_len)
-            audio[-fade_len:] *= np.linspace(1, 0, fade_len)
-            
-            sd.play(audio.astype(np.float32), fs)
-            # Don't wait, async
-        except Exception:
-            pass
+        pass
 
     def run(self):
         logger.info("Starting Audio Loop...")
@@ -224,17 +214,31 @@ class VoiceService:
         while self.state["running"]:
             try:
                 # Open stream
-                # Using a single stream with 16kHz is standard for Vosk and Whisper.
-                # Changing sample rate dynamically is complex (requires closing/reopening stream).
-                # Keeping it simple at 16kHz is usually fine for quality and avoids microphone indicator flickering (if it did).
-                # The microphone indicator on macOS is persistent as long as ANY stream is open.
-                # To avoid it, we would need to close the stream entirely when IDLE, but then we can't listen for Wake Word.
-                # So we must keep it open.
+                # Try opening stream with default 16kHz
+                try:
+                    stream = sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, 
+                                        channels=1, callback=self.audio_callback)
+                    self.native_rate = SAMPLE_RATE
+                except Exception as e:
+                    if "PortAudio" in str(e) or "PaErrorCode" in str(e):
+                        logger.warning(f"Default 16kHz failed ({e}). Trying device native rate...")
+                        try:
+                            dev_info = sd.query_devices(kind='input')
+                            self.native_rate = int(dev_info['default_samplerate'])
+                            # Adjust block size to maintain duration roughly same (0.25s)
+                            native_block_size = int(BLOCK_SIZE * self.native_rate / SAMPLE_RATE)
+                            logger.info(f"Using native rate: {self.native_rate}Hz (Block: {native_block_size})")
+                            
+                            stream = sd.InputStream(samplerate=self.native_rate, blocksize=native_block_size, 
+                                                channels=1, callback=self.audio_callback)
+                        except Exception as e2:
+                            logger.error(f"Native rate fallback failed: {e2}")
+                            raise e
+                    else:
+                        raise e
                 
-                with sd.InputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, 
-                                    channels=1, callback=self.audio_callback):
-                    
-                    logger.info("Audio Stream Started.")
+                with stream:
+                    logger.info(f"Audio Stream Started ({self.native_rate}Hz).")
                     
                     while self.state["running"]:
                         self.process_udp()
@@ -253,6 +257,21 @@ class VoiceService:
                         # Pre-processing (Normalization / Boost)
                         # Boost removed/reduced to avoid distortion for Whisper
                         audio_data = indata.flatten()
+                        
+                        # Resample if needed
+                        if self.native_rate != SAMPLE_RATE:
+                            if scipy:
+                                try:
+                                    num_samples = int(len(audio_data) * SAMPLE_RATE / self.native_rate)
+                                    audio_data = scipy.signal.resample(audio_data, num_samples)
+                                except Exception as e:
+                                    logger.error(f"Resampling failed: {e}")
+                            else:
+                                # Fallback: simple decimation if integer ratio, else fail gracefully
+                                ratio = self.native_rate / SAMPLE_RATE
+                                if ratio.is_integer():
+                                    step = int(ratio)
+                                    audio_data = audio_data[::step]
                         
                         if mode == "IDLE":
                             self.handle_idle(audio_data)
