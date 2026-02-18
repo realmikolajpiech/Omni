@@ -39,37 +39,10 @@ PYTHON_CMD="python3" # Inside venv, python3 is the correct one
 echo "Step 1: Installing system dependencies..."
 # ffmpeg: required for audio processing (qwen-asr)
 # portaudio: required for sounddevice
-# cmake: required for building llama-cpp-python
-brew install ffmpeg portaudio cmake
+brew install ffmpeg portaudio
 
 echo "Step 2: Installing Python dependencies..."
-
-# Install OpenAI client (used to talk to local llama-server)
-$PYTHON_CMD -m pip install openai
-
-# Build official llama.cpp server with Metal support
-echo "Building official llama.cpp server (with Metal)..."
-SERVER_DIR="llama_cpp_server"
-if [ ! -d "$SERVER_DIR" ]; then
-    git clone https://github.com/ggerganov/llama.cpp.git "$SERVER_DIR"
-else
-    echo "llama.cpp server repo present, pulling latest..."
-    (cd "$SERVER_DIR" && git pull)
-fi
-
-# Build the server binary
-echo "Compiling llama-server..."
-cmake -DGGML_METAL=ON -S "$SERVER_DIR" -B "$SERVER_DIR/build"
-cmake --build "$SERVER_DIR/build" -j --config Release
-
-echo "Server built successfully at $SERVER_DIR/build/bin/llama-server"
-
-# Install the rest of the requirements
-echo "Installing other requirements..."
-# We skip llama-cpp-python here if it satisfies the requirement, but since we just installed latest, it should be fine.
-# If requirements.txt has a pinned version, this might downgrade it. 
-# Current requirements.txt does not pin llama-cpp-python version.
-echo "Installing other requirements..."
+echo "Installing requirements..."
 echo "NOTE: This may take a while (downloading PyTorch ~2GB+). Please be patient."
 echo "Ignore any 'warning' messages from the build process."
 # Use --no-deps for qwen-asr first to avoid conflict checks, then install everything else
