@@ -1,42 +1,35 @@
+"""
+Embedding helpers for in-process use (e.g. memvid_store).
 
-from fastembed import TextEmbedding
+Delegates to the shared BAAI/bge-m3 instance managed by model_manager so
+there is only one copy of the embedding model loaded per process.
+The fastembed bge-small-en-v1.5 model has been removed to save ~130 MB.
+"""
 import logging
 from typing import List
 
-_embedder = None
-
-def get_embedder():
-    global _embedder
-    if _embedder is None:
-        try:
-            logging.info("Initializing FastEmbed model...")
-            # Use a small, fast model
-            _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        except Exception as e:
-            logging.error(f"Failed to initialize embedder: {e}")
-            return None
-    return _embedder
 
 def embed_text(text: str) -> List[float]:
-    embedder = get_embedder()
-    if not embedder:
+    from src.services.llm.model_manager import ensure_resources, embed_model
+    ensure_resources()
+    if embed_model is None:
+        logging.error("Embedding model not available.")
         return []
     try:
-        # embed returns a generator of numpy arrays
-        embeddings = list(embedder.embed([text]))
-        if embeddings:
-            return embeddings[0].tolist()
+        return embed_model.encode([text])[0].tolist()
     except Exception as e:
         logging.error(f"Embedding generation failed: {e}")
-    return []
+        return []
+
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    embedder = get_embedder()
-    if not embedder:
+    from src.services.llm.model_manager import ensure_resources, embed_model
+    ensure_resources()
+    if embed_model is None:
+        logging.error("Embedding model not available.")
         return []
     try:
-        embeddings = list(embedder.embed(texts))
-        return [e.tolist() for e in embeddings]
+        return embed_model.encode(texts).tolist()
     except Exception as e:
         logging.error(f"Batch embedding generation failed: {e}")
         return []

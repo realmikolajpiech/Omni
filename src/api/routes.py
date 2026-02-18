@@ -32,7 +32,7 @@ def status_check():
         "main_model_loaded": main_loaded,
         "fast_model_loaded": fast_loaded,
         "main_model_name": getattr(model_manager, 'MAIN_MODEL_FILENAME', 'Unknown'),
-        "fast_model_name": getattr(model_manager, 'FAST_MODEL_HF_ID', 'Unknown')
+        "fast_model_name": getattr(model_manager, 'FAST_MODEL_FILENAME', 'Unknown')
     })
 
 
@@ -447,16 +447,6 @@ Examples:
     try:
         logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
         start_t = time.time()
-
-        # Debug: Check device and ensure GPU
-        try:
-            dev = model_manager.fast_model.model.device
-            if "cpu" in str(dev).lower() and torch.cuda.is_available():
-                logging.warning(f"Fast model is on CPU ({dev})! Attempting to move to GPU...")
-                model_manager.fast_model.model.to("cuda:0")
-                torch.cuda.synchronize()
-        except:
-            pass
 
         out = _safe_fast_completion(
             messages=messages,
@@ -891,3 +881,30 @@ def pick_package_endpoint():
 @api_bp.route('/verify_package', methods=['POST'])
 def verify_package_endpoint():
     return jsonify({"verified": True})
+
+
+@api_bp.route('/embed', methods=['POST'])
+def embed_endpoint():
+    """Encode texts into vectors using the shared embedding model.
+
+    Accepts: {"texts": ["text1", "text2", ...]}
+    Returns: {"vectors": [[float, ...], ...]}
+
+    Exposing this as an HTTP endpoint lets watcher/indexer reuse the
+    already-loaded bge-m3 instance instead of each loading their own copy.
+    """
+    model_manager.ensure_resources()
+    if model_manager.embed_model is None:
+        return jsonify({"error": "Embedding model not available"}), 503
+
+    data = request.get_json(silent=True) or {}
+    texts = data.get("texts", [])
+    if not texts:
+        return jsonify({"vectors": []})
+
+    try:
+        vectors = model_manager.embed_model.encode(texts).tolist()
+        return jsonify({"vectors": vectors})
+    except Exception as e:
+        logging.error(f"Embed endpoint error: {e}")
+        return jsonify({"error": str(e)}), 500

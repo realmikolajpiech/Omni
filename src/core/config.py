@@ -1,5 +1,20 @@
 import os
 
+# Load .env from project root (if present)
+def _load_env():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
+    env_path = os.path.normpath(env_path)
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+_load_env()
+
 # Assets
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,20 +34,14 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
-# Models
-# Fast model: transformers (HF) for low-latency intents/actions
-FAST_MODEL_HF_ID = "Qwen/Qwen3-0.6B-GGUF"
-FAST_MODEL_FILENAME = "qwen3-0.6b-q8_0.gguf"
-FAST_MODEL_PATH = os.path.join(MODEL_DIR, FAST_MODEL_FILENAME)
-FAST_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+# Models (API-based, no local LLMs)
+# Fast model: Groq GPT-OSS 20B (low-latency intents/actions)
+FAST_MODEL_GROQ = "openai/gpt-oss-20b"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-MAIN_MODEL_FILENAME = "Qwen3VL-4B-Thinking-Q4_K_M.gguf"
-MAIN_MODEL_PATH = os.path.join(MODEL_DIR, MAIN_MODEL_FILENAME)
-MAIN_MODEL_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF/resolve/main/Qwen3VL-4B-Thinking-Q4_K_M.gguf"
-
-MMPROJ_FILENAME = "mmproj-Qwen3VL-4B-Thinking-F16.gguf"
-MMPROJ_PATH = os.path.join(MODEL_DIR, MMPROJ_FILENAME)
-MMPROJ_URL = "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF/resolve/main/mmproj-Qwen3VL-4B-Thinking-F16.gguf"
+# Main model: xAI Grok (via OpenAI-compatible API)
+MAIN_MODEL_XAI = "grok-4-1-fast-reasoning"
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 # Embedding Model
 EMBED_MODEL_HF_ID = "BAAI/bge-m3" # Multi-functionality embedding model (Dense, Sparse, ColBERT)
@@ -60,6 +69,9 @@ PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"
 VERIFY_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/verify_package"
 
 SEARXNG_URL = "http://127.0.0.1:8080/search"
+
+# Search API (Serper.dev -- fast Google results, SearXNG as fallback)
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 
 # IPC
 IPC_PORT = 5556

@@ -812,7 +812,6 @@ Current Conversation:
                 output = model_manager.llm.create_chat_completion(
                     messages=messages,
                     max_tokens=2048 if use_thinking else 768,
-                    stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
                     temperature=0.1,
                     chat_template_kwargs={"enable_thinking": use_thinking},
                 )
