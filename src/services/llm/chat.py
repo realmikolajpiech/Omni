@@ -639,10 +639,12 @@ Current Conversation:
     # BUT the role name 'assistant' is definitely wrong for Gemma.
     
     messages = [{"role": "system", "content": system_prompt}]
-    
+
     for msg in history:
         role = msg.get('role', 'user')
-        if role == 'assistant': role = 'model' # Gemma uses 'model'
+        # Keep only roles accepted by OpenAI-compatible APIs (xAI, Groq)
+        if role not in ('system', 'user', 'assistant', 'tool', 'function'):
+            role = 'assistant'
         content = msg.get('content', '')
         messages.append({"role": role, "content": content})
     

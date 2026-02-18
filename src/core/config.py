@@ -74,7 +74,8 @@ EMBED_MODEL_URL = ""
 
 # Voice Models
 GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"  # Fast + accurate; alternatives: whisper-large-v3, distil-whisper-large-v3-en
-OWW_WAKE_WORD_MODEL = "alexa_v0.1"  # openWakeWord model ID; available: alexa_v0.1, hey_jarvis_v0.1, hey_mycroft_v0.1
+OWW_WAKE_WORD_MODEL = "Hey_Omni"  # Custom wake word; set OWW_CUSTOM_MODEL_PATH to load local .onnx
+OWW_CUSTOM_MODEL_PATH = os.path.join(PROJECT_ROOT, "assets", "Voice_Activation", "Hey_Omni.onnx")
 OWW_DETECTION_THRESHOLD = 0.3  # Wake word confidence threshold (0.0 - 1.0)
 
 TTS_MODEL_ID = "hexgrad/Kokoro-82M"

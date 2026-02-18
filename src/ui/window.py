@@ -235,6 +235,7 @@ class OmniWindow(QWidget):
 
         self.chat_history = []  
         self.is_history_mode = False
+        self._streaming_answer_widget = None  # tracks widget currently being streamed
         # self.is_settings_mode = False
 
         self.apps = self.load_apps()
@@ -673,22 +674,35 @@ class OmniWindow(QWidget):
                 # Manual toggle (hotkey/tray) -> Close
                 self.animate_close()
         else:
-            self.reset_to_search_mode(animate=False)
-            self.chat_history = [] # Start clean
-            self.show()
-            self.center()
-            self.animate_entry()
-            self.input_field.setFocus()
-            
-            # Handle Voice Logic based on source
-            if source == "voice":
-                # Opened via "Hey Omni" -> Start active listening
+            # Window was hidden — show it again
+            if source == "voice" and len(self.chat_history) > 0:
+                # Same chat: user said wake word again while we had a conversation — keep context for follow-up
+                logging.info("Reopening with existing chat (voice follow-up)")
+                self.show()
+                self.center()
+                self.animate_entry()
+                self.input_field.setFocus()
                 self.send_udp_command("SET_MODE:LISTENING")
                 self.mic_widget.set_active(True)
+                # Ensure we're in history/follow-up mode so the next query is treated as follow-up
+                if not self.is_history_mode:
+                    self.is_history_mode = True
+                    self.follow_up_widget.set_active(True)
+                    self.frame.set_minimal_mode(False)
             else:
-                # Opened manually -> Pause listening (wait for mic click)
-                self.send_udp_command("SET_MODE:PAUSED")
-                self.mic_widget.set_active(False)
+                # New session (manual open or no previous chat)
+                self.reset_to_search_mode(animate=False)
+                self.chat_history = []
+                self.show()
+                self.center()
+                self.animate_entry()
+                self.input_field.setFocus()
+                if source == "voice":
+                    self.send_udp_command("SET_MODE:LISTENING")
+                    self.mic_widget.set_active(True)
+                else:
+                    self.send_udp_command("SET_MODE:PAUSED")
+                    self.mic_widget.set_active(False)
 
     def send_udp_command(self, command):
         try:
@@ -1699,6 +1713,9 @@ class OmniWindow(QWidget):
         # Stop debounce timer to prevent new fast searches from starting
         self.debounce_timer.stop()
 
+        # Remember the query text now — input_field may be cleared before on_ai_response fires
+        self._current_query = query
+
         # Disable input while thinking
         self.input_field.setReadOnly(True)
 
@@ -1712,40 +1729,37 @@ class OmniWindow(QWidget):
         mm.abort_fast_event.set()
 
         is_followup = self.is_history_mode
+        self._streaming_answer_widget = None  # reset for new query
         
         if not is_followup:
             self.list_widget.clear()
         
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
-        
-        # Add Thinking Widget
-        # Only show query text if it's a followup
-        thinking_text = query if is_followup else ""
-        self.thinking_widget = ThinkingWidget(thinking_text)
-        
+
         # Initialize streaming TTS state
         self.tts_buffer = ""
         self.tts_spoken_len = 0
         
         if is_followup:
-            # For followup thinking, we want:
-            # [Thinking Widget]
-            # [Separator]
-            # [Old Answer]
-            # So insert Separator at 0, then Thinking at 0 (pushing Separator to 1).
-            
+            # Upgrade any leftover simple answer widgets to chat bubbles (first follow-up transition)
+            self._upgrade_to_chat_bubbles()
+
+            # Chat mode: immediately show user bubble + AI area; no spinner widget
             if self.list_widget.count() > 0:
                 self.insert_list_item(0, SeparatorWidget(), "separator")
-                
-            self.insert_list_item(0, self.thinking_widget, "thinking")
-            
-            # Ensure we scroll to top to see the new thinking widget
+
+            answer_widget = AnswerWidget("", query_text=query, chat_mode=True)
+            answer_widget.set_query_visible(True)
+            self._streaming_answer_widget = answer_widget
+            self.insert_list_item(0, answer_widget, "answer")
+
             if self.list_widget.count() > 0:
                 self.list_widget.scrollToItem(self.list_widget.item(0))
         else:
+            # Normal mode: show animated spinner while waiting
+            self.thinking_widget = ThinkingWidget("")
             self.add_list_item(self.thinking_widget, "thinking")
-            # No separator for normal query
 
         self.adjust_window_height()
         
@@ -1851,15 +1865,16 @@ class OmniWindow(QWidget):
                 # Keep the rest in buffer
                 self.tts_buffer = "".join(parts)
 
-        # Find existing answer widget or create one
-        answer_widget = None
+        # Use the tracked streaming widget for this query; never touch old history widgets
+        answer_widget = self._streaming_answer_widget
         answer_item = None
-        for i in range(self.list_widget.count() - 1, -1, -1):
-            item = self.list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == "answer":
-                answer_item = item
-                answer_widget = self._unwrap_answer_widget(item)
-                break
+        if answer_widget is not None:
+            # Find the corresponding list item
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                if self._unwrap_answer_widget(item) is answer_widget:
+                    answer_item = item
+                    break
 
         if answer_widget is None:
             # First partial: Remove "Thinking..." widget first
@@ -1887,19 +1902,17 @@ class OmniWindow(QWidget):
             if prepend and self.list_widget.count() > 0:
                 self.insert_list_item(0, SeparatorWidget(), "separator")
 
-            current_query = self.input_field.text()
-            # Create answer widget with empty answer and NO thinking_text (we'll add thinking dynamically)
-            answer_widget = AnswerWidget("", query_text=current_query, thinking_text="")
-            
-            # Now add/update thinking dynamically
+            # Normal (first) query streaming: simple answer view, no bubbles
+            current_query = getattr(self, '_current_query', self.input_field.text())
+            answer_widget = AnswerWidget("", query_text=current_query, chat_mode=False)
+            self._streaming_answer_widget = answer_widget
+
             if thinking:
                 answer_widget.ensure_thinking_widget()
                 answer_widget.update_thinking(thinking)
-                # Keep thinking expanded while we're still thinking (no answer yet)
                 answer_widget.set_thinking_collapsed(False)
-            
+
             if prepend:
-                answer_widget.set_query_visible(True)
                 self.insert_list_item(0, answer_widget, "answer")
             else:
                 self.add_list_item(answer_widget, "answer")
@@ -1914,6 +1927,7 @@ class OmniWindow(QWidget):
                 if thinking:
                     answer_widget.set_thinking_collapsed(True)
                 if hasattr(answer_widget, 'text_edit'):
+                    answer_widget.text_edit.setVisible(True)
                     answer_widget.text_edit.setMarkdown(answer)
             # Don't force expand/collapse while streaming - let user control it or auto-expand only once on first update
             
@@ -1926,74 +1940,115 @@ class OmniWindow(QWidget):
         if hasattr(self, "adjust_window_height"):
             self.adjust_window_height(animate=False)
 
+    def _upgrade_to_chat_bubbles(self):
+        """Convert any remaining simple (chat_mode=False) AnswerWidgets to chat bubble layout.
+        Called once on the first follow-up so the whole conversation looks consistent."""
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            w = self._unwrap_answer_widget(item)
+            if isinstance(w, AnswerWidget) and not w.chat_mode:
+                answer_text = getattr(w, '_answer_text', '') or (w.text_edit.toPlainText() if w.text_edit else '')
+                query_text = w._query_text
+                new_w = AnswerWidget(answer_text, query_text=query_text, chat_mode=True)
+                new_w._answer_text = answer_text
+                new_w.set_query_visible(bool(query_text))
+                self.list_widget.takeItem(i)
+                self.insert_list_item(i, new_w, "answer")
+                new_item = self.list_widget.item(i)
+                new_item.setSizeHint(new_w.sizeHint())
+
+    def _finalize_response_ui(self):
+        """Called once after every AI response (streaming or non-streaming) to tidy the UI."""
+        self._streaming_answer_widget = None  # clear tracking after response completes
+        self.input_field.setReadOnly(False)
+        self.input_field.blockSignals(True)
+        self.input_field.clear()
+        self.input_field.blockSignals(False)
+        self.input_field.setPlaceholderText("Ask a follow-up...")
+        self.input_field.setFocus()
+
+        if not self.is_history_mode:
+            self.is_history_mode = True
+            self.follow_up_widget.set_active(True)
+            self.frame.set_minimal_mode(False)
+
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
-        self.input_field.setReadOnly(False)
 
-        # Check if we already have a streaming answer widget
+        # Use the tracked streaming widget (set during on_partial_response)
         has_streaming_answer = False
-        for i in range(self.list_widget.count() - 1, -1, -1):
-            item = self.list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == "answer":
-                widget = self._unwrap_answer_widget(item)
-                if widget and hasattr(widget, 'text_edit'):
-                    # Update the existing streaming widget with final data
-                    answer = data.get("answer", "")
-                    thinking = data.get("thinking", "")
-                    actions = data.get("actions", [])
-                    
-                    # Update thinking and answer
-                    if thinking:
-                        widget.ensure_thinking_widget()
-                        widget.update_thinking(thinking)
-                        widget.set_thinking_collapsed(True)  # Collapse thinking after final response
-                    
-                    widget.text_edit.setMarkdown(answer)
+        widget = self._streaming_answer_widget
+        if widget is not None and hasattr(widget, 'text_edit'):
+            answer = data.get("answer", "")
+            thinking = data.get("thinking", "")
+            actions = data.get("actions", [])
 
-                    # Add any final actions that weren't added during streaming
-                    if actions:
-                        # Find where to insert actions (after the answer widget)
-                        insert_pos = i + 1
-                        for act in actions:
-                            if isinstance(act, dict):
-                                if act.get('type') == 'link':
-                                    w = LinkActionWidget(act['title'], act['url'], act['description'])
-                                    self.insert_list_item(insert_pos, w, act)
-                                    insert_pos += 1
-                                elif act.get('type') == 'person':
-                                    w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
-                                    self.insert_list_item(insert_pos, w, act)
-                                    insert_pos += 1
-                                elif act.get('type') == 'place':
-                                    w = PlaceActionWidget(
-                                        act['name'],
-                                        act.get('address', ''),
-                                        act.get('image'),
-                                        act.get('url'),
-                                        act.get('latitude'),
-                                        act.get('longitude')
-                                    )
-                                    self.insert_list_item(insert_pos, w, act)
-                                    insert_pos += 1
-                                elif act.get('type') == 'install':
-                                    w = InstallActionWidget(act['name'], act.get('website'))
-                                    self.insert_list_item(insert_pos, w, act)
-                                    insert_pos += 1
-                                elif act.get('type') == 'status':
-                                    w = StandardItemWidget(act['description'], icon_name="dialog-information")
-                                    self.insert_list_item(insert_pos, w, act)
-                                    insert_pos += 1
+            if thinking:
+                widget.ensure_thinking_widget()
+                widget.update_thinking(thinking)
+                widget.set_thinking_collapsed(True)
 
-                    # Recalculate sizes after all updates
-                    widget.updateGeometry()
-                    # Force recalculation of sizeHint to get accurate collapsed/expanded height
-                    new_size = widget.sizeHint()
-                    item.setSizeHint(new_size)
-                    
-                    self.list_widget.update()
-                    self.adjust_window_height(animate=False)
-                    has_streaming_answer = True
+            widget.text_edit.setMarkdown(answer)
+
+            # Find list item for this widget
+            item = None
+            insert_pos = 0
+            for i in range(self.list_widget.count()):
+                candidate = self.list_widget.item(i)
+                if self._unwrap_answer_widget(candidate) is widget:
+                    item = candidate
+                    insert_pos = i + 1
                     break
+
+            if actions and item is not None:
+                for act in actions:
+                    if isinstance(act, dict):
+                        if act.get('type') == 'link':
+                            w = LinkActionWidget(act['title'], act['url'], act['description'])
+                            self.insert_list_item(insert_pos, w, act)
+                            insert_pos += 1
+                        elif act.get('type') == 'person':
+                            w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
+                            self.insert_list_item(insert_pos, w, act)
+                            insert_pos += 1
+                        elif act.get('type') == 'place':
+                            w = PlaceActionWidget(
+                                act['name'],
+                                act.get('address', ''),
+                                act.get('image'),
+                                act.get('url'),
+                                act.get('latitude'),
+                                act.get('longitude')
+                            )
+                            self.insert_list_item(insert_pos, w, act)
+                            insert_pos += 1
+                        elif act.get('type') == 'install':
+                            w = InstallActionWidget(act['name'], act.get('website'))
+                            self.insert_list_item(insert_pos, w, act)
+                            insert_pos += 1
+                        elif act.get('type') == 'status':
+                            w = StandardItemWidget(act['description'], icon_name="dialog-information")
+                            self.insert_list_item(insert_pos, w, act)
+                            insert_pos += 1
+
+            answer_text = data.get("answer", "")
+            widget._answer_text = answer_text  # store for potential future upgrade to chat bubbles
+
+            widget.updateGeometry()
+            if item is not None:
+                item.setSizeHint(widget.sizeHint())
+
+            self.list_widget.update()
+            self.adjust_window_height(animate=False)
+            has_streaming_answer = True
+
+        # Always update chat history from streaming widget if we have one
+        if has_streaming_answer:
+            saved_query = getattr(self, '_current_query', "")
+            answer_final = data.get("answer", "")
+            if saved_query and answer_final:
+                self.chat_history.append({"role": "user", "content": saved_query})
+                self.chat_history.append({"role": "assistant", "content": answer_final})
 
         answer = data.get("answer", "")
         
@@ -2017,10 +2072,14 @@ class OmniWindow(QWidget):
             if self.tts_worker:
                  self.tts_worker.stop()
             
+            # Mic must not stay red when we're done (PAUSED) — sync UI with listener state
+            self.mic_widget.set_active(False)
+
             # Reset flag
             self.voice_triggered_query = False
 
         if has_streaming_answer:
+            self._finalize_response_ui()
             return  # Already handled the response via streaming
         
         # Remove thinking widget and separator (iterate backwards)
@@ -2169,23 +2228,15 @@ class OmniWindow(QWidget):
                 if isinstance(w, AnswerWidget):
                     w.set_query_visible(True)
 
-        # Add Answer
+        # Use the query captured at the start of perform_ai_query (input may already be cleared)
+        saved_query = getattr(self, '_current_query', self.input_field.text())
+
+        # Add Answer (non-streaming path: always normal/first query → simple view)
         if answer:
-            self.chat_history.append({"role": "user", "content": self.input_field.text()})
+            self.chat_history.append({"role": "user", "content": saved_query})
             self.chat_history.append({"role": "assistant", "content": answer})
-            
-            # Pass query text to AnswerWidget
-            # If prepend (follow-up), we show it.
-            # If not prepend (first answer), we hide it (default is hidden in AnswerWidget, but we pass text).
-            # Wait, user said "they are not shown if it's not followup!".
-            # So if not prepend, visible=False.
-            # If prepend, visible=True.
-            
-            current_query = self.input_field.text()
-            w = AnswerWidget(answer, query_text=current_query, thinking_text=thinking)
-            if prepend:
-                w.set_query_visible(True)
-            
+
+            w = AnswerWidget(answer, query_text=saved_query, thinking_text=thinking, chat_mode=False)
             add_item(w, "answer")
         
         # Add Actions
@@ -2211,18 +2262,12 @@ class OmniWindow(QWidget):
                     w = InstallActionWidget(act['name'], act.get('website'))
                     add_item(w, act)
                 elif act.get('type') == 'status':
-                    # Maybe just a small notification or standard item
                     w = StandardItemWidget(act['description'], icon_name="dialog-information")
                     add_item(w, act)
-        
+
         # Scroll to top if we prepended
         if prepend and self.list_widget.count() > 0:
             self.list_widget.scrollToItem(self.list_widget.item(0))
 
-        # Manually set history mode state without re-clearing list
-        if not self.is_history_mode:
-            self.is_history_mode = True
-            self.follow_up_widget.set_active(True)
-            self.frame.set_minimal_mode(False)
-            
+        self._finalize_response_ui()
         self.adjust_window_height()

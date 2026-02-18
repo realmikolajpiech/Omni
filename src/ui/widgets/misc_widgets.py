@@ -189,11 +189,13 @@ class ThinkingWidget(QWidget):
 
 
 class SeparatorWidget(QWidget):
+    """Thin divider between chat turns; extra height so follow-ups read clearly."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(24) 
+        self._height = 28
+        self.setFixedHeight(self._height)
         self.current_theme = "light"
-        
+
     def set_theme(self, theme):
         self.current_theme = theme
         self.update()
@@ -201,7 +203,7 @@ class SeparatorWidget(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
+
         t = THEMES.get(self.current_theme, THEMES["light"])
         divider_color = QColor(t['divider'])
 
@@ -212,15 +214,15 @@ class SeparatorWidget(QWidget):
         grad.setColorAt(0.2, c)
         grad.setColorAt(0.8, c)
         grad.setColorAt(1, transparent)
-        
+
         pen = QPen(QBrush(grad), 1)
         painter.setPen(pen)
-        
+
         y = self.height() // 2
         painter.drawLine(40, y, self.width() - 40, y)
 
     def sizeHint(self):
-        return QSize(660, 24)
+        return QSize(660, self._height)
 
 class SmoothEntryWidget(QWidget):
     def __init__(self, content_widget, parent=None, animate=True):
@@ -460,56 +462,298 @@ class CollapsibleThinkingWidget(QWidget):
         return QSize(660, base_height)
 
 
-class AnswerWidget(QWidget):
-    def __init__(self, text, query_text=None, thinking_text=None, parent=None):
-        super().__init__(parent)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(24, 4, 24, 4)
-        self.layout.setSpacing(12)
-        self.current_theme = "light"
+def _get_system_username():
+    """Return the OS display name or username, capitalized."""
+    import os, pwd
+    try:
+        # macOS / Linux: try GECOS (full name)
+        gecos = pwd.getpwuid(os.getuid()).pw_gecos
+        name = gecos.split(",")[0].strip()
+        if name:
+            return name.split()[0]  # first name only
+    except Exception:
+        pass
+    name = os.environ.get("USER") or os.environ.get("USERNAME") or os.environ.get("LOGNAME") or "You"
+    return name.capitalize()
 
-        # Add thinking section if provided (can be added later via ensure_thinking_widget)
+_CACHED_USERNAME = None
+
+def _username():
+    global _CACHED_USERNAME
+    if _CACHED_USERNAME is None:
+        _CACHED_USERNAME = _get_system_username()
+    return _CACHED_USERNAME
+
+
+class _BubbleWidget(QWidget):
+    """A single rounded chat bubble (user or assistant)."""
+
+    BUBBLE_RADIUS = 18
+    MAX_BUBBLE_WIDTH_FRACTION = 0.78  # bubble uses at most 78% of available width
+
+    def __init__(self, text, sender="user", is_markdown=False, parent=None):
+        super().__init__(parent)
+        self.sender = sender          # "user" or "ai"
+        self.is_markdown = is_markdown
+        self.current_theme = "light"
+        self._text = text
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(3)
+
+        # Name label above bubble
+        self.name_label = QLabel(_username() if sender == "user" else "Omni")
+        self.name_label.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+        if sender == "user":
+            self.name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        else:
+            self.name_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        outer.addWidget(self.name_label)
+
+        # Bubble row (align bubble left or right)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.bubble = _BubbleInner(sender, is_markdown)
+        self.bubble.set_text(text)
+
+        if sender == "user":
+            row.addStretch()
+            row.addWidget(self.bubble)
+        else:
+            row.addWidget(self.bubble)
+            row.addStretch()
+
+        outer.addLayout(row)
+        self.update_style()
+
+    def set_text(self, text):
+        self._text = text
+        self.bubble.set_text(text)
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        name_color = t["text_secondary"]
+        self.name_label.setStyleSheet(f"color: {name_color}; background: transparent;")
+        self.bubble.set_theme(self.current_theme)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = 660
+        if self.parent() and self.parent().width() > 100:
+            w = self.parent().width()
+        name_h = self.name_label.sizeHint().height() + 3
+        bubble_h = self.bubble.sizeHint_for_width(w).height()
+        return QSize(w, name_h + bubble_h + 2)
+
+
+class _BubbleInner(QWidget):
+    """Draws the rounded rect background and hosts the text inside."""
+
+    PADDING_H = 14
+    PADDING_V = 10
+    RADIUS = 18
+    MAX_FRACTION = 0.78
+
+    def __init__(self, sender, is_markdown, parent=None):
+        super().__init__(parent)
+        self.sender = sender
+        self.is_markdown = is_markdown
+        self.current_theme = "light"
+        self._bg = QColor("#000000")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(self.PADDING_H, self.PADDING_V,
+                               self.PADDING_H, self.PADDING_V)
+        lay.setSpacing(0)
+
+        if is_markdown:
+            self.edit = UnscrollableTextEdit()
+            self.edit.setReadOnly(True)
+            self.edit.setFrameStyle(QFrame.Shape.NoFrame)
+            self.edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            self.edit.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
+            lay.addWidget(self.edit)
+            self.label = None
+        else:
+            self.label = QLabel()
+            self.label.setWordWrap(True)
+            self.label.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
+            if sender == "user":
+                self.label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            lay.addWidget(self.label)
+            self.edit = None
+
+        self.set_theme(self.current_theme)
+
+    def set_text(self, text):
+        if self.edit is not None:
+            self.edit.setVisible(bool(text and text.strip()))
+            if text:
+                self.edit.setMarkdown(text)
+        elif self.label is not None:
+            self.label.setText(text)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        t = THEMES.get(theme, THEMES["light"])
+        if self.sender == "user":
+            if theme == "dark":
+                self._bg = QColor(255, 255, 255, 30)
+                text_color = t["text_primary"]
+            else:
+                self._bg = QColor(0, 0, 0, 22)
+                text_color = t["text_primary"]
+        else:
+            self._bg = QColor(0, 0, 0, 0)  # transparent — fits glass bg
+            text_color = t["text_primary"]
+
+        if self.edit is not None:
+            self.edit.setStyleSheet(f"background: transparent; color: {text_color};")
+        elif self.label is not None:
+            self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        self.update()
+
+    def paintEvent(self, event):
+        if self._bg.alpha() == 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QBrush(self._bg))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), self.RADIUS, self.RADIUS)
+
+    def _max_width(self):
+        w = 660
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'width') and parent.width() > 100:
+                w = parent.width()
+                break
+            parent = parent.parent() if hasattr(parent, 'parent') else None
+        return int(w * self.MAX_FRACTION)
+
+    def sizeHint_for_width(self, total_w):
+        max_w = int(total_w * self.MAX_FRACTION)
+        inner_w = max_w - 2 * self.PADDING_H
+
+        if self.edit is not None:
+            # AI bubble (markdown): full max width
+            self.edit.document().setTextWidth(inner_w)
+            has_text = bool(self.edit.toPlainText().strip())
+            if has_text:
+                doc_h = int(self.edit.document().size().height())
+                self.edit.setFixedHeight(doc_h)
+                total_h = doc_h + 2 * self.PADDING_V
+                return QSize(max_w, max(total_h, 36))
+            else:
+                return QSize(max_w, 0)
+        else:
+            # User bubble (label): shrink to fit text
+            from PyQt6.QtGui import QFontMetrics
+            text = self.label.text()
+            fm = QFontMetrics(self.label.font())
+            if text:
+                single_line_w = fm.horizontalAdvance(text)
+                natural_inner_w = min(single_line_w, inner_w)
+                # Compute height at this natural width (may wrap for very long text)
+                from PyQt6.QtCore import Qt as _Qt
+                rect = fm.boundingRect(0, 0, natural_inner_w, 100000,
+                                       _Qt.TextFlag.TextWordWrap, text)
+                h = rect.height()
+                use_inner_w = natural_inner_w
+            else:
+                use_inner_w = 60
+                h = fm.height()
+
+            use_w = use_inner_w + 2 * self.PADDING_H
+            self.label.setFixedWidth(use_inner_w)
+            self.setFixedWidth(use_w)
+            total_h = h + 2 * self.PADDING_V
+            return QSize(use_w, max(total_h, 36))
+
+    def sizeHint(self):
+        return self.sizeHint_for_width(660)
+
+
+class AnswerWidget(QWidget):
+    """
+    Dual-mode answer widget.
+
+    chat_mode=True  → chat bubbles: user question right, AI answer left with name labels.
+                       Used for follow-up queries (Tab mode).
+    chat_mode=False → simple full-width answer text, no bubbles, no name labels.
+                       Used for the initial (first) query.
+    """
+
+    def __init__(self, text, query_text=None, thinking_text=None, chat_mode=False, parent=None):
+        super().__init__(parent)
+        self.outer_layout = QVBoxLayout(self)
+        self.outer_layout.setContentsMargins(16, 6, 16, 6)
+        self.outer_layout.setSpacing(8)
+        self.current_theme = "light"
+        self.chat_mode = chat_mode
+        self._query_text = query_text or ""
+
+        # ── USER BUBBLE (chat mode only) ───────────────────────────────
+        if chat_mode:
+            self.user_bubble = _BubbleWidget(self._query_text, sender="user")
+            self.user_bubble.setVisible(bool(self._query_text))
+            self.outer_layout.addWidget(self.user_bubble)
+        else:
+            self.user_bubble = None
+
+        # ── THINKING (collapsible, optional) ──────────────────────────
         self.thinking_widget = None
         if thinking_text and thinking_text.strip():
             self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
             self.thinking_widget.size_changed.connect(self.update_item_size)
-            self.layout.insertWidget(0, self.thinking_widget, 0, Qt.AlignmentFlag.AlignTop)
+            self.outer_layout.addWidget(self.thinking_widget)
 
-        self.text_edit = UnscrollableTextEdit()
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setFrameStyle(QFrame.Shape.NoFrame)
-        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        # ── AI CONTENT ────────────────────────────────────────────────
+        if chat_mode:
+            self.ai_bubble = _BubbleWidget("", sender="ai", is_markdown=True)
+            self.outer_layout.addWidget(self.ai_bubble)
+            self.text_edit = self.ai_bubble.bubble.edit
+        else:
+            self.ai_bubble = None
+            self.text_edit = UnscrollableTextEdit()
+            self.text_edit.setReadOnly(True)
+            self.text_edit.setFrameStyle(QFrame.Shape.NoFrame)
+            self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            self.text_edit.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
+            self.outer_layout.addWidget(self.text_edit)
 
-        self.text_edit.setMarkdown(text)
+        # Legacy alias
+        self.query_label = self.user_bubble.name_label if self.user_bubble else None
 
-        font = QFont("Manrope", 16, QFont.Weight.Normal)
-        self.text_edit.setFont(font)
-
-        self.text_edit.document().setTextWidth(660)
-
-        # Add answer text
-        self.layout.addWidget(self.text_edit)
-        
-        # Add small gray query label
-        self.query_label = QLabel(query_text if query_text else "")
-        self.query_label.setFont(QFont("Manrope", 12, QFont.Weight.Medium))
-        self.query_label.setWordWrap(True)
-        self.query_label.setVisible(False) # Default hidden
-        
-        self.layout.addWidget(self.query_label)
-        
-        if query_text:
-            self.query_label.setText(query_text)
+        self._answer_text = text or ""
+        if text:
+            self.text_edit.setVisible(True)
+            self.text_edit.setMarkdown(text)
 
         self.update_style()
 
+    # ── Styling ────────────────────────────────────────────────────────
+
     def update_style(self):
         t = THEMES.get(self.current_theme, THEMES["light"])
-        self.text_edit.setStyleSheet(f"background: transparent; color: {t['text_primary']};")
-        self.query_label.setStyleSheet(f"color: {t['text_secondary']}; padding-top: 4px;")
-        
+        if self.user_bubble:
+            self.user_bubble.set_theme(self.current_theme)
+        if self.ai_bubble:
+            self.ai_bubble.set_theme(self.current_theme)
+        else:
+            text_color = t.get("text_primary", "#ffffff")
+            self.text_edit.setStyleSheet(f"background: transparent; color: {text_color};")
         if self.thinking_widget:
             self.thinking_widget.set_theme(self.current_theme)
 
@@ -518,66 +762,66 @@ class AnswerWidget(QWidget):
         self.update_style()
 
     def set_query_visible(self, visible):
-        self.query_label.setVisible(visible)
+        if self.user_bubble and self.chat_mode:
+            self.user_bubble.setVisible(visible and bool(self._query_text))
+
+    # ── Thinking ───────────────────────────────────────────────────────
 
     def ensure_thinking_widget(self):
-        """Create thinking section if not present (for streaming thoughts first)."""
         if self.thinking_widget is None:
             self.thinking_widget = CollapsibleThinkingWidget("")
             self.thinking_widget.size_changed.connect(self.update_item_size)
             self.thinking_widget.set_theme(self.current_theme)
-            self.layout.insertWidget(0, self.thinking_widget, 0, Qt.AlignmentFlag.AlignTop)
+            # Insert after user_bubble (if in chat mode), before AI content
+            insert_idx = 1 if (self.chat_mode and self.user_bubble) else 0
+            self.outer_layout.insertWidget(insert_idx, self.thinking_widget)
 
     def update_thinking(self, text):
-        """Update thinking content; create thinking section if needed. Auto-expands only on first update."""
         self.ensure_thinking_widget()
-        # The CollapsibleThinkingWidget will handle auto-expanding on the first set_thinking_text call
-        # Subsequent updates will respect the user's collapse/expand choice
         self.thinking_widget.set_thinking_text(text)
         self.update_item_size()
-
-        # If text is empty (streaming phase), hide the text_edit to avoid taking up space
-        has_text = bool(self.text_edit.toPlainText().strip())
-        self.text_edit.setVisible(has_text)
+        has_answer = bool(self.text_edit and self.text_edit.toPlainText().strip())
+        if self.text_edit:
+            self.text_edit.setVisible(has_answer)
 
     def set_thinking_collapsed(self, collapsed):
-        """Collapse or expand the thinking section (e.g. after </think> when answer starts)."""
         if self.thinking_widget is not None:
             self.thinking_widget.set_collapsed(collapsed)
             self.update_item_size()
 
-    def sizeHint(self):
-        w = 660 # Default fallback
-        if self.parent() and self.parent().width() > 100:
-             w = self.parent().width()
-        
-        margins = self.layout.contentsMargins()
-        content_width = w - margins.left() - margins.right()
-        
-        h = margins.top() + margins.bottom()
-        
-        if self.thinking_widget and self.thinking_widget.isVisible():
-            h += self.thinking_widget.sizeHint().height()
-            h += self.layout.spacing()
+    # ── Size ───────────────────────────────────────────────────────────
 
-        if self.text_edit.isVisible():
-            self.text_edit.document().setTextWidth(content_width)
-            # Use idealWidth to ensure no wrapping issues? No, textWidth is set.
-            doc_h = self.text_edit.document().size().height()
-            h += int(doc_h)
-            # Force text edit to match content height
-            self.text_edit.setFixedHeight(int(doc_h))
-            
-        if self.query_label.isVisible():
-            h += self.layout.spacing()
-            # Label size hint might not be accurate if word wrap is on, need to set width
-            self.query_label.setFixedWidth(content_width)
-            h += self.query_label.sizeHint().height()
-            
-        return QSize(w, h)
+    def sizeHint(self):
+        w = 660
+        if self.parent() and self.parent().width() > 100:
+            w = self.parent().width()
+
+        margins = self.outer_layout.contentsMargins()
+        h = margins.top() + margins.bottom()
+        spacing = self.outer_layout.spacing()
+
+        if self.user_bubble and self.user_bubble.isVisible():
+            h += self.user_bubble.sizeHint().height() + spacing
+
+        if self.thinking_widget and self.thinking_widget.isVisible():
+            h += self.thinking_widget.sizeHint().height() + spacing
+
+        if self.ai_bubble:
+            ai_h = self.ai_bubble.sizeHint().height()
+            if ai_h > 0:
+                h += ai_h
+        else:
+            if self.text_edit and self.text_edit.isVisible():
+                inner_w = w - margins.left() - margins.right()
+                self.text_edit.document().setTextWidth(inner_w)
+                doc_h = int(self.text_edit.document().size().height())
+                if doc_h > 0:
+                    self.text_edit.setFixedHeight(doc_h)
+                    h += doc_h
+
+        return QSize(w, max(h, 40))
 
     def update_item_size(self):
-        """Updates the size hint in the parent QListWidget."""
         list_widget = None
         parent = self.parent()
         while parent:
@@ -585,52 +829,18 @@ class AnswerWidget(QWidget):
                 list_widget = parent
                 break
             parent = parent.parent()
-            
+
         if list_widget:
-            # Find item corresponding to this widget
-            # Iterate is safer than indexAt/itemAt for widgets in scroll areas
             for i in range(list_widget.count()):
                 item = list_widget.item(i)
                 widget = list_widget.itemWidget(item)
-                
-                # Handle SmoothEntryWidget wrapper
-                real_widget = widget
-                if hasattr(widget, 'content_widget'):
-                    real_widget = widget.content_widget
-                    
-                if real_widget == self:
+                real_widget = getattr(widget, 'content_widget', widget)
+                if real_widget is self:
                     item.setSizeHint(self.sizeHint())
                     break
-        
-        # Also notify parent layout
+
         if hasattr(self.window(), "adjust_window_height"):
             self.window().adjust_window_height()
-
-    def sizeHint(self):
-        self.text_edit.document().setTextWidth(660)
-        
-        # Calculate heights of visible components
-        h = 0
-        
-        # Thinking Widget Height
-        if self.thinking_widget is not None and self.thinking_widget.isVisible():
-            h += self.thinking_widget.sizeHint().height()
-            
-        # Text Edit Height
-        has_text = bool(self.text_edit.toPlainText().strip())
-        if has_text:
-            if h > 0: h += 12 # Spacing between thinking and text
-            h += self.text_edit.document().size().height()
-            
-        # Query Label Height
-        if self.query_label.isVisible():
-            if h > 0: h += 12 # Spacing
-            h += self.query_label.heightForWidth(660)
-
-        # Margins (Top 4 + Bottom 4 + Padding)
-        # If no text, reduce padding
-        bottom_padding = 48 if has_text else 12
-        return QSize(660, int(h + 8 + bottom_padding))
 
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):

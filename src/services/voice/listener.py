@@ -22,20 +22,21 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 try:
     from src.core.config import (
         IPC_PORT, GROQ_API_KEY, GROQ_WHISPER_MODEL,
-        OWW_WAKE_WORD_MODEL, OWW_DETECTION_THRESHOLD
+        OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD
     )
 except ImportError:
     IPC_PORT = 5556
     GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
     GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
-    OWW_WAKE_WORD_MODEL = "alexa"
+    OWW_WAKE_WORD_MODEL = "Hey_Omni"
+    OWW_CUSTOM_MODEL_PATH = ""
     OWW_DETECTION_THRESHOLD = 0.5
 
 # --- CONFIGURATION ---
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 1280          # 80ms - optimal chunk size for openWakeWord
-SILENCE_THRESHOLD = 0.001
-SILENCE_DURATION = 1.2  # seconds of silence before triggering transcription
+SILENCE_THRESHOLD = 0.003  # slightly higher so brief inter-syllable dips don't trigger silence
+SILENCE_DURATION = 1.8   # seconds of sustained silence before triggering transcription
 UDP_PORT = 5557
 
 # Minimum consecutive frames above threshold before wake word fires (debounce)
@@ -79,15 +80,22 @@ class VoiceService:
             from openwakeword.model import Model
             from openwakeword.utils import download_models
 
-            logger.info(f"Ensuring openWakeWord model '{OWW_WAKE_WORD_MODEL}' is downloaded...")
-            download_models(model_names=[OWW_WAKE_WORD_MODEL])
-
-            logger.info(f"Loading openWakeWord model: '{OWW_WAKE_WORD_MODEL}'...")
-            self.oww_model = Model(
-                wakeword_models=[OWW_WAKE_WORD_MODEL],
-                inference_framework="onnx"
-            )
-            # Resolve the actual prediction key the model uses (e.g. "alexa_v0.1")
+            custom_path = OWW_CUSTOM_MODEL_PATH if OWW_CUSTOM_MODEL_PATH else ""
+            if custom_path and os.path.exists(custom_path):
+                logger.info(f"Loading openWakeWord from custom model: '{custom_path}'...")
+                self.oww_model = Model(
+                    wakeword_models=[custom_path],
+                    inference_framework="onnx"
+                )
+            else:
+                logger.info(f"Ensuring openWakeWord model '{OWW_WAKE_WORD_MODEL}' is downloaded...")
+                download_models(model_names=[OWW_WAKE_WORD_MODEL])
+                logger.info(f"Loading openWakeWord model: '{OWW_WAKE_WORD_MODEL}'...")
+                self.oww_model = Model(
+                    wakeword_models=[OWW_WAKE_WORD_MODEL],
+                    inference_framework="onnx"
+                )
+            # Resolve the actual prediction key the model uses
             test_pred = self.oww_model.predict(np.zeros(1280, dtype=np.float32))
             self._oww_key = list(test_pred.keys())[0]
             logger.info(f"openWakeWord initialized. Prediction key: '{self._oww_key}'")
@@ -160,12 +168,15 @@ class VoiceService:
             self.state["mode"] = mode
             self.send_ipc(f"STATUS:{mode}".encode('utf-8'))
 
-            if mode == "IDLE":
+            if mode in ("IDLE", "PAUSED"):
+                # Clear audio state so we don't replay stale speech into OWW / transcription
                 self.audio_buffer = []
                 self.is_speaking = False
+                self.silence_frames = 0
+                self.energy_history = []
                 self._oww_trigger_count = 0
+                # Reset OWW prediction ring-buffer so residual speech doesn't re-trigger wake word
                 if self.oww_model:
-                    # Reset internal openWakeWord state so it's ready for next detection
                     try:
                         self.oww_model.reset()
                     except Exception:
@@ -232,9 +243,6 @@ class VoiceService:
 
                         mode = self.state["mode"]
 
-                        if mode == "PAUSED":
-                            continue
-
                         audio_data = indata.flatten()
 
                         # Resample if device runs at a different rate
@@ -254,6 +262,9 @@ class VoiceService:
                             self.handle_idle(audio_data)
                         elif mode == "LISTENING":
                             self.handle_listening(audio_data)
+                        elif mode == "PAUSED":
+                            # Wake word also in PAUSED so "Alexa" works with window open (same-chat follow-up)
+                            self.handle_idle(audio_data)
 
             except Exception as e:
                 logger.error(f"Audio Stream Error: {e}")
@@ -302,7 +313,7 @@ class VoiceService:
         # 2. Energy-based VAD with rolling average
         energy = np.sqrt(np.mean(audio_data ** 2))
         self.energy_history.append(energy)
-        if len(self.energy_history) > 3:  # ~240ms smoothing - responsive yet stable
+        if len(self.energy_history) > 6:  # ~480ms smoothing — bridges inter-syllable pauses
             self.energy_history.pop(0)
         avg_energy = sum(self.energy_history) / len(self.energy_history)
 
