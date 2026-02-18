@@ -24,6 +24,7 @@ accelerate
 transformers
 huggingface_hub[hf_xet]
 llama_cpp_python
+fastembed
 
 # Voice (ASR & TTS)
 # Install core voice deps first

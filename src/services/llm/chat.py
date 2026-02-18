@@ -73,20 +73,106 @@ def should_search(query):
         with fast_lock:
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
             start_t = time.time()
-            out = model_manager.fast_model.create_chat_completion(messages=messages, max_tokens=256, temperature=0.0)
-            end_t = time.time()
-            dur = end_t - start_t
-            tok_count = out.get('usage', {}).get('completion_tokens', 0)
+            out = model_manager.fast_model.create_chat_completion(
+                messages=messages,
+                max_tokens=5,
+                temperature=0.0,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            dur = time.time() - start_t
+            tok_count = out.get('usage', {}).get('completion_tokens', 0) if out else 0
             tps = tok_count / dur if dur > 0 else 0
             logging.info(f"FastModel (Intent): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
+        if out is None:
+            return False
         res = out['choices'][0]['message']['content'].strip()
-        # Clean up <THINK> blocks
-        res = re.sub(r'<THINK>.*?</THINK>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
+        res = re.sub(r'<think>.*?</think>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
         logging.info(f"Search Intent: {res} for '{query}'")
         return "YES" in res
     except Exception as e:
         logging.error(f"Intent check failed: {e}")
         return False
+
+def should_use_thinking(query, context_source="None"):
+    """Fast Model decides if Main Model needs thinking/reasoning or can answer instantly (instruct mode).
+    
+    Returns:
+        True  → use thinking mode (slow but smart)
+        False → use instruct/fast mode (quick direct answer)
+    """
+    query_lower = query.lower().strip()
+
+    # ── Hard NO-THINK: greetings, very short queries, pure commands ──────────
+    no_think_exact = {
+        "hello", "hi", "hey", "yo", "sup",
+        "cześć", "hej", "siema", "co tam", "co słychać",
+        "thanks", "thank you", "dzięki", "thx",
+        "ok", "okay", "cool", "nice", "sure",
+    }
+    if query_lower in no_think_exact:
+        logging.info(f"[ROUTING] FAST (greeting/exact) for: '{query}'")
+        return False
+
+    if len(query_lower) < 20 and not any(
+        kw in query_lower for kw in ("why", "how", "explain", "what is", "co to", "dlaczego", "jak działa")
+    ):
+        logging.info(f"[ROUTING] FAST (short query) for: '{query}'")
+        return False
+
+    # ── Hard THINK: rich context already fetched ──────────────────────────────
+    if context_source in ("Internet", "Local Files", "Local Images", "User Screen"):
+        logging.info(f"[ROUTING] THINK (rich context: {context_source}) for: '{query}'")
+        return True
+
+    # ── Hard THINK: keywords that strongly imply reasoning ───────────────────
+    think_keywords = (
+        "explain", "analyze", "compare", "why", "how does", "what if",
+        "code", "script", "debug", "fix", "implement", "refactor",
+        "write", "create", "generate", "essay", "poem",
+        "plan", "strategy", "pros and cons", "difference between",
+        "summarize", "review", "critique",
+        "wyjaśnij", "porównaj", "dlaczego", "jak działa", "napisz", "stwórz",
+    )
+    if any(kw in query_lower for kw in think_keywords):
+        logging.info(f"[ROUTING] THINK (keyword match) for: '{query}'")
+        return True
+
+    # ── Fast model decision for ambiguous cases ───────────────────────────────
+    ensure_fast_model()
+    sys_prompt = (
+        "Classify the query: needs deep reasoning (THINK) or quick direct answer (FAST).\n"
+        "FAST: greetings, simple facts, app launches, basic questions, weather, time, conversions.\n"
+        "THINK: analysis, coding, explanations, essays, comparisons, debugging, creative tasks.\n"
+        "Reply ONLY with one word: THINK or FAST."
+    )
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": query},
+    ]
+    try:
+        with fast_lock:
+            if hasattr(model_manager.fast_model, 'reset'):
+                model_manager.fast_model.reset()
+            t0 = time.time()
+            out = model_manager.fast_model.create_chat_completion(
+                messages=messages,
+                max_tokens=5,
+                temperature=0.0,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            logging.info(f"[ROUTING] Decision in {time.time()-t0:.3f}s")
+
+        if out is None:
+            return True  # abort → default to thinking
+        res = out['choices'][0]['message']['content'].strip()
+        res = re.sub(r'<think>.*?</think>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
+        use_thinking = "THINK" in res
+        logging.info(f"[ROUTING] {'🧠 THINK' if use_thinking else '⚡ FAST'} mode for: '{query}'")
+        return use_thinking
+    except Exception as e:
+        logging.error(f"[ROUTING] Decision failed: {e}")
+        return True  # safe default
+
 
 def should_see_screen(query):
     """Uses Fast Model to decide if we need to see the screen."""
@@ -143,10 +229,10 @@ def should_see_screen(query):
             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
             # Add timeout to prevent hanging on model inference
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages, 
-                max_tokens=256, 
+                messages=messages,
+                max_tokens=5,
                 temperature=0.0,
-                timeout=10  # 10 second timeout for intent check
+                chat_template_kwargs={"enable_thinking": False},
             )
         res = out['choices'][0]['message']['content'].strip()
         # Clean up <THINK> blocks
@@ -393,7 +479,9 @@ Output:"""
              if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
              f_out = model_manager.fast_model.create_chat_completion(
                  messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
-                 max_tokens=256, temperature=0.0
+                 max_tokens=64,
+                 temperature=0.0,
+                 chat_template_kwargs={"enable_thinking": False},
              )
              f_res = f_out['choices'][0]['message']['content'].strip()
              
@@ -441,6 +529,10 @@ Output:"""
 
     # === LOGGING: Context determined ===
     logging.info(f"[CHAT] Context determination finished. Source: {source_type}")
+
+    # ── Smart Routing: decide thinking vs instruct mode ──────────────────────
+    use_thinking = should_use_thinking(query, source_type)
+    logging.info(f"[CHAT] Main model mode: {'🧠 THINKING' if use_thinking else '⚡ INSTRUCT (no reasoning)'}")
 
     user_loc = get_ip_location()
     user_personal_context = get_user_memory(query)
@@ -645,9 +737,10 @@ Current Conversation:
                 # Real streaming mode - get tokens as they're generated
                 streamer = model_manager.llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=2048,
+                    max_tokens=2048 if use_thinking else 768,
                     temperature=0.1,
-                    stream=True
+                    stream=True,
+                    chat_template_kwargs={"enable_thinking": use_thinking},
                 )
 
                 # Yield tokens as they arrive
@@ -718,9 +811,10 @@ Current Conversation:
                 # Non-streaming mode (original behavior)
                 output = model_manager.llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=2048,
+                    max_tokens=2048 if use_thinking else 768,
                     stop=["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
-                    temperature=0.1
+                    temperature=0.1,
+                    chat_template_kwargs={"enable_thinking": use_thinking},
                 )
                 msg = output['choices'][0]['message']
                 full_text = msg['content'].strip()
