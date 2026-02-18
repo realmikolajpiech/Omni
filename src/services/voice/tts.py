@@ -71,7 +71,8 @@ def speak(text):
         try:
             _ensure_player_running()
             pipeline = model_manager.tts_model["pipeline"]
-            for _gs, _ps, audio in pipeline(text, voice='af_bella', speed=1):
+            # speed=1.2 → szybsza mowa i krótsze odczucie pauz między zdaniami
+            for _gs, _ps, audio in pipeline(text, voice='af_bella', speed=1.2):
                 if audio is not None:
                     _audio_queue.put(audio)
             return
@@ -79,16 +80,18 @@ def speak(text):
             logging.error(f"Kokoro TTS Error: {e}")
             # fall through to system TTS
 
-    # System TTS fallback
+    # System TTS fallback (szybsze tempo: mniej wolno się słucha)
     if sys.platform == "darwin":
         try:
-            subprocess.run(["say", text], check=False)
+            # -r 200: szybsze tempo (domyślnie ~175), mniejsze przerwy między zdaniami
+            subprocess.run(["say", "-r", "200", text], check=False)
         except Exception as e:
             logging.error(f"macOS TTS error: {e}")
     elif sys.platform == "win32":
         try:
             import win32com.client
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Rate = 1   # 0 = normal, zakres ok. -10..10, dodatnie = szybciej
             speaker.Speak(text)
         except Exception as e:
             logging.error(f"Win32 TTS error: {e}")
