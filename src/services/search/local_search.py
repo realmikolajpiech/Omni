@@ -44,99 +44,103 @@ def should_search_files(query):
         return "YES" in res
     except: return False
 
-def perform_file_search(query):
-    """Searches LanceDB (Content & Filenames) and returns context."""
-    # Ensure connection is ready (using main_model ensures embed_model is loaded)
+def search_lancedb(query, limit=5):
+    """
+    Performs semantic search on LanceDB and returns structured results.
+    Returns: List of dicts {'path': str, 'score': float, 'type': 'content'|'filename', 'text': str}
+    """
     from src.services.llm.model_manager import ensure_main_model, db_conn, embed_model
     ensure_main_model()
     
     if db_conn is None or embed_model is None:
-        logging.error("Database or Embed Model not initialized for file search.")
+        logging.warning("Semantic Search: DB or Model not ready.")
+        return []
+        
+    results = []
+    seen_paths = set()
+    
+    # 1. Content Search
+    try:
+        if "file_chunks" in db_conn.table_names():
+            chunks_tbl = db_conn.open_table("file_chunks")
+            query_vec = embed_model.encode(query)
+            res_chunks = chunks_tbl.search(query_vec).limit(limit).to_pandas()
+            
+            if not res_chunks.empty:
+                for _, row in res_chunks.iterrows():
+                    path = row['path']
+                    if path in seen_paths: continue
+                    
+                    results.append({
+                        'path': path,
+                        'score': 1.0 - row.get('_distance', 0.5), # Convert distance to similarity roughly
+                        'type': 'content',
+                        'text': row['content']
+                    })
+                    seen_paths.add(path)
+    except Exception as e:
+        logging.error(f"Semantic content search failed: {e}")
+        
+    # 2. Filename Search
+    try:
+        if "files" in db_conn.table_names():
+            files_tbl = db_conn.open_table("files")
+            # Re-encode only if needed, but we can reuse query_vec if we passed it (not passed here so re-encode)
+            # Actually embed_model cache might handle it, or just re-run
+            res_files = files_tbl.search(embed_model.encode(query)).limit(limit).to_pandas()
+            
+            if not res_files.empty:
+                for _, row in res_files.iterrows():
+                    path = row['path']
+                    if path in seen_paths: continue
+                    
+                    results.append({
+                        'path': path,
+                        'score': 1.0 - row.get('_distance', 0.5),
+                        'type': 'filename',
+                        'text': f"Filename match: {os.path.basename(path)}"
+                    })
+                    seen_paths.add(path)
+    except Exception as e:
+        logging.error(f"Semantic filename search failed: {e}")
+        
+    return results
+
+def perform_file_search(query):
+    """Searches LanceDB (Content & Filenames) and returns context."""
+    # Ensure connection is ready (using main_model ensures embed_model is loaded)
+    from src.services.llm.model_manager import ensure_main_model, db_conn, embed_model
+    
+    # ... (Keep existing logging/checks) ...
+    ensure_main_model()
+    if db_conn is None or embed_model is None:
         return "Search System Not Ready."
 
     logging.info(f"Performing File Search for: '{query}'")
     
     file_contexts = []
-    seen_paths = set()
     
-    # 1. Search CONTENT (file_chunks) - "Search by Meaning"
-    try:
-        # Check if table exists
-        existing_tables = db_conn.table_names()
-        if "file_chunks" in existing_tables:
-            chunks_tbl = db_conn.open_table("file_chunks")
-            
-            # Search for query embedding
-            query_vec = embed_model.encode(query)
-            # Use limit 5 and print scores
-            res_chunks = chunks_tbl.search(query_vec).limit(5).to_pandas()
-            
-            if not res_chunks.empty:
-                logging.info(f"Found {len(res_chunks)} content matches.")
-                for _, row in res_chunks.iterrows():
-                    path = row['path']
-                    content = row['content']
-                    score = row.get('_distance', 0) # LanceDB returns distance (lower is better)
-                    
-                    logging.info(f" - Content Match: {path} (dist={score:.4f})")
-                    
-                    # Threshold check (LanceDB default is L2 distance, so < 1.0 is usually good for normalized vectors)
-                    # But let's be lenient for now to debug
-                    
-                    seen_paths.add(path)
-                    file_contexts.append(f"--- File: {path} (Content Match) ---\n{content}\n...")
-            else:
-                logging.info("No content matches found in 'file_chunks'.")
-        else:
-            logging.warning("'file_chunks' table does not exist yet.")
-            
-    except Exception as e:
-        logging.error(f"Content search failed: {e}")
-
-    # 2. Search FILENAMES (files)
-    try:
-        existing_tables = db_conn.table_names()
-        if "files" in existing_tables:
-            tbl = db_conn.open_table("files")
-            res = tbl.search(embed_model.encode(query)).limit(5).to_pandas()
-            
-            if not res.empty:
-                logging.info(f"Found {len(res)} filename matches.")
-                for _, row in res.iterrows():
-                    path = row['path']
-                    score = row.get('_distance', 0)
-                    
-                    logging.info(f" - Filename Match: {path} (dist={score:.4f})")
-                    
-                    # Skip if we already found content for this file
-                    if path in seen_paths: continue
-                    
-                    # Filter out noise directories
-                    if "/examples/" in path or "/node_modules/" in path or "/venv/" in path or "/.git/" in path:
-                        continue
-
-                    # Only read text-like files (updated list to include RTF)
-                    # Reuse is_text_file from utils which now includes empty extensions
-                    from src.services.search.utils import is_text_file
-                    if is_text_file(path):
-                        try:
-                            # Use utils to process content (handles RTF stripping)
-                            from src.services.search.utils import process_file_content
-                            # Just get first chunk
-                            chunks = process_file_content(path, chunk_size=1000)
-                            content = chunks[0] if chunks else ""
-                            
-                            if content:
-                                file_contexts.append(f"--- File: {path} (Filename Match) ---\n{content}\n...")
-                        except Exception as e:
-                            logging.warning(f"Failed to read file {path}: {e}")
-            else:
-                logging.info("No filename matches found in 'files'.")
-        else:
-             logging.warning("'files' table does not exist yet.")
-
-    except Exception as e:
-        logging.error(f"Filename search failed: {e}")
+    # USE NEW FUNCTION
+    semantic_results = search_lancedb(query, limit=5)
+    
+    for res in semantic_results:
+        path = res['path']
+        content = res['text']
+        match_type = res['type']
+        
+        # For filename matches, we might want to read the content like before
+        if match_type == 'filename':
+             # Only read text-like files
+            from src.services.search.utils import is_text_file, process_file_content
+            if is_text_file(path) and "/node_modules/" not in path:
+                try:
+                    chunks = process_file_content(path, chunk_size=1000)
+                    file_content = chunks[0] if chunks else ""
+                    if file_content:
+                        content = file_content
+                except: pass
+        
+        file_contexts.append(f"--- File: {path} ({match_type.capitalize()} Match) ---\n{content}\n...")
     
     # 3. Fallback: OS-level search (mdfind/locate) if nothing found
     if not file_contexts:

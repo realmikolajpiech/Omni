@@ -201,7 +201,7 @@ def main():
     
     # Use Centralized Model Manager
     import src.services.llm.model_manager as model_manager
-    model_manager.ensure_main_model()
+    model_manager.ensure_resources()
     
     if model_manager.embed_model is None:
         logging.error("Failed to load embedding model.")

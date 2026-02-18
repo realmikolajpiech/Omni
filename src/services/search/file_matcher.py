@@ -101,6 +101,115 @@ class FileMatcher:
         # 4. No good match = 0 (FAST: skip fuzzy matching entirely)
         return 0
     
+    def search_content_scan(self, query: str, start_path: str = None) -> List[FileMatch]:
+        """
+        Scan file contents for query keywords - FALLBACK method.
+        Used when filename search returns no results for natural language queries.
+        
+        Args:
+            query: Search query
+            start_path: Starting directory
+            
+        Returns:
+            List of FileMatch objects
+        """
+        if not query or not query.strip():
+            return []
+            
+        # Extract meaningful keywords (simple approach)
+        stop_words = {
+            'what', 'where', 'when', 'who', 'why', 'how', 'which', 
+            'the', 'is', 'at', 'on', 'in', 'a', 'an', 'and', 'or', 'of', 'to', 'for',
+            'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will',
+            'i', 'you', 'he', 'she', 'it', 'we', 'they', 'my', 'your', 'his', 'her', 'its', 'our', 'their',
+            'want', 'need', 'find', 'search', 'look', 'show', 'me'
+        }
+        
+        words = [w.lower() for w in query.split() if len(w) > 2]
+        keywords = [w for w in words if w not in stop_words]
+        
+        if not keywords:
+            return []
+            
+        logging.info(f"Scanning content for keywords: {keywords}")
+        
+        matches = []
+        search_paths = self._get_smart_search_paths(start_path)
+        
+        # Extensions to scan
+        text_exts = {'.txt', '.md', '.py', '.js', '.html', '.json', '.csv', '.rtf', '.log', '.xml', '.yaml', '.yml', '.ini', '.conf'}
+        
+        count = 0
+        limit = 2000 # Max files to scan to prevent freezing
+        
+        for path in search_paths:
+            if not os.path.exists(path):
+                continue
+                
+            for root, dirs, files in os.walk(path):
+                # Modify dirs in-place to skip excluded
+                dirs[:] = [d for d in dirs if not self.should_exclude_dir(d)]
+                
+                # Check depth
+                rel_path = os.path.relpath(root, path)
+                if rel_path != "." and rel_path.count(os.sep) >= self.search_depth:
+                    continue
+                
+                for file in files:
+                    if count >= limit:
+                        break
+                        
+                    _, ext = os.path.splitext(file)
+                    if ext.lower() not in text_exts:
+                        continue
+                        
+                    full_path = os.path.join(root, file)
+                    
+                    try:
+                        # Check file size < 1MB
+                        if os.path.getsize(full_path) > 1024 * 1024:
+                            continue
+                            
+                        count += 1
+                        with open(full_path, 'r', errors='ignore') as f:
+                            content = f.read(4000).lower() # Read first 4KB
+                            
+                            # Score based on keyword matches
+                            match_score = 0
+                            matched_keywords = 0
+                            
+                            for kw in keywords:
+                                if kw in content:
+                                    match_score += 100
+                                    matched_keywords += 1
+                            
+                            # Bonus for consecutive keywords or proximity could be added here
+                            
+                            if match_score > 0:
+                                # Penalize deeper files slightly
+                                depth_penalty = rel_path.count(os.sep) * 10
+                                final_score = match_score - depth_penalty
+                                
+                                # Create match object
+                                matches.append(FileMatch(
+                                    full_path, 
+                                    file, 
+                                    False, 
+                                    max(10, final_score) # Minimum score 10
+                                ))
+                    except Exception:
+                        continue
+                
+                if count >= limit:
+                    break
+            
+            if count >= limit:
+                break
+                
+        # Sort by score
+        matches.sort(key=lambda m: m.score, reverse=True)
+        return matches[:self.max_results]
+
     def _fuzzy_score(self, query: str, text: str) -> float:
         """
         Simple fuzzy matching score.

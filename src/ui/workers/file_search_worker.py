@@ -38,17 +38,49 @@ class FileSearchWorker(QThread):
             logging.info(f"FileSearchWorker: Starting search for '{self.query}'")
             file_matches = self.matcher.search_files(self.query)
             
-            # Convert to dictionaries with additional metadata
+            # FALLBACK: If no results and query looks like a sentence, try content scan
+            if not file_matches and len(self.query.split()) > 2:
+                # 1. Try Semantic Search first (LanceDB) - If available
+                try:
+                    from src.services.search.local_search import search_lancedb
+                    logging.info(f"FileSearchWorker: Trying semantic search for '{self.query}'")
+                    semantic_results = search_lancedb(self.query, limit=5)
+                    
+                    if semantic_results:
+                        for res in semantic_results:
+                            # Convert to format expected by UI
+                            file_matches.append({
+                                "path": res['path'],
+                                "name": os.path.basename(res['path']),
+                                "is_dir": os.path.isdir(res['path']),
+                                "score": res['score'] * 1000, # Scale up
+                                "type": "file",
+                                "content_preview": res['text'][:100]
+                            })
+                except Exception as e:
+                    logging.warning(f"FileSearchWorker: Semantic search failed/not ready: {e}")
+
+                # 2. If still no results, use the lightweight Content Scan Fallback
+                if not file_matches:
+                    logging.info(f"FileSearchWorker: No semantic matches, trying content scan for '{self.query}'")
+                    content_matches = self.matcher.search_content_scan(self.query)
+                    if content_matches:
+                        file_matches = content_matches
+            
+            # Convert to dictionaries with additional metadata (if not already dicts)
             results = []
             for match in file_matches:
-                result = {
-                    "path": match.path,
-                    "name": match.name,
-                    "is_dir": match.is_dir,
-                    "score": match.score,
-                    "type": "folder" if match.is_dir else "file"
-                }
-                results.append(result)
+                if isinstance(match, dict):
+                    results.append(match)
+                else:
+                    result = {
+                        "path": match.path,
+                        "name": match.name,
+                        "is_dir": match.is_dir,
+                        "score": match.score,
+                        "type": "folder" if match.is_dir else "file"
+                    }
+                    results.append(result)
             
             logging.info(f"FileSearchWorker: Found {len(results)} matches for '{self.query}'")
             self.results_found.emit(results, self.query)

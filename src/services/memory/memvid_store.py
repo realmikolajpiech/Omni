@@ -1,11 +1,37 @@
+
 import os
 import logging
 import memvid_sdk
 import datetime
 from src.core.config import PERSONAL_MEM_PATH
 from src.services.llm.model_manager import llm, main_lock
+from src.services.memory.embedding import embed_text
 
 personal_mem = None
+
+def get_memvid_instance():
+    """Lazily initializes and returns the Memvid instance."""
+    global personal_mem
+    if personal_mem:
+        return personal_mem
+
+    try:
+        # Check if file exists to decide between create and use
+        if not os.path.exists(PERSONAL_MEM_PATH):
+            logging.info(f"Creating new Memvid memory at {PERSONAL_MEM_PATH}")
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
+            # Create new memory with vector search enabled
+            personal_mem = memvid_sdk.create(PERSONAL_MEM_PATH, enable_vec=True)
+        else:
+            logging.info(f"Loading existing Memvid memory from {PERSONAL_MEM_PATH}")
+            # Use existing memory with vector search enabled
+            personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH, enable_vec=True)
+        
+        return personal_mem
+    except Exception as e:
+        logging.error(f"Failed to initialize Memvid: {e}")
+        return None
 
 def resolve_contradictions(facts):
     """Uses Main Model to resolve conflicting facts."""
@@ -30,6 +56,11 @@ Facts:
 resolved facts:"""
 
     try:
+        # We need to access model_manager from somewhere, but here it was imported as llm, main_lock
+        # The original code used model_manager.main_lock and model_manager.llm but imported llm, main_lock
+        # Let's import model_manager properly to match usage
+        from src.services.llm import model_manager
+        
         with model_manager.main_lock:
              if not model_manager.llm:
                  return "\n".join(unique_facts)
@@ -47,19 +78,15 @@ resolved facts:"""
 
 def get_user_memory(query=None):
     """Retrieves relevant user memory from Memvid V2."""
-    global personal_mem
-    if personal_mem is None:
-        try:
-             personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH)
-        except Exception as e:
-             logging.error(f"Failed to connect to Memvid Personal Memory: {e}")
-             return "No personal memory available."
+    mem = get_memvid_instance()
+    if not mem:
+        return "No personal memory available."
 
     if not query or any(x in query.lower() for x in ["everything", "all information", "know about me", "who am i"]):
         # If no query or broad query, search for 'user' to get general facts
         try:
             logging.info("Broad memory query detected, searching for 'user' facts.")
-            results = personal_mem.find("user", k=10)
+            results = mem.find("user", k=10)
             hits = results.get('hits', []) if isinstance(results, dict) else results
             facts = []
             for h in hits:
@@ -74,7 +101,15 @@ def get_user_memory(query=None):
     try:
         # Search specifically for the query
         logging.info(f"Searching personal memory for: {query}")
-        raw_results = personal_mem.find(query, k=5)
+        
+        # Generate embedding for the query
+        query_vec = embed_text(query)
+        
+        # Use find with query_embedding if available
+        if query_vec:
+            raw_results = mem.find(query, k=5, query_embedding=query_vec)
+        else:
+            raw_results = mem.find(query, k=5)
         
         # Results is a dict with 'hits' key
         hits = []
@@ -115,7 +150,7 @@ def get_user_memory(query=None):
         
         # Fallback: if specific search failed, try general user search
         logging.info("Specific search yielded no results, falling back to general user search.")
-        fallback_res = personal_mem.find("user", k=5)
+        fallback_res = mem.find("user", k=5)
         f_hits = fallback_res.get('hits', []) if isinstance(fallback_res, dict) else []
         for h in f_hits:
             if isinstance(h, dict):
@@ -131,18 +166,14 @@ def get_user_memory(query=None):
 
 def remember_fact(fact):
     """Stores a new fact about the user in Memvid V2."""
-    global personal_mem
-    if personal_mem is None:
-        try:
-             personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH)
-        except Exception as e:
-             logging.error(f"Failed to connect to Memvid for remembering: {e}")
-             return False
+    mem = get_memvid_instance()
+    if not mem:
+        return False
 
     try:
         # Deduplication: Check if this fact (or something very similar) is already known
         logging.info(f"Checking if fact is already known: {fact}")
-        search_res = personal_mem.find(fact, k=3)
+        search_res = mem.find(fact, k=3)
         hits = []
         if isinstance(search_res, dict):
             hits = search_res.get('hits', [])
@@ -156,8 +187,26 @@ def remember_fact(fact):
                 return True # Treat as success
 
         logging.info(f"Fact is new. Remembering: {fact}")
-        # Note: We skip enable_embedding=True for now as it caused issues in migration
-        personal_mem.put(text=fact, enable_embedding=False)
+        
+        # Generate embedding manually
+        vec = embed_text(fact)
+        
+        if vec:
+            # Use put_many to inject manual embedding
+            # mem.put_many takes a list of dicts and an optional list of embeddings
+            item = {
+                "title": "Untitled",
+                "label": "text",
+                "text": fact,
+                "auto_tag": True,
+                "extract_dates": True
+            }
+            # Note: put_many returns list of frame_ids
+            mem.put_many([item], embeddings=[vec])
+        else:
+            # Fallback to lexical only if embedding fails
+            mem.put(text=fact, enable_embedding=False)
+            
         return True
     except Exception as e:
         logging.error(f"Failed to remember fact: {e}")
@@ -165,17 +214,13 @@ def remember_fact(fact):
 
 def remember_update(fact):
     """Corrects an existing fact in Memvid V2."""
-    global personal_mem
-    if personal_mem is None:
-        try:
-             personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH)
-        except Exception as e:
-             logging.error(f"Failed to connect to Memvid for correction: {e}")
-             return False
+    mem = get_memvid_instance()
+    if not mem:
+        return False
 
     try:
         logging.info(f"Correcting Fact: {fact}")
-        personal_mem.correct(statement=fact, boost=3.0)
+        mem.correct(statement=fact, boost=3.0)
         return True
     except Exception as e:
         logging.error(f"Failed to correct fact: {e}")
@@ -183,18 +228,14 @@ def remember_update(fact):
 
 def delete_memory(query):
     """Deletes (hides) a fact from Memvid V2 based on semantic query."""
-    global personal_mem
-    if personal_mem is None:
-        try:
-             personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH)
-        except Exception as e:
-             logging.error(f"Failed to connect to Memvid for deletion: {e}")
-             return False
+    mem = get_memvid_instance()
+    if not mem:
+        return False
 
     try:
         logging.info(f"Attempting to delete memory matching: {query}")
         # Search for the fact 
-        search_res = personal_mem.find(query, k=5)
+        search_res = mem.find(query, k=5)
         hits = []
         if isinstance(search_res, dict):
             hits = search_res.get('hits', [])
@@ -217,7 +258,7 @@ def delete_memory(query):
                     # Soft Delete via Correction
                     # We inject a high-priority fact that says this information is deleted.
                     # The resolve_contradictions LLM step will see this and remove it from final output.
-                    personal_mem.correct(f"FACT DELETED: {clean_text}", boost=5.0)
+                    mem.correct(f"FACT DELETED: {clean_text}", boost=5.0)
                     deleted_count += 1
                 except Exception as e:
                     logging.error(f"Correction failed: {e}") 

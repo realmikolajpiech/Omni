@@ -46,7 +46,7 @@ def main():
     import src.services.llm.model_manager as model_manager
     
     # Ensure model is loaded
-    model_manager.ensure_main_model()
+    model_manager.ensure_resources()
     
     # Wait for embed_model to be populated
     if model_manager.embed_model is None:
