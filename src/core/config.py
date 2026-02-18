@@ -1,17 +1,40 @@
 import os
 
-# Load .env from project root (if present)
+def _load_env_file(path: str):
+    """Parse and load a single .env file into os.environ (setdefault — never overwrites)."""
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+
 def _load_env():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
-    env_path = os.path.normpath(env_path)
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                os.environ.setdefault(key.strip(), value.strip())
+    """
+    Load .env with a multi-location search strategy:
+      1. Walk up from this file's directory until a .env is found (covers any clone location).
+      2. Also load ~/.config/omni/.env as a per-user override/fallback (never committed to git).
+    Using setdefault so that already-set env vars are always respected.
+    """
+    # 1. Walk up the directory tree from src/core/ towards filesystem root
+    search_dir = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(6):
+        candidate = os.path.join(search_dir, ".env")
+        if os.path.exists(candidate):
+            _load_env_file(candidate)
+            break
+        parent = os.path.dirname(search_dir)
+        if parent == search_dir:  # reached filesystem root
+            break
+        search_dir = parent
+
+    # 2. User-level fallback: ~/.config/omni/.env (safe place for personal keys on any machine)
+    user_env = os.path.expanduser("~/.config/omni/.env")
+    if os.path.exists(user_env):
+        _load_env_file(user_env)
+
 
 _load_env()
 
@@ -50,12 +73,11 @@ EMBED_MODEL_PATH = os.path.join(MODEL_DIR, EMBED_MODEL_FILENAME)
 EMBED_MODEL_URL = "" 
 
 # Voice Models
-VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
-VOSK_MODEL_PATH = os.path.join(MODEL_DIR, VOSK_MODEL_NAME)
-VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"  # Fast + accurate; alternatives: whisper-large-v3, distil-whisper-large-v3-en
+OWW_WAKE_WORD_MODEL = "alexa_v0.1"  # openWakeWord model ID; available: alexa_v0.1, hey_jarvis_v0.1, hey_mycroft_v0.1
+OWW_DETECTION_THRESHOLD = 0.3  # Wake word confidence threshold (0.0 - 1.0)
 
-ASR_MODEL_ID = "openai/whisper-small" # Multilingual support
-TTS_MODEL_ID = "hexgrad/Kokoro-82M" # Kokoro-82M for high quality and speed
+TTS_MODEL_ID = "hexgrad/Kokoro-82M"
 
 # URLs
 BRAIN_HOST = "127.0.0.1"

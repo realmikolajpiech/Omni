@@ -7,9 +7,6 @@ import logging
 import threading
 import base64
 
-import torch
-import sys
-
 # Suppress HuggingFace Hub Permission Warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -301,7 +298,7 @@ def ensure_main_model():
 def ensure_model_loaded():
     ensure_fast_model()
     ensure_main_model()
-    # TTS is loaded lazily on first use via ensure_tts_model() to save RAM at startup.
+    # TTS loaded lazily on first use to save RAM at startup
 
 
 def ensure_tts_model():
@@ -323,18 +320,16 @@ def ensure_tts_model():
                 pipeline = KPipeline(lang_code="a")
                 tts_model = {"pipeline": pipeline, "type": "kokoro"}
                 logging.info("Kokoro TTS Model Loaded.")
+                # Pre-warm: generate a silent frame so the voice file is downloaded
+                # and the model is JIT-compiled before first real use
+                try:
+                    logging.info("Warming up Kokoro voice (downloading af_bella if needed)...")
+                    for _gs, _ps, _audio in pipeline("Hi.", voice="af_bella", speed=1):
+                        break  # discard — just trigger the lazy download
+                    logging.info("Kokoro warm-up done.")
+                except Exception as e:
+                    logging.warning(f"Kokoro warm-up failed (non-fatal): {e}")
             else:
-                from transformers import SpeechT5Processor, SpeechT5ForTextToSpeech, SpeechT5HifiGan
-                processor = SpeechT5Processor.from_pretrained(TTS_MODEL_ID)
-                model = SpeechT5ForTextToSpeech.from_pretrained(TTS_MODEL_ID)
-                vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan")
-                if torch.cuda.is_available():
-                    model = model.to("cuda")
-                    vocoder = vocoder.to("cuda")
-                elif sys.platform == "darwin" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    model = model.to("mps")
-                    vocoder = vocoder.to("mps")
-                tts_model = {"model": model, "processor": processor, "vocoder": vocoder, "type": "transformers"}
-                logging.info("TTS Model Loaded (Transformers).")
+                logging.warning(f"Unknown TTS model: {TTS_MODEL_ID}, skipping.")
         except Exception as e:
             logging.error(f"TTS Model Load Error: {e}")

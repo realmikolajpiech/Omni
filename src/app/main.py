@@ -406,20 +406,20 @@ def main():
     except Exception as e:
         logging.error(f"Failed to start voice listener: {e}")
 
-    # Pre-load TTS Model in background to avoid delay on first speech
+    # Pre-load Kokoro TTS in background to avoid delay on first speech
     try:
         import threading
         from src.services.llm.model_manager import ensure_tts_model
-        
-        def preload_tts():
+
+        def _preload_tts():
             logging.info("Pre-loading TTS Model in background...")
             try:
                 ensure_tts_model()
-                logging.info("TTS Model pre-loaded successfully.")
+                logging.info("TTS Model pre-loaded.")
             except Exception as e:
                 logging.error(f"TTS Pre-load failed: {e}")
-                
-        threading.Thread(target=preload_tts, daemon=True).start()
+
+        threading.Thread(target=_preload_tts, daemon=True).start()
     except Exception as e:
         logging.error(f"Failed to start TTS pre-loader: {e}")
 
