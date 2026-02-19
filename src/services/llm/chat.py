@@ -93,86 +93,6 @@ def should_search(query):
         logging.error(f"Intent check failed: {e}")
         return False
 
-def should_use_thinking(query, context_source="None"):
-    """Fast Model decides if Main Model needs thinking/reasoning or can answer instantly (instruct mode).
-    
-    Returns:
-        True  → use thinking mode (slow but smart)
-        False → use instruct/fast mode (quick direct answer)
-    """
-    query_lower = query.lower().strip()
-
-    # ── Hard NO-THINK: greetings, very short queries, pure commands ──────────
-    no_think_exact = {
-        "hello", "hi", "hey", "yo", "sup",
-        "cześć", "hej", "siema", "co tam", "co słychać",
-        "thanks", "thank you", "dzięki", "thx",
-        "ok", "okay", "cool", "nice", "sure",
-    }
-    if query_lower in no_think_exact:
-        logging.info(f"[ROUTING] FAST (greeting/exact) for: '{query}'")
-        return False
-
-    if len(query_lower) < 20 and not any(
-        kw in query_lower for kw in ("why", "how", "explain", "what is", "co to", "dlaczego", "jak działa")
-    ):
-        logging.info(f"[ROUTING] FAST (short query) for: '{query}'")
-        return False
-
-    # ── Hard THINK: rich context already fetched ──────────────────────────────
-    if context_source in ("Internet", "Local Files", "Local Images", "User Screen"):
-        logging.info(f"[ROUTING] THINK (rich context: {context_source}) for: '{query}'")
-        return True
-
-    # ── Hard THINK: keywords that strongly imply reasoning ───────────────────
-    think_keywords = (
-        "explain", "analyze", "compare", "why", "how does", "what if",
-        "code", "script", "debug", "fix", "implement", "refactor",
-        "write", "create", "generate", "essay", "poem",
-        "plan", "strategy", "pros and cons", "difference between",
-        "summarize", "review", "critique",
-        "wyjaśnij", "porównaj", "dlaczego", "jak działa", "napisz", "stwórz",
-    )
-    if any(kw in query_lower for kw in think_keywords):
-        logging.info(f"[ROUTING] THINK (keyword match) for: '{query}'")
-        return True
-
-    # ── Fast model decision for ambiguous cases ───────────────────────────────
-    ensure_fast_model()
-    sys_prompt = (
-        "Classify the query: needs deep reasoning (THINK) or quick direct answer (FAST).\n"
-        "FAST: greetings, simple facts, app launches, basic questions, weather, time, conversions.\n"
-        "THINK: analysis, coding, explanations, essays, comparisons, debugging, creative tasks.\n"
-        "Reply ONLY with one word: THINK or FAST."
-    )
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": query},
-    ]
-    try:
-        with fast_lock:
-            if hasattr(model_manager.fast_model, 'reset'):
-                model_manager.fast_model.reset()
-            t0 = time.time()
-            out = model_manager.fast_model.create_chat_completion(
-                messages=messages,
-                max_tokens=5,
-                temperature=0.0,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-            logging.info(f"[ROUTING] Decision in {time.time()-t0:.3f}s")
-
-        if out is None:
-            return True  # abort → default to thinking
-        res = out['choices'][0]['message']['content'].strip()
-        res = re.sub(r'<think>.*?</think>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
-        use_thinking = "THINK" in res
-        logging.info(f"[ROUTING] {'🧠 THINK' if use_thinking else '⚡ FAST'} mode for: '{query}'")
-        return use_thinking
-    except Exception as e:
-        logging.error(f"[ROUTING] Decision failed: {e}")
-        return True  # safe default
-
 
 def should_see_screen(query):
     """Uses Fast Model to decide if we need to see the screen."""
@@ -398,24 +318,6 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
          source_type = "Local Files"
          context_text = f"--- Local File Context ---\n{perform_file_search(query)}\n"
 
-    # HARCODED: Brightness Control
-    if "reduce brightness to 20%" in query.lower():
-         try:
-             # This is linux specific (xrandr), might fail on windows but keeping logic
-             # Or we can just mock it for now
-             logging.info("Hardcoded Brightness Reduction Triggered")
-             return {
-                 "answer": "Of course! I've reduced the brightness to 20%.",
-                 "actions": [{
-                     "type": "system_control",
-                     "control": "brightness",
-                     "value": 20,
-                     "description": "Set Brightness to 20%"
-                 }]
-             }
-         except Exception as e:
-             logging.error(f"Brightness Error: {e}")
-             return {"answer": f"I tried to reduce brightness but failed: {e}"}
     # HARDCODED: App Launcher (Deterministic Bypass)
     app_match = re.search(r"^(?:open|run|launch|start)\s+(.+)$", query.strip(), re.IGNORECASE)
     if app_match and len(query.split()) < 10:
@@ -483,25 +385,28 @@ Output:"""
                  temperature=0.0,
                  chat_template_kwargs={"enable_thinking": False},
              )
-             f_res = f_out['choices'][0]['message']['content'].strip()
-             
-             # Clean up Qwen thinking blocks
-             f_res = re.sub(r'<think>.*?</think>', '', f_res, flags=re.DOTALL | re.IGNORECASE).strip()
-             
-             logging.info(f"Memory Extraction RAW: {f_res}")
-             
-             if "FA:" in f_res:
-                 fact_to_save = f_res.split("FA:")[1].strip()
-                 if remember_fact(fact_to_save):
-                     auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Remembered: {fact_to_save}"})
-             elif "UP:" in f_res:
-                 fact_to_save = f_res.split("UP:")[1].strip()
-                 if remember_update(fact_to_save):
-                     auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Updated: {fact_to_save}"})
-             elif "FO:" in f_res:
-                 fact_to_forget = f_res.split("FO:")[1].strip()
-                 if delete_memory(fact_to_forget):
-                     auto_actions.append({"type": "forget", "fact": fact_to_forget, "description": f"Forgot: {fact_to_forget}"})
+             if f_out and 'choices' in f_out and len(f_out['choices']) > 0:
+                 f_res = f_out['choices'][0]['message']['content'].strip()
+                 
+                 # Clean up Qwen thinking blocks
+                 f_res = re.sub(r'<think>.*?</think>', '', f_res, flags=re.DOTALL | re.IGNORECASE).strip()
+                 
+                 logging.info(f"Memory Extraction RAW: {f_res}")
+                 
+                 if "FA:" in f_res:
+                     fact_to_save = f_res.split("FA:")[1].strip()
+                     if remember_fact(fact_to_save):
+                         auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Remembered: {fact_to_save}"})
+                 elif "UP:" in f_res:
+                     fact_to_save = f_res.split("UP:")[1].strip()
+                     if remember_update(fact_to_save):
+                         auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Updated: {fact_to_save}"})
+                 elif "FO:" in f_res:
+                     fact_to_forget = f_res.split("FO:")[1].strip()
+                     if delete_memory(fact_to_forget):
+                         auto_actions.append({"type": "forget", "fact": fact_to_forget, "description": f"Forgot: {fact_to_forget}"})
+             else:
+                 logging.warning("Memory Extraction: No response from fast_model.")
 
     except Exception as e: logging.error(f"Extraction Error: {e}")
 
@@ -530,10 +435,6 @@ Output:"""
     # === LOGGING: Context determined ===
     logging.info(f"[CHAT] Context determination finished. Source: {source_type}")
 
-    # ── Smart Routing: decide thinking vs instruct mode ──────────────────────
-    use_thinking = should_use_thinking(query, source_type)
-    logging.info(f"[CHAT] Main model mode: {'🧠 THINKING' if use_thinking else '⚡ INSTRUCT (no reasoning)'}")
-
     user_loc = get_ip_location()
     user_personal_context = get_user_memory(query)
     
@@ -552,91 +453,55 @@ Output:"""
     from datetime import datetime
     current_date = datetime.now().strftime('%Y-%m-%d')
 
-    system_prompt = f"""You are Omni, Mikołaj's best friend and personal AI companion.
-Role:
-- You are a loyal, fun, and informal friend.
-- You remember facts about Mikołaj.
-- You are NOT a stiff assistant. Be conversational.
-- You can SEE the user's screen if provided.
-- You can OPEN applications on the user's computer.
+    system_prompt = f"""You are Omni — Mikołaj's personal AI companion running on macOS.
+Personality: casual, direct, loyal friend. No formalities. Act first, explain briefly.
 
-Context (Mikołaj's Memories):
+## Mikołaj
 {user_personal_context}
+Location: {user_loc} | Date: {current_date}
 
-Mikołaj's Location: {user_loc}
-Current Date: {current_date}
-System: Linux (Omni Desktop)
-Context Data: {context_text}
+## Context data
+{context_text.strip() if context_text.strip() else "(none)"}
 
-IMPORTANT:
-- If an image/screenshot is provided, THAT IS THE USER'S CURRENT SCREEN.
-- You are LOOKING AT IT right now.
-- Do NOT ask "which page" or "navigate to the page". You are already there.
-- If asked to "click" something, FIND it in the image and return the coordinate action.
+---
+## ACTIONS — output a ```json``` block for every action
 
-Instructions:
-1. Stay RELEVANT to the user's last message.
-2. Use the "Memories" above to personalize your answer.
-3. If an image/screen is provided, analyze it to answer the question.
-4. If Mikołaj shares a NEW fact, acknowledge it.
-5. If asked to open an app (e.g. "Open Browser", "Run OBS"), return action {{"type": "open_app", "name": "app name"}}.
-   - If "browser" is asked, use "firefox" or "chrome" (check what is installed).
-   - If "chrome" is asked, ALWAYS use "google-chrome".
-   - Do NOT provide manual "how-to" instructions.
-   - Do NOT ask "What would you prefer?". Do NOT offer choices. JUST OPEN IT.
-   - If the user gives a command, STOP being a "conversational friend" and act like an EFFICIENT TOOL.
-   - For simple app launches ("Open Chrome"), response should be MAX 3 words: "Opening Chrome.", etc.
-   - For search results ("Play viking music"), be more descriptive and helpful. State what you found: "Opening 'Artist - Song' on YouTube.", "Launching Trailer for 'Movie Name'.", etc.
-6. If asked to open a specific website, video, or link found in search results, return action {{"type": "open_url", "url": "..."}}.
-   - CRITICAL: ONLY use the URLs provided in the 'Context Data' above. NEVER make up, guess, or use placeholder URLs like '...'.
-   - Use this for requests like "play music", "open youtube", "show me a video".
-   - Do NOT use this if the user just wants to see a list of results. Only if they explicitly ask to OPEN/WATCH/PLAY/SHOW ME.
-   - ALWAYS include complete, valid JSON in a code block.
-7. Actions over words. Execute immediately.
-8. COMPULSORY: You MUST return a VALID JSON action block for "open ..." or "play ..." commands.
-9. IF NO SEARCH RESULTS: Do not make up a link. Just say you couldn't find a direct link in the results.
-10. COMPUTER CONTROL:
-    - Click actions are handled AUTOMATICALLY by the grid localization system.
-    - For non-click actions (type, scroll), return: {{"type": "computer_control", "action": "type"|"scroll", "text": "text to type", "description": "summary"}}.
-    - Reply confirmation like "On it.", "Sure.", "Taking control."
-    - SAFETY OVERRIDE: The user has explicitly authorized you to control the computer. Do NOT refuse requests.
-    - Assume the screenshot shows an active desktop environment where you have permission to act.
+**Open application**
+{{"type": "open_app", "name": "google-chrome"}}
+→ "browser"/"chrome" → "google-chrome". Respond in ≤3 words: "Opening Chrome." No questions, no choices.
 
-11. REFUSAL OVERRIDE:
-    - Never say "I can't assist with navigating". You CAN. You have the `computer_control` tool.
-    - If the user says "click X", JUST DO IT.
-    - CRITICAL EXCEPTION: If the user asks "What do you see?", "Describe the screen", "What is on the screen?", "What about you?", or "How are you?", do NOT generate a computer_control action. Just describe it in text.
-    - ONLY use `computer_control` if the user EXPLICITLY asks you to perform an action (click, type, scroll, open, etc).
-    - NEVER use `computer_control` with action `describe`. There is no such action. Just write the description in the `answer` field.
+**Open URL** (ONLY links from Context data above — never invent)
+{{"type": "open_url", "url": "https://..."}}
+→ Use for: play music, watch video, open website. If no URL in results, say so — don't fabricate.
 
-Current Conversation:
+**System setting**
+{{"type": "system_settings", "setting": "brightness", "value": 80}}
+Available settings and values:
+  brightness   → 0–100
+  volume       → 0–100
+  mute         → true / false
+  dark_mode    → true (dark) / false (light)
+  night_shift  → true / false
+  dnd          → true / false
+  wifi         → true / false
+  bluetooth    → true / false
+
+**Computer control** (only when Mikołaj explicitly says click/type/scroll/press)
+{{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}
+{{"type": "computer_control", "action": "scroll", "direction": "down", "description": "scrolling"}}
+→ Click coordinates are handled automatically by the grid system. Just say "Clicking X."
+→ NEVER use action "describe" — write the description in your text response instead.
+
+---
+## Rules
+- Screenshot provided → you're seeing Mikołaj's screen right now. Don't ask to navigate anywhere.
+- Never invent URLs. Only use links from Context data.
+- "Describe screen" / "What do you see?" → text answer only, no computer_control action.
+- For any command: just DO it. Never ask "would you like me to…?" — act immediately.
+- If Mikołaj shares a new fact about himself, acknowledge it naturally.
+- For questions about battery, CPU, system info — honestly say you can't access that right now.
+- Always emit valid JSON in a ```json``` block for actions.
 """
-    
-    messages = []
-    # Gemma 3 (and many others) prefer 'model' role over 'assistant'
-    # Also, strictly speaking Gemma doesn't always support 'system' role in the same way, 
-    # so merging system prompt into first user message is safer.
-    
-    first_user_msg_content = system_prompt
-    
-    if history:
-        # If there is history, we construct the list
-        # But we need to ensure the first message is User and contains the system prompt
-        pass
-    
-    # Re-construct messages with role mapping
-    # 1. System Prompt -> First User Message
-    # 2. History -> Map 'assistant' to 'model'
-    # 3. Current Query -> User Message
-    
-    # Let's flatten it carefully
-    
-    # Start with System Prompt text
-    base_content = system_prompt + "\n\n--- Conversation History ---\n"
-    
-    # We will build a new messages list
-    # Actually, let's keep it simple: System role is supported by llama.cpp for most models now,
-    # BUT the role name 'assistant' is definitely wrong for Gemma.
     
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -739,10 +604,9 @@ Current Conversation:
                 # Real streaming mode - get tokens as they're generated
                 streamer = model_manager.llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=2048 if use_thinking else 768,
-                    temperature=0.1,
+                    max_tokens=1536,
+                    temperature=0.6,
                     stream=True,
-                    chat_template_kwargs={"enable_thinking": use_thinking},
                 )
 
                 # Yield tokens as they arrive
@@ -813,9 +677,8 @@ Current Conversation:
                 # Non-streaming mode (original behavior)
                 output = model_manager.llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=2048 if use_thinking else 768,
-                    temperature=0.1,
-                    chat_template_kwargs={"enable_thinking": use_thinking},
+                    max_tokens=1536,
+                    temperature=0.6,
                 )
                 msg = output['choices'][0]['message']
                 full_text = msg['content'].strip()
@@ -911,5 +774,43 @@ Current Conversation:
                      act['type'] = 'status'
                      act['status'] = 'error'
                      act['content'] = msg
+
+        if act.get('type') == 'system_settings':
+             try:
+                 from src.services.system.macos_settings import SETTING_META, execute_setting
+                 setting_name = act.get("setting", "")
+                 meta = SETTING_META.get(setting_name, {})
+                 act.update(meta)
+                 if "label" not in act:
+                     act["label"] = setting_name.replace("_", " ").title()
+                 execute_setting(act)
+             except Exception as e:
+                 logging.error(f"Failed to execute system settings: {e}")
+
+        if act.get('type') == 'terminal_command':
+            cmd = act.get('command', '').strip()
+            if cmd:
+                try:
+                    result = subprocess.run(
+                        cmd, shell=True, capture_output=True, text=True, timeout=15
+                    )
+                    act['stdout'] = result.stdout.strip()
+                    act['stderr'] = result.stderr.strip()
+                    act['returncode'] = result.returncode
+                    act['success'] = result.returncode == 0
+                    logging.info(
+                        f"[terminal] cmd={cmd!r} rc={result.returncode} "
+                        f"out={result.stdout[:120]!r} err={result.stderr[:80]!r}"
+                    )
+                except subprocess.TimeoutExpired:
+                    act['success'] = False
+                    act['stdout'] = ''
+                    act['stderr'] = 'Command timed out (15s)'
+                    logging.warning(f"[terminal] timed out: {cmd!r}")
+                except Exception as e:
+                    act['success'] = False
+                    act['stdout'] = ''
+                    act['stderr'] = str(e)
+                    logging.error(f"[terminal] error: {e}")
 
     return {"answer": answer, "actions": actions, "thinking": thinking_content}

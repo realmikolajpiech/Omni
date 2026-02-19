@@ -9,7 +9,10 @@ from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiAppli
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from src.ui.styles import THEMES
-from src.ui.widgets.math_widget import MathWidget
+try:
+    from src.ui.widgets.math_widget import MathWidget
+except ImportError:
+    MathWidget = QWidget
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
@@ -187,6 +190,253 @@ class LinkActionWidget(QWidget):
             if h > 0: return QSize(w, h + 35)
             return self.layout().sizeHint()
         return super().sizeHint()
+
+class SettingsActionWidget(QWidget):
+    """
+    Inline action widget for system settings changes.
+    Visual style adapts to setting type:
+      - circular  : brightness (arc progress + sun icon)
+      - bar       : volume / mute (fill bar + speaker icon)
+      - toggle    : all boolean settings (animated pill switch)
+    """
+
+    _CIRCULAR_SETTINGS = {"brightness"}
+    _BAR_SETTINGS = {"volume"}
+
+    def __init__(self, setting, value, label, unit, color_hex, icon_name, success, parent=None):
+        super().__init__(parent)
+        self.setting = setting
+        self.value = value
+        self.label_text = label
+        self.unit = unit
+        from PyQt6.QtGui import QColor
+        self.color = QColor(color_hex)
+        self.icon_name = icon_name
+        self.success = success
+
+        self.is_numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        self.bool_on = value if isinstance(value, bool) else True
+
+        self._anim_value = 0.0
+        self.current_theme = "light"
+
+        if setting in self._CIRCULAR_SETTINGS:
+            self.visual_type = "circular"
+        elif setting in self._BAR_SETTINGS:
+            self.visual_type = "bar"
+        else:
+            self.visual_type = "toggle"
+
+        self.setup_ui()
+        self.start_animation()
+
+    def setup_ui(self):
+        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel
+        from PyQt6.QtGui import QFont
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(12, 10, 12, 10)
+        card_layout.setSpacing(16)
+
+        self.anim_widget = QWidget()
+        if self.visual_type == "toggle":
+            self.anim_widget.setFixedSize(58, 32)
+        else:
+            self.anim_widget.setFixedSize(48, 48)
+        self.anim_widget.paintEvent = self.paint_anim_widget
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 2, 0, 2)
+
+        status_text = "OK" if self.success else "Failed"
+        self.top_label = QLabel(f"SETTING • {status_text}")
+        self.top_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.top_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
+
+        if self.is_numeric:
+            label_html = f"<b>{self.label_text}</b>: {self.value}{self.unit}"
+        else:
+            label_html = f"<b>{self.label_text}</b>"
+
+        self.main_label = QLabel(label_html)
+        self.main_label.setWordWrap(True)
+        self.main_label.setFont(QFont("Instrument Serif", 18, QFont.Weight.Normal))
+        self.main_label.setStyleSheet("color: #050505; margin-top: 0px;")
+        self.main_label.setTextFormat(Qt.TextFormat.RichText)
+
+        text_layout.addWidget(self.top_label)
+        text_layout.addWidget(self.main_label)
+        text_layout.addStretch()
+
+        card_layout.addWidget(self.anim_widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        card_layout.addLayout(text_layout)
+        card_layout.addStretch()
+
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        title_color = "#FFFFFF" if is_dark else "#050505"
+        action_color = "#AAAAAA" if is_dark else "#888888"
+
+        self.card.setStyleSheet("QWidget#ActionCard { background-color: transparent; border: none; }")
+        self.main_label.setStyleSheet(f"color: {title_color}; margin-top: 0px;")
+        self.top_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
+        self.anim_widget.update()
+
+    def _get_arc(self): return self._anim_value
+    def _set_arc(self, v):
+        self._anim_value = v
+        self.anim_widget.update()
+
+    from PyQt6.QtCore import pyqtProperty
+    arcValue = pyqtProperty(float, _get_arc, _set_arc)
+
+    def start_animation(self):
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        self.anim = QPropertyAnimation(self, b"arcValue", self)
+        self.anim.setDuration(650)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        if self.is_numeric:
+            self.anim.setStartValue(0.0)
+            self.anim.setEndValue(float(self.value) / 100.0)
+        elif self.bool_on:
+            self.anim.setStartValue(0.0)
+            self.anim.setEndValue(1.0)
+        else:
+            self.anim.setStartValue(1.0)
+            self.anim.setEndValue(0.0)
+
+        self.anim.start()
+
+    def paint_anim_widget(self, event):
+        from PyQt6.QtGui import QPainter
+        w = self.anim_widget
+        p = QPainter(w)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        is_dark = self.current_theme == "dark"
+
+        if self.visual_type == "toggle":
+            self._paint_toggle(p, w, is_dark)
+        elif self.visual_type == "bar":
+            self._paint_bar(p, w, is_dark)
+        else:
+            self._paint_circular(p, w, is_dark)
+
+        p.end()
+
+    def _paint_toggle(self, p, w, is_dark):
+        from PyQt6.QtGui import QBrush, QColor, QPainterPath
+        from PyQt6.QtCore import Qt, QRectF, QPointF
+
+        W, H = float(w.width()), float(w.height())
+        pad = 1.5
+        pill_w = W - pad * 2
+        pill_h = H - pad * 2
+        radius = pill_h / 2
+
+        t = self._anim_value
+        # Interpolate track: gray (off) → setting color (on)
+        gray = (150, 152, 158)
+        cr = int(gray[0] + (self.color.red()   - gray[0]) * t)
+        cg = int(gray[1] + (self.color.green() - gray[1]) * t)
+        cb = int(gray[2] + (self.color.blue()  - gray[2]) * t)
+        track_color = QColor(max(0, min(255, cr)), max(0, min(255, cg)), max(0, min(255, cb)), 210)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(track_color))
+        pill = QPainterPath()
+        pill.addRoundedRect(QRectF(pad, pad, pill_w, pill_h), radius, radius)
+        p.drawPath(pill)
+
+        # Thumb
+        margin = 3.0
+        thumb_r = radius - margin
+        x_off = pad + margin + thumb_r
+        x_on  = pad + pill_w - margin - thumb_r
+        thumb_x = x_off + (x_on - x_off) * t
+        thumb_y = H / 2.0
+
+        # Drop shadow
+        p.setBrush(QBrush(QColor(0, 0, 0, 40)))
+        p.drawEllipse(QPointF(thumb_x, thumb_y + 1.5), thumb_r, thumb_r)
+        # White thumb
+        p.setBrush(QBrush(QColor(255, 255, 255, 245)))
+        p.drawEllipse(QPointF(thumb_x, thumb_y), thumb_r, thumb_r)
+
+    def _paint_bar(self, p, w, is_dark):
+        from PyQt6.QtGui import QBrush, QColor, QPainterPath
+        from PyQt6.QtCore import Qt, QRectF
+
+        W, H = float(w.width()), float(w.height())
+
+        # Speaker icon (upper 40%)
+        try:
+            from src.services.system.macos_settings import draw_volume
+            icon_color = self.color if self.setting != "mute" else QColor("#FF453A")
+            draw_volume(p, W / 2, H * 0.30, 8.5, icon_color)
+        except Exception:
+            pass
+
+        # Fill bar (lower 45%)
+        bar_h = 9.0
+        bar_pad = 5.0
+        bar_y = H * 0.62
+        bar_x = bar_pad
+        bar_w = W - bar_pad * 2
+
+        track_color = QColor(255, 255, 255, 22) if is_dark else QColor(0, 0, 0, 16)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(track_color))
+        track = QPainterPath()
+        track.addRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), bar_h / 2, bar_h / 2)
+        p.drawPath(track)
+
+        fill_w = bar_w * self._anim_value
+        if fill_w >= bar_h:
+            fill_color = self.color
+            p.setBrush(QBrush(fill_color))
+            fill = QPainterPath()
+            fill.addRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), bar_h / 2, bar_h / 2)
+            p.drawPath(fill)
+
+    def _paint_circular(self, p, w, is_dark):
+        from PyQt6.QtGui import QPen, QColor
+        from PyQt6.QtCore import Qt, QRectF
+
+        W, H = w.width(), w.height()
+        rect = QRectF(3, 3, W - 6, H - 6)
+        cx, cy = rect.center().x(), rect.center().y()
+
+        # Track ring
+        track_color = QColor(255, 255, 255, 20) if is_dark else QColor(0, 0, 0, 15)
+        p.setPen(QPen(track_color, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, 225 * 16, -270 * 16)
+
+        # Progress arc
+        if self._anim_value > 0:
+            p.setPen(QPen(self.color, 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(rect, 225 * 16, int(-270 * 16 * self._anim_value))
+
+        # Icon in centre
+        try:
+            from src.services.system.macos_settings import _ICON_DRAW_FNS, draw_brightness
+            draw_fn = _ICON_DRAW_FNS.get(self.icon_name) or draw_brightness
+            draw_fn(p, cx, cy, 10, self.color)
+        except Exception:
+            pass
 
 class AppActionWidget(LinkActionWidget):
     def __init__(self, name, parent=None):
@@ -1081,3 +1331,129 @@ class PlaceActionWidget(PersonActionWidget):
             self.image_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=14&size=220x300&markers={lat},{lon},red-pushpin"
             threading.Thread(target=self._download_image, daemon=True).start()
         self.avatar.setStyleSheet("background-color: #F0F0F0; border-radius: 8px; border: 1px solid #E0E0E0;")
+
+
+class TerminalActionWidget(QWidget):
+    """
+    Displays the result of a terminal command executed by the AI.
+    Shows command (monospace), status indicator, and collapsible output.
+    """
+    def __init__(self, command, description="", output="", error="", success=True, parent=None):
+        super().__init__(parent)
+        self.command = command
+        self.output = output
+        self.error = error
+        self.success = success
+        self._expanded = False
+        self.current_theme = "light"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("TerminalCard")
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(14, 10, 14, 10)
+        card_layout.setSpacing(4)
+
+        # ── Header row ──────────────────────────────────────────────────────
+        header = QWidget()
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(8)
+
+        status_dot = QLabel("●")
+        dot_color = "#30D158" if success else "#FF453A"
+        status_dot.setStyleSheet(f"color: {dot_color}; font-size: 10px; background: transparent;")
+        status_dot.setFixedWidth(14)
+
+        label = QLabel("TERMINAL")
+        label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        label.setStyleSheet("color: #888888; letter-spacing: 0.5px; background: transparent;")
+
+        h_layout.addWidget(status_dot)
+        h_layout.addWidget(label)
+        h_layout.addStretch()
+
+        # ── Command ─────────────────────────────────────────────────────────
+        cmd_text = command if len(command) <= 72 else command[:69] + "…"
+        self.cmd_label = QLabel(f"$ {cmd_text}")
+        self.cmd_label.setFont(QFont("Menlo", 11, QFont.Weight.Normal))
+        self.cmd_label.setWordWrap(True)
+        self.cmd_label.setStyleSheet("color: #DDDDDD; background: transparent;")
+
+        # ── Description (optional human-readable summary) ───────────────────
+        if description:
+            self.desc_label = QLabel(description)
+            self.desc_label.setFont(QFont("Manrope", 11))
+            self.desc_label.setWordWrap(True)
+            self.desc_label.setStyleSheet("color: #AAAAAA; background: transparent;")
+        else:
+            self.desc_label = None
+
+        # ── Collapsible output ───────────────────────────────────────────────
+        combined_out = ""
+        if output:
+            combined_out += output
+        if error:
+            combined_out += ("\n" if combined_out else "") + error
+
+        self.output_label = None
+        if combined_out:
+            self.output_label = QLabel(combined_out[:2000] + ("…" if len(combined_out) > 2000 else ""))
+            self.output_label.setFont(QFont("Menlo", 10))
+            self.output_label.setWordWrap(True)
+            out_color = "#FF6B6B" if (error and not output) else "#AAAAAA"
+            self.output_label.setStyleSheet(
+                f"color: {out_color}; background: rgba(0,0,0,0.15); "
+                f"border-radius: 6px; padding: 6px 8px;"
+            )
+            self.output_label.setVisible(True)
+            self._expanded = True
+
+        card_layout.addWidget(header)
+        card_layout.addWidget(self.cmd_label)
+        if self.desc_label:
+            card_layout.addWidget(self.desc_label)
+        if self.output_label:
+            card_layout.addWidget(self.output_label)
+
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def mousePressEvent(self, event):
+        if self.output_label:
+            self._expanded = not self._expanded
+            self.output_label.setVisible(self._expanded)
+            self.updateGeometry()
+        super().mousePressEvent(event)
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        if is_dark:
+            bg = "rgba(255,255,255,0.05)"
+            border = "rgba(255,255,255,0.10)"
+            cmd_color = "#E0E0E0"
+        else:
+            bg = "rgba(30, 30, 30, 0.88)"
+            border = "rgba(255,255,255,0.08)"
+            cmd_color = "#E8E8E8"
+        self.card.setStyleSheet(
+            f"QWidget#TerminalCard {{ background-color: {bg}; border-radius: 14px; "
+            f"border: 1px solid {border}; }}"
+        )
+        self.cmd_label.setStyleSheet(f"color: {cmd_color}; background: transparent;")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0:
+                return QSize(w, h + 16)
+            return self.layout().sizeHint()
+        return super().sizeHint()

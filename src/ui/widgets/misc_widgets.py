@@ -225,30 +225,78 @@ class SeparatorWidget(QWidget):
         return QSize(660, self._height)
 
 class SmoothEntryWidget(QWidget):
-    def __init__(self, content_widget, parent=None, animate=True):
+    """
+    Wrapper that animates a widget as it enters the list.
+
+    animation values:
+      "fade"    – gentle opacity 0→1 (350 ms, OutQuad)   — AI text / default
+      "pop"     – snappy opacity 0→1 (130 ms, OutExpo)   — cards: links, persons, places, calc
+      "slide"   – height 0→full + opacity 0→1 (220 ms)   — settings, terminal results
+      "instant" – no animation                            — separators / reused items
+    """
+    def __init__(self, content_widget, parent=None, animate=True,
+                 animation="fade", list_item=None, target_height=None):
         super().__init__(parent)
         self.content_widget = content_widget
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(content_widget)
-        
+
         self.opacity_eff = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_eff)
-        
-        if animate:
+
+        if not animate or animation == "instant":
+            self.opacity_eff.setOpacity(1)
+
+        elif animation == "pop":
             self.opacity_eff.setOpacity(0)
-            self.anim_group = QParallelAnimationGroup()
-            
             self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
             self.op_anim.setStartValue(0)
             self.op_anim.setEndValue(1)
-            self.op_anim.setDuration(400)
+            self.op_anim.setDuration(130)
+            self.op_anim.setEasingCurve(QEasingCurve.Type.OutExpo)
+            QTimer.singleShot(10, self.op_anim.start)
+
+        elif animation == "slide":
+            self.opacity_eff.setOpacity(0)
+            final_h = target_height or content_widget.sizeHint().height() or 80
+            self.setMaximumHeight(0)
+
+            self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
+            self.op_anim.setStartValue(0)
+            self.op_anim.setEndValue(1)
+            self.op_anim.setDuration(250)
+            self.op_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+            self.h_anim = QPropertyAnimation(self, b"maximumHeight")
+            self.h_anim.setStartValue(0)
+            self.h_anim.setEndValue(final_h)
+            self.h_anim.setDuration(220)
+            self.h_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+            if list_item is not None:
+                _item = list_item
+                self.h_anim.valueChanged.connect(
+                    lambda v, it=_item: it.setSizeHint(QSize(-1, int(v)))
+                )
+
+            self.anim_group = QParallelAnimationGroup()
+            self.anim_group.addAnimation(self.op_anim)
+            self.anim_group.addAnimation(self.h_anim)
+            QTimer.singleShot(10, self.anim_group.start)
+
+        else:  # "fade" (default)
+            self.opacity_eff.setOpacity(0)
+            self.anim_group = QParallelAnimationGroup()
+
+            self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
+            self.op_anim.setStartValue(0)
+            self.op_anim.setEndValue(1)
+            self.op_anim.setDuration(350)
             self.op_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
-            
+
             self.anim_group.addAnimation(self.op_anim)
             QTimer.singleShot(10, self.anim_group.start)
-        else:
-            self.opacity_eff.setOpacity(1)
             
     def set_theme(self, theme):
         if hasattr(self.content_widget, 'set_theme'):
@@ -566,6 +614,7 @@ class _BubbleInner(QWidget):
         self.is_markdown = is_markdown
         self.current_theme = "light"
         self._bg = QColor("#000000")
+        self._extra_top_widgets = []
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(self.PADDING_H, self.PADDING_V,
@@ -593,6 +642,11 @@ class _BubbleInner(QWidget):
 
         self.set_theme(self.current_theme)
 
+    def insert_thinking_widget(self, widget):
+        """Insert a thinking widget at the top of the bubble content (before answer text)."""
+        self._extra_top_widgets.append(widget)
+        self.layout().insertWidget(0, widget)
+
     def set_text(self, text):
         if self.edit is not None:
             self.edit.setVisible(bool(text and text.strip()))
@@ -612,13 +666,20 @@ class _BubbleInner(QWidget):
                 self._bg = QColor(0, 0, 0, 22)
                 text_color = t["text_primary"]
         else:
-            self._bg = QColor(0, 0, 0, 0)  # transparent — fits glass bg
+            # AI bubble: subtle visible background so it reads as a proper chat bubble
+            if theme == "dark":
+                self._bg = QColor(255, 255, 255, 18)
+            else:
+                self._bg = QColor(0, 0, 0, 13)
             text_color = t["text_primary"]
 
         if self.edit is not None:
             self.edit.setStyleSheet(f"background: transparent; color: {text_color};")
         elif self.label is not None:
             self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        for w in self._extra_top_widgets:
+            if hasattr(w, 'set_theme'):
+                w.set_theme(theme)
         self.update()
 
     def paintEvent(self, event):
@@ -648,10 +709,16 @@ class _BubbleInner(QWidget):
             # AI bubble (markdown): full max width
             self.edit.document().setTextWidth(inner_w)
             has_text = bool(self.edit.toPlainText().strip())
+
+            extra_h = sum(w.sizeHint().height() for w in self._extra_top_widgets if w.isVisible())
+
             if has_text:
                 doc_h = int(self.edit.document().size().height())
                 self.edit.setFixedHeight(doc_h)
-                total_h = doc_h + 2 * self.PADDING_V
+                total_h = doc_h + extra_h + 2 * self.PADDING_V
+                return QSize(max_w, max(total_h, 36))
+            elif extra_h > 0:
+                total_h = extra_h + 2 * self.PADDING_V
                 return QSize(max_w, max(total_h, 36))
             else:
                 return QSize(max_w, 0)
@@ -710,14 +777,7 @@ class AnswerWidget(QWidget):
         else:
             self.user_bubble = None
 
-        # ── THINKING (collapsible, optional) ──────────────────────────
-        self.thinking_widget = None
-        if thinking_text and thinking_text.strip():
-            self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
-            self.thinking_widget.size_changed.connect(self.update_item_size)
-            self.outer_layout.addWidget(self.thinking_widget)
-
-        # ── AI CONTENT ────────────────────────────────────────────────
+        # ── AI CONTENT (created before thinking so thinking can be inserted inside) ──
         if chat_mode:
             self.ai_bubble = _BubbleWidget("", sender="ai", is_markdown=True)
             self.outer_layout.addWidget(self.ai_bubble)
@@ -732,6 +792,18 @@ class AnswerWidget(QWidget):
             self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
             self.text_edit.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
             self.outer_layout.addWidget(self.text_edit)
+
+        # ── THINKING (collapsible, optional) ──────────────────────────
+        self.thinking_widget = None
+        if thinking_text and thinking_text.strip():
+            self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
+            self.thinking_widget.size_changed.connect(self.update_item_size)
+            if chat_mode and self.ai_bubble:
+                # In chat mode: thinking lives inside the AI bubble (above answer text)
+                self.ai_bubble.bubble.insert_thinking_widget(self.thinking_widget)
+            else:
+                # In simple mode: thinking sits above the answer text area
+                self.outer_layout.addWidget(self.thinking_widget)
 
         # Legacy alias
         self.query_label = self.user_bubble.name_label if self.user_bubble else None
@@ -772,9 +844,13 @@ class AnswerWidget(QWidget):
             self.thinking_widget = CollapsibleThinkingWidget("")
             self.thinking_widget.size_changed.connect(self.update_item_size)
             self.thinking_widget.set_theme(self.current_theme)
-            # Insert after user_bubble (if in chat mode), before AI content
-            insert_idx = 1 if (self.chat_mode and self.user_bubble) else 0
-            self.outer_layout.insertWidget(insert_idx, self.thinking_widget)
+            if self.chat_mode and self.ai_bubble:
+                # In chat mode: insert thinking inside AI bubble (before answer text)
+                self.ai_bubble.bubble.insert_thinking_widget(self.thinking_widget)
+            else:
+                # In simple mode: insert before AI content
+                insert_idx = 1 if (self.chat_mode and self.user_bubble) else 0
+                self.outer_layout.insertWidget(insert_idx, self.thinking_widget)
 
     def update_thinking(self, text):
         self.ensure_thinking_widget()
@@ -803,7 +879,8 @@ class AnswerWidget(QWidget):
         if self.user_bubble and self.user_bubble.isVisible():
             h += self.user_bubble.sizeHint().height() + spacing
 
-        if self.thinking_widget and self.thinking_widget.isVisible():
+        # Skip thinking here when in chat mode — it's inside ai_bubble and counted there
+        if self.thinking_widget and self.thinking_widget.isVisible() and not (self.chat_mode and self.ai_bubble):
             h += self.thinking_widget.sizeHint().height() + spacing
 
         if self.ai_bubble:

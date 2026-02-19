@@ -9,6 +9,9 @@ dist/
 *.egg-info/
 *.spec
 
+# Personal data
+personal.mv2
+personal.manifest.wal
 # Environments
 .env
 .env.*

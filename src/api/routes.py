@@ -273,19 +273,16 @@ def action_endpoint():
         logging.info(f"Shortcut match: {url}")
         return jsonify({"action": act, "actions": [act]})
 
-    # 1.5 Brightness Regex
+    # 1.5 System Settings (instant – no LLM needed)
     import re
-    bright_match = re.search(r"(?:set|reduce|increase|max|min|make|screen)?\s*brightness\s*(?:to|of)?\s*(\d+)%?", query.lower())
-    if bright_match:
-        val = int(bright_match.group(1))
-        logging.info(f"Brightness command detected: {val}%")
-        act = {
-            "type": "system_control",
-            "control": "brightness",
-            "value": val,
-            "description": f"Set Brightness to {val}%"
-        }
-        return jsonify({"actions": [act], "action": act})
+    try:
+        from src.services.system.macos_settings import detect_settings_command
+        settings_act = detect_settings_command(query)
+        if settings_act:
+            logging.info(f"[settings] Fast-path action detected: {settings_act['setting']}")
+            return jsonify({"actions": [settings_act], "action": settings_act})
+    except Exception as _e:
+        logging.warning(f"[settings] detect_settings_command failed: {_e}")
 
     # 1.6 Computer Control Hard Override
     cc_keywords = ["click", "type", "scroll", "press", "copy", "paste", "move mouse", "drag", "select"]
@@ -386,19 +383,20 @@ Output ONE command:
 - OPEN:url (if results show a specific official website for the query, e.g. 'safelabs.info')
 - INSTALL:name (if results show it's downloadable software)
 - SEARCH:query (if it's a general topic or unclear)
+- SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode|brightness|volume|mute|night_shift|dnd|wifi|bluetooth","value":true/false or 0-100}
 
 Rules:
 1. If the user asks for a website (e.g. "safelabs"), and Result 1 is the official site, output OPEN:url.
 2. If the user asks "who is...", output PERSON:Name.
 3. If the user asks "where is...", output PLACE:Name.
 4. If the results clearly show software/app, output INSTALL:Name.
-5. Otherwise, default to SEARCH:query.
+5. If the user wants to change a system setting like brightness, volume, dark mode, output SYSTEM_SETTINGS JSON.
+6. Otherwise, default to SEARCH:query.
 
 Examples:
 'safelabs' + [Result 1: Safe Labs Official Site...] -> OPEN:https://safelabs.info
-'elon musk' + [Result 1: Elon Musk - Wikipedia...] -> PERSON:Elon Musk
-'paris' + [Result 1: Paris - Capital of France...] -> PLACE:Paris
-'vscode' + [Result 1: Visual Studio Code - Code Editing...] -> INSTALL:vscode
+'zmień tryb na ciemny' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
+'zwiększ jasność' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"brightness","value":80}
 """
     
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -760,17 +758,24 @@ Output exactly one word."""
                 else:
                     actions.append({"type": "status", "status": "error", "description": f"Could not find app '{app}'"})
 
-            elif "BRIGHTNESS:" in line:
-                val = line.split("BRIGHTNESS:")[1].strip().replace("%", "")
+            elif "SYSTEM_SETTINGS:" in line:
                 try:
-                    level = int(val)
-                    actions.append({
-                        "type": "system_control", 
-                        "control": "brightness", 
-                        "value": level,
-                        "description": f"Set Brightness to {level}%"
-                    })
-                except: pass
+                    import json
+                    from src.services.system.macos_settings import SETTING_META, execute_setting
+                    json_str = line.split("SYSTEM_SETTINGS:")[1].strip()
+                    settings_act = json.loads(json_str)
+                    
+                    # Augment with meta data (icon, color, etc)
+                    setting_name = settings_act.get("setting", "")
+                    meta = SETTING_META.get(setting_name, {})
+                    settings_act.update(meta)
+                    if "label" not in settings_act:
+                        settings_act["label"] = setting_name.replace("_", " ").title()
+                        
+                    execute_setting(settings_act)
+                    actions.append(settings_act)
+                except Exception as e:
+                    logging.error(f"Failed to parse system_settings action: {e}")
 
         return jsonify({"actions": actions, "action": actions[0] if actions else None})
 

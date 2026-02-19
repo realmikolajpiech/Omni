@@ -17,7 +17,7 @@ from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
 from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, FileActionWidget, 
-                                         PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget)
+                                         PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -1044,11 +1044,11 @@ class OmniWindow(QWidget):
                 # This matches "Separator between followup answer and old answer"
                 
                 if not first:
-                     self.add_list_item(SeparatorWidget(), "separator")
+                     self.add_list_item(SeparatorWidget(), "separator", animation="instant")
 
                 w = AnswerWidget(content, query_text=user_query)
                 w.set_query_visible(True)
-                self.add_list_item(w, "history_ai")
+                self.add_list_item(w, "history_ai", animation="instant")
                 
                 first = False
         
@@ -1068,11 +1068,11 @@ class OmniWindow(QWidget):
                     user_query = self.chat_history[i-1].get('content', '')
                 
                 if not first:
-                    self.add_list_item(SeparatorWidget(), "separator")
+                    self.add_list_item(SeparatorWidget(), "separator", animation="instant")
                 
                 w = AnswerWidget(content, query_text=user_query)
                 w.set_query_visible(True)
-                self.add_list_item(w, "history_ai")
+                self.add_list_item(w, "history_ai", animation="instant")
                 first = False
         
         self.adjust_window_height()
@@ -1597,42 +1597,48 @@ class OmniWindow(QWidget):
                     anim_w = SmoothEntryWidget(widget, animate=True)
                     self.list_widget.setItemWidget(new_item, anim_w)
 
-    def add_list_item(self, widget, data):
+    def add_list_item(self, widget, data, animation="fade"):
         if hasattr(widget, 'set_theme'):
             widget.set_theme(self.current_theme)
         item = QListWidgetItem()
-        item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)
-        
-        # Disable selection for thinking, answer, separator items
-        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
-             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-             
 
-             
-        self.list_widget.addItem(item)
-        
-        # Wrap in SmoothEntryWidget for fade-in
-        anim_w = SmoothEntryWidget(widget)
+        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+        if animation == "slide":
+            target_h = widget.sizeHint().height()
+            item.setSizeHint(QSize(-1, 0))
+            self.list_widget.addItem(item)
+            anim_w = SmoothEntryWidget(widget, animation="slide",
+                                       list_item=item, target_height=target_h)
+        else:
+            item.setSizeHint(widget.sizeHint())
+            self.list_widget.addItem(item)
+            anim_w = SmoothEntryWidget(widget, animation=animation)
+
         self.list_widget.setItemWidget(item, anim_w)
 
-    def insert_list_item(self, index, widget, data):
+    def insert_list_item(self, index, widget, data, animation="fade"):
         if hasattr(widget, 'set_theme'):
             widget.set_theme(self.current_theme)
         item = QListWidgetItem()
-        item.setSizeHint(widget.sizeHint())
         item.setData(Qt.ItemDataRole.UserRole, data)
-        
-        # Disable selection for thinking, answer, separator items
-        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
-             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-             
 
-             
-        self.list_widget.insertItem(index, item)
-        
-        # Wrap in SmoothEntryWidget for fade-in
-        anim_w = SmoothEntryWidget(widget)
+        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+        if animation == "slide":
+            target_h = widget.sizeHint().height()
+            item.setSizeHint(QSize(-1, 0))
+            self.list_widget.insertItem(index, item)
+            anim_w = SmoothEntryWidget(widget, animation="slide",
+                                       list_item=item, target_height=target_h)
+        else:
+            item.setSizeHint(widget.sizeHint())
+            self.list_widget.insertItem(index, item)
+            anim_w = SmoothEntryWidget(widget, animation=animation)
+
         self.list_widget.setItemWidget(item, anim_w)
 
     def cleanup_worker(self, attr_name):
@@ -1917,7 +1923,7 @@ class OmniWindow(QWidget):
 
             # Chat mode: immediately show user bubble + AI area; no spinner widget
             if self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator")
+                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
 
             answer_widget = AnswerWidget("", query_text=query, chat_mode=True)
             answer_widget.set_query_visible(True)
@@ -2070,7 +2076,7 @@ class OmniWindow(QWidget):
             # Create widget WITHOUT thinking in constructor, add it dynamically
             prepend = self.is_history_mode
             if prepend and self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator")
+                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
 
             # Normal (first) query streaming: simple answer view, no bubbles
             current_query = getattr(self, '_current_query', self.input_field.text())
@@ -2175,11 +2181,11 @@ class OmniWindow(QWidget):
                     if isinstance(act, dict):
                         if act.get('type') == 'link':
                             w = LinkActionWidget(act['title'], act['url'], act['description'])
-                            self.insert_list_item(insert_pos, w, act)
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'person':
                             w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
-                            self.insert_list_item(insert_pos, w, act)
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'place':
                             w = PlaceActionWidget(
@@ -2190,15 +2196,40 @@ class OmniWindow(QWidget):
                                 act.get('latitude'),
                                 act.get('longitude')
                             )
-                            self.insert_list_item(insert_pos, w, act)
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'install':
                             w = InstallActionWidget(act['name'], act.get('website'))
-                            self.insert_list_item(insert_pos, w, act)
+                            self.insert_list_item(insert_pos, w, act, animation="fade")
                             insert_pos += 1
                         elif act.get('type') == 'status':
                             w = StandardItemWidget(act['description'], icon_name="dialog-information")
-                            self.insert_list_item(insert_pos, w, act)
+                            self.insert_list_item(insert_pos, w, act, animation="fade")
+                            insert_pos += 1
+                        elif act.get('type') == 'system_settings':
+                            try:
+                                w = SettingsActionWidget(
+                                    setting=act.get("setting", ""),
+                                    value=act.get("value", 0),
+                                    label=act.get("label", ""),
+                                    unit=act.get("unit", ""),
+                                    color_hex=act.get("color", "#FFFFFF"),
+                                    icon_name=act.get("icon", ""),
+                                    success=True
+                                )
+                                self.insert_list_item(insert_pos, w, act, animation="slide")
+                                insert_pos += 1
+                            except Exception as _te:
+                                logging.warning(f"[settings] Failed to add settings widget: {_te}")
+                        elif act.get('type') == 'terminal_command':
+                            w = TerminalActionWidget(
+                                command=act.get('command', ''),
+                                description=act.get('description', ''),
+                                output=act.get('stdout', ''),
+                                error=act.get('stderr', ''),
+                                success=act.get('success', True)
+                            )
+                            self.insert_list_item(insert_pos, w, act, animation="slide")
                             insert_pos += 1
 
             answer_text = data.get("answer", "")
@@ -2359,13 +2390,13 @@ class OmniWindow(QWidget):
         insert_idx = 0
 
         # Helper to add item based on mode
-        def add_item(w, d):
+        def add_item(w, d, anim="fade"):
             nonlocal insert_idx
             if prepend:
-                self.insert_list_item(insert_idx, w, d)
+                self.insert_list_item(insert_idx, w, d, animation=anim)
                 insert_idx += 1
             else:
-                self.add_list_item(w, d)
+                self.add_list_item(w, d, animation=anim)
 
         # Update visibility of existing items if we are prepending (entering history)
         if prepend:
@@ -2382,7 +2413,7 @@ class OmniWindow(QWidget):
             # Then we insert new item at 0, pushing separator to 1, old items to 2.
             
             if self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator")
+                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
                 # Do NOT increment insert_idx.
                 # We want the NEW answer (and subsequent actions) to be inserted AT 0,
                 # pushing the separator down to 1 (and old items to 2+).
@@ -2414,10 +2445,10 @@ class OmniWindow(QWidget):
             if isinstance(act, dict):
                 if act.get('type') == 'link':
                     w = LinkActionWidget(act['title'], act['url'], act['description'])
-                    add_item(w, act)
+                    add_item(w, act, anim="pop")
                 elif act.get('type') == 'person':
                     w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
-                    add_item(w, act)
+                    add_item(w, act, anim="pop")
                 elif act.get('type') == 'place':
                     w = PlaceActionWidget(
                         act['name'],
@@ -2427,13 +2458,36 @@ class OmniWindow(QWidget):
                         act.get('latitude'),
                         act.get('longitude')
                     )
-                    add_item(w, act)
+                    add_item(w, act, anim="pop")
                 elif act.get('type') == 'install':
                     w = InstallActionWidget(act['name'], act.get('website'))
-                    add_item(w, act)
+                    add_item(w, act, anim="fade")
                 elif act.get('type') == 'status':
                     w = StandardItemWidget(act['description'], icon_name="dialog-information")
-                    add_item(w, act)
+                    add_item(w, act, anim="fade")
+                elif act.get('type') == 'system_settings':
+                    try:
+                        w = SettingsActionWidget(
+                            setting=act.get("setting", ""),
+                            value=act.get("value", 0),
+                            label=act.get("label", ""),
+                            unit=act.get("unit", ""),
+                            color_hex=act.get("color", "#FFFFFF"),
+                            icon_name=act.get("icon", ""),
+                            success=True
+                        )
+                        add_item(w, act, anim="slide")
+                    except Exception as _te:
+                        logging.warning(f"[settings] Failed to show settings widget: {_te}")
+                elif act.get('type') == 'terminal_command':
+                    w = TerminalActionWidget(
+                        command=act.get('command', ''),
+                        description=act.get('description', ''),
+                        output=act.get('stdout', ''),
+                        error=act.get('stderr', ''),
+                        success=act.get('success', True)
+                    )
+                    add_item(w, act, anim="slide")
 
         # Scroll to top if we prepended
         if prepend and self.list_widget.count() > 0:
