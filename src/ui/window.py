@@ -674,19 +674,17 @@ class OmniWindow(QWidget):
             self.input_field.clear()
         self.input_field.blockSignals(False)
         
-        # Force resize to minimal
+        # Force resize limits
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
         
         text = self.input_field.text() if not clear else ""
-        if clear or not text:
-            # Starting fresh: reset to DEFAULT_WIDTH and minimal height
-            self.resize(DEFAULT_WIDTH, 84)
-        else:
-            # Preserving query: keep current height so animate_entry captures it correctly.
-            # adjust_window_height (via refresh_list) will reconcile if item count changed.
-            self.resize(DEFAULT_WIDTH, self.height())
         
+        # Ensure width is standard, but don't hard-reset the height! 
+        # Keeping current height allows refresh_list to animate the shrink.
+        if self.width() != DEFAULT_WIDTH:
+            self.resize(DEFAULT_WIDTH, self.height())
+            
         self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self, source="manual"):
@@ -1001,9 +999,11 @@ class OmniWindow(QWidget):
                     self.abort_ai_generation()
                     return True
 
-                if self.is_history_mode:
+                if self.is_history_mode or self.input_field.text():
                     self.reset_to_search_mode()
+                    self.chat_history = []
                 else:
+                    self.input_field.clear()
                     self.animate_close()
                 return True
             elif event.key() == Qt.Key.Key_Tab:
@@ -1099,29 +1099,30 @@ class OmniWindow(QWidget):
         
         self.anim_close_group = QParallelAnimationGroup()
         
-        # Zoom Out
+        # Smooth Zoom and Slide Down
         current_geo = self.geometry()
         center = current_geo.center()
         
-        target_w = int(current_geo.width() * 0.95)
-        target_h = int(current_geo.height() * 0.95)
+        target_w = int(current_geo.width() * 0.98)
+        target_h = int(current_geo.height() * 0.98)
         target_x = center.x() - target_w // 2
-        target_y = center.y() - target_h // 2
+        # Slide down slightly
+        target_y = current_geo.y() + 15
         
         target_geo = QRect(target_x, target_y, target_w, target_h)
         
         anim_geo = QPropertyAnimation(self, b"geometry")
-        anim_geo.setDuration(200) # Fast exit
+        anim_geo.setDuration(220) # Slightly slower for smoother look
         anim_geo.setStartValue(current_geo)
         anim_geo.setEndValue(target_geo)
-        anim_geo.setEasingCurve(QEasingCurve.Type.InCubic)
+        anim_geo.setEasingCurve(QEasingCurve.Type.InOutQuad)
         
         # Opacity
         anim_opa = QPropertyAnimation(self, b"windowOpacity")
-        anim_opa.setDuration(150) # Fade out very fast
+        anim_opa.setDuration(200) # Match geo closely
         anim_opa.setStartValue(1.0)
         anim_opa.setEndValue(0.0)
-        anim_opa.setEasingCurve(QEasingCurve.Type.OutQuad)
+        anim_opa.setEasingCurve(QEasingCurve.Type.InOutQuad)
         
         def on_close_finished():
              self.hide()
