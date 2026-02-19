@@ -14,8 +14,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(o
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from src.core.config import DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT
-from src.services.search.utils import process_file_content, is_text_file
+from src.core.config import DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS
+from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
 # Setup logging - Silent for production unless error
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,21 +25,6 @@ logger.setLevel(logging.INFO)
 TABLE_NAME = "files"
 CHUNKS_TABLE_NAME = "file_chunks"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
-
-# Directories to strictly ignore to avoid feedback loops and noise
-IGNORE_DIRS = {
-    ".cache", ".git", ".npm", "node_modules", ".node_modules", "venv", ".venv", "__pycache__",
-    ".local", ".config", ".mozilla", ".thunderbird", "anaconda3", ".anaconda3",
-    "Downloads", "Music", "Videos", "go", ".cargo", ".rustup", "Library",
-    ".gemini", ".antigravity", ".vscode", ".idea", "target", "build", "dist"
-}
-
-# Block specific extensions that are purely internal/developer noise
-BLOCKED_EXTENSIONS = {
-    ".pyi", ".pyc", ".pyo", ".pyd", ".o", ".so", ".dll", ".dylib", ".a", ".lib",
-    ".class", ".jar", ".war", ".ear", ".min.js", ".min.css", ".map", ".log",
-    ".tmp", ".temp", ".bak", ".swp", ".swo", ".ds_store", ".thumbs", ".db"
-}
 
 # Lazy-loaded CLIP vision model (only instantiated on first image event)
 _vision_model = None
@@ -114,8 +99,7 @@ class IndexHandler(FileSystemEventHandler):
         if ext.lower() in BLOCKED_EXTENSIONS: return
         if not ext: return
 
-        IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
-        if ext.lower() in IMAGE_EXTS:
+        if is_image_file(path):
             try:
                 logging.info(f"Indexing IMAGE: {path}")
                 vision_model = _get_vision_model()

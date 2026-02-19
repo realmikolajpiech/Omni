@@ -80,13 +80,18 @@ export TRANSFORMERS_VERBOSITY=error
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export PYTHONUTF8=1
 
-# Start Indexer in background
-echo "Starting File Indexer in background..."
-mkdir -p logs
-nohup $PYTHON_CMD src/services/search/indexer.py > logs/indexer.log 2>&1 &
+# Check if initial indexing has been done
+MARKER="$HOME/.local/share/ai-memory-db/.indexed"
+if [ ! -f "$MARKER" ]; then
+    echo "WARNING: Initial file index not found."
+    echo "Run ./setup_index.sh once to build the search database."
+    echo "File search will not work until indexing is complete."
+    echo ""
+fi
 
 # Start File Watcher in background
 echo "Starting File Watcher in background..."
+mkdir -p logs
 nohup $PYTHON_CMD src/services/search/watcher.py > logs/watcher.log 2>&1 &
 
 # Run

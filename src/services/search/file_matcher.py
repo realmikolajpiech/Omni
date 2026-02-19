@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 import string
 
+from src.core.config import IGNORE_DIRS
+
 class FileMatch:
     """Represents a file/folder match with ranking score."""
     def __init__(self, path: str, name: str, is_dir: bool, score: float = 0.0):
@@ -37,18 +39,15 @@ class FileMatcher:
         """
         self.max_results = max_results
         self.search_depth = search_depth
-        self.excluded_dirs = {
-            '.git', '__pycache__', '.venv', 'venv', 'node_modules', 
-            '.idea', '.vscode', '.pytest_cache', 'dist', 'build',
+        self.excluded_dirs = IGNORE_DIRS | {
             '.egg-info', '*.egg-info', '.tox', '.mypy_cache',
-            'env', '.env', 'site-packages', '$RECYCLE.BIN', 'System Volume Information',
-            # Windows specific
+            'env', '.env', 'site-packages',
+            # Windows
             'AppData', 'Program Files', 'ProgramData', 'Windows', 'System32',
             'Users', 'Temp', 'tmp', 'cache', '$Recycle', 'hiberfil.sys',
-            # macOS
-            'Library', 'Applications', '.cache', '.config',
-            # Linux
-            'usr', 'var', 'etc', 'sys', 'proc', 'dev', 'boot', 'root'
+            '$RECYCLE.BIN', 'System Volume Information',
+            # Linux system
+            'usr', 'var', 'etc', 'sys', 'proc', 'dev', 'boot', 'root',
         }
         self.result_cache = {}  # Cache recent searches
     

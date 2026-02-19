@@ -11,6 +11,8 @@ Pillow
 packaging
 pypdf
 python-docx
+openpyxl
+python-pptx
 
 # Keyboard handling
 keyboard

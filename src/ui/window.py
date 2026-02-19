@@ -650,10 +650,16 @@ class OmniWindow(QWidget):
         # Force resize to minimal
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
-        # Always reset to DEFAULT_WIDTH to prevent shrinking over time
-        self.resize(DEFAULT_WIDTH, 84)
         
         text = self.input_field.text() if not clear else ""
+        if clear or not text:
+            # Starting fresh: reset to DEFAULT_WIDTH and minimal height
+            self.resize(DEFAULT_WIDTH, 84)
+        else:
+            # Preserving query: keep current height so animate_entry captures it correctly.
+            # adjust_window_height (via refresh_list) will reconcile if item count changed.
+            self.resize(DEFAULT_WIDTH, self.height())
+        
         self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self, source="manual"):
@@ -1047,7 +1053,7 @@ class OmniWindow(QWidget):
 
     def animate_close(self):
         if self._is_closing: return
-        
+
         # Always switch back to IDLE (Wake Word) mode when closing
         self.send_udp_command("SET_MODE:IDLE")
         
@@ -1152,6 +1158,7 @@ class OmniWindow(QWidget):
             if self.is_history_mode:
                 self.reset_to_search_mode()
             else:
+                self.input_field.clear()
                 self.animate_close()
         super().keyPressEvent(event)
 

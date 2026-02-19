@@ -49,8 +49,90 @@ os.environ["HF_HOME"] = os.path.join(PROJECT_ROOT, "data", "hf_cache")
 HOME = os.path.expanduser("~")
 MODEL_DIR = os.path.join(HOME, ".local/share/ai-models")
 DB_PATH = os.path.join(HOME, ".local/share/ai-memory-db")
+INDEX_DONE_MARKER = os.path.join(DB_PATH, ".indexed")
 PERSONAL_MEM_PATH = os.path.join(PROJECT_ROOT, "data", "personal.mv2")
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "omni.log")
+
+# Directories to skip during indexing / watching
+IGNORE_DIRS = {
+    ".cache", ".git", ".npm", "node_modules", ".node_modules",
+    "venv", ".venv", "__pycache__",
+    ".local", ".config", ".mozilla", ".thunderbird",
+    "anaconda3", ".anaconda3",
+    "go", ".cargo", ".rustup",
+    "Library", "Applications", ".Trash",
+    ".gemini", ".antigravity", ".vscode", ".idea",
+    "target", "build", "dist",
+    # macOS user dirs unlikely to contain useful documents
+    "Movies", "Music", "Pictures", "Public",
+    # Dev tools / package caches
+    ".docker", ".gradle", ".m2", ".ivy2", ".sbt",
+    ".conda", "miniconda3", "miniforge3",
+    ".gem", ".rbenv", ".pyenv", ".nvm",
+    ".cocoapods", "Pods",
+    # Other
+    "Parallels", ".Spotlight-V100", ".fseventsd",
+    # CMake build output (auto-generated, zero user value)
+    "cmake-build-debug", "cmake-build-release", "CMakeFiles", ".cmake",
+}
+
+# File extensions that are purely internal / developer noise
+BLOCKED_EXTENSIONS = {
+    ".pyi", ".pyc", ".pyo", ".pyd", ".o", ".so", ".dll", ".dylib", ".a", ".lib",
+    ".class", ".jar", ".war", ".ear", ".min.js", ".min.css", ".map", ".log",
+    ".tmp", ".temp", ".bak", ".swp", ".swo", ".ds_store", ".thumbs", ".db",
+    # Archives & disk images
+    ".whl", ".egg", ".iso", ".dmg", ".pkg", ".deb", ".rpm",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    # Media (indexed separately via image/CLIP phase if applicable)
+    ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flac", ".wav",
+    # Databases
+    ".sqlite3",
+}
+
+# Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).
+# Lock files are enormous and contain only dependency hashes / version noise.
+# Config boilerplate adds little semantic value for file-finding.
+CONTENT_SKIP_FILENAMES = {
+    # Lock files (huge, pure noise)
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Podfile.lock", "Gemfile.lock", "composer.lock",
+    "poetry.lock", "Cargo.lock", "flake.lock",
+    # Config boilerplate
+    "tsconfig.json", "tsconfig.node.json",
+    "eslint.config.js", ".eslintrc.js", ".eslintrc.json",
+    "postcss.config.js", "postcss.config.cjs",
+    "babel.config.js", "babel.config.json", ".babelrc",
+    "metro.config.js", "jest.config.js", "jest.config.ts",
+    "webpack.config.js", "vite.config.js", "vite.config.ts",
+    "tailwind.config.js", "tailwind.config.ts",
+    ".prettierrc", ".prettierrc.json", ".prettierrc.js",
+    ".editorconfig",
+    # Build / iOS / Android boilerplate
+    "gradlew", "gradlew.bat",
+    "Podfile", "Podfile.properties.json",
+    "Contents.json",  # Xcode asset catalog metadata (repeated in every .xcassets dir)
+}
+
+# Directory names that trigger content-skip for any file found inside them.
+# Files in these dirs are still indexed by name (Phase 1) but not content-embedded (Phase 2).
+# Translation files produce dozens of large chunks per app with no semantic value for file-finding.
+# Xcode xcassets trees contain only generated JSON boilerplate.
+CONTENT_SKIP_DIRS = {
+    # i18n / locale directories
+    "i18n", "locales", "locale", "translations", "l10n",
+    # Xcode asset catalogs (only Contents.json boilerplate inside)
+    "xcassets",
+    # Android build directory (gradlew, generated xml, R files, etc.)
+    "android",
+    # Lottie animations, SVGs, and other large binary-like asset blobs
+    "assets",
+}
+
+# Filename suffix patterns for content-skip (for variable-name files that can't be matched exactly).
+CONTENT_SKIP_SUFFIXES = {
+    "-Bridging-Header.h",  # Xcode Swift/ObjC bridge stubs (AppName-Bridging-Header.h)
+}
 
 # Ensure directories exist
 os.makedirs(MODEL_DIR, exist_ok=True)

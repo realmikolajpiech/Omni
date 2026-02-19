@@ -8,35 +8,21 @@ import json
 import time
 import urllib.request
 import urllib.error
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure project root is in path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from src.core.config import DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT
-from src.services.search.utils import process_file_content, is_text_file
+from src.core.config import DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS, INDEX_DONE_MARKER, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS, CONTENT_SKIP_SUFFIXES
+from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TABLE_NAME = "files"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
-
-# Directories to ignore
-IGNORE_DIRS = {
-    ".cache", ".git", ".npm", "node_modules", ".node_modules", "venv", ".venv", "__pycache__",
-    ".local", ".config", ".mozilla", ".thunderbird", "anaconda3", ".anaconda3",
-    "Downloads", "Music", "Videos", "go", ".cargo", ".rustup", "Library",
-    ".gemini", ".antigravity", ".vscode", ".idea", "target", "build", "dist"
-}
-
-# Block specific extensions that are purely internal/developer noise
-BLOCKED_EXTENSIONS = {
-    ".pyi", ".pyc", ".pyo", ".pyd", ".o", ".so", ".dll", ".dylib", ".a", ".lib",
-    ".class", ".jar", ".war", ".ear", ".min.js", ".min.css", ".map", ".log",
-    ".tmp", ".temp", ".bak", ".swp", ".swo", ".ds_store", ".thumbs", ".db"
-}
 
 
 def _wait_for_brain(timeout: int = 60) -> bool:
@@ -68,117 +54,263 @@ def _remote_encode(texts: list) -> list:
     return result["vectors"]
 
 
+def _elapsed(start: float) -> str:
+    s = int(time.time() - start)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60}s"
+
+
+def _eta(start: float, done: int, total: int) -> str:
+    if done == 0 or total == 0:
+        return "?"
+    elapsed = time.time() - start
+    remaining = elapsed * (total - done) / done
+    s = int(remaining)
+    if s < 60:
+        return f"~{s}s"
+    return f"~{s // 60}m {s % 60}s"
+
+
+def _collect_files(base_dir):
+    """Single walk of the directory tree. Returns (all_files, text_files, image_files).
+
+    Each entry is (full_path, filename). text_files and image_files are subsets
+    of all_files, classified by extension.
+    """
+    all_files = []
+    text_files = []
+    image_files = []
+
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+        for file in files:
+            if file.startswith("."):
+                continue
+            _, ext = os.path.splitext(file)
+            if ext.lower() in BLOCKED_EXTENSIONS:
+                continue
+            full_path = os.path.join(root, file)
+            entry = (full_path, file)
+            all_files.append(entry)
+            if is_text_file(full_path):
+                text_files.append(entry)
+            if is_image_file(full_path):
+                image_files.append(entry)
+
+    return all_files, text_files, image_files
+
+
+def _top_level_breakdown(file_list, base_dir):
+    """Return a dict mapping the first directory component under base_dir to file count."""
+    counts = defaultdict(int)
+    base_len = len(base_dir.rstrip(os.sep)) + 1
+    for full_path, _ in file_list:
+        relative = full_path[base_len:]
+        top_dir = relative.split(os.sep, 1)[0] if os.sep in relative else "(root files)"
+        counts[top_dir] += 1
+    return dict(sorted(counts.items(), key=lambda x: -x[1]))
+
+
+def dry_run():
+    """Preview what would be indexed without actually indexing."""
+    logging.info(f"Scanning {HOME} (dry run)...")
+    scan_start = time.time()
+    all_files, text_files, image_files = _collect_files(HOME)
+    logging.info(f"Scan complete in {_elapsed(scan_start)}")
+
+    print(f"\n{'='*60}")
+    print(f"  DRY RUN — File Indexing Preview")
+    print(f"{'='*60}")
+    print(f"\n  Base directory: {HOME}")
+    print(f"  Total files:    {len(all_files):,}")
+    print(f"  Text files:     {len(text_files):,}")
+    print(f"  Image files:    {len(image_files):,}")
+
+    # Directory breakdown
+    print(f"\n{'─'*60}")
+    print(f"  Top-level directory breakdown (all files):")
+    print(f"{'─'*60}")
+    breakdown = _top_level_breakdown(all_files, HOME)
+    for dirname, count in breakdown.items():
+        pct = 100.0 * count / len(all_files) if all_files else 0
+        print(f"    {dirname:<40s} {count:>8,} ({pct:5.1f}%)")
+
+    # Sample files from each category
+    for label, flist in [("ALL FILES", all_files), ("TEXT FILES", text_files), ("IMAGE FILES", image_files)]:
+        print(f"\n{'─'*60}")
+        print(f"  Sample {label} (first 20):")
+        print(f"{'─'*60}")
+        for path, name in flist[:20]:
+            print(f"    {path}")
+        if len(flist) > 20:
+            print(f"    ... and {len(flist) - 20:,} more")
+
+    print(f"\n{'='*60}\n")
+
+
 def main():
+    # ── Handle --dry-run ──────────────────────────────────────────
+    if "--dry-run" in sys.argv:
+        dry_run()
+        return
+
+    skip_filenames = "--skip-filenames" in sys.argv
+
     logging.info(f"Waiting for brain service at {EMBED_URL}...")
     if not _wait_for_brain(timeout=60):
         logging.error("Brain service did not become available in time. Exiting.")
         sys.exit(1)
     logging.info("Brain service is up. Starting indexing.")
 
-    logging.info("Connecting to LanceDB at {DB_PATH}...")
+    # ── Single-pass file collection ───────────────────────────────
+    logging.info(f"Scanning {HOME} for files...")
+    scan_start = time.time()
+    all_files, text_files, image_files = _collect_files(HOME)
+    logging.info(
+        f"Scan complete in {_elapsed(scan_start)}: "
+        f"{len(all_files):,} files, {len(text_files):,} text, {len(image_files):,} images"
+    )
+
+    logging.info(f"Connecting to LanceDB at {DB_PATH}...")
     db = lancedb.connect(DB_PATH)
 
-    # --- FILENAME INDEXING (Batched) ---
-    logging.info("Indexing filenames (batched)...")
+    EMBED_WORKERS = 3
 
-    BATCH_SIZE = 128
-    current_batch = []
+    # ── Phase 1: Filename indexing ────────────────────────────────
+    total_files_indexed = 0
+    total_files_count = len(all_files)
 
-    try:
-        db.drop_table(TABLE_NAME)
-    except Exception as e:
-        logging.warning(f"Could not drop table {TABLE_NAME}: {e}")
-    table = None
+    if skip_filenames:
+        logging.info("Phase 1/3 — Skipping filename indexing (--skip-filenames).")
+    else:
+        logging.info("Phase 1/3 — Indexing filenames...")
+        phase_start = time.time()
 
-    total_files = 0
-
-    def file_generator(base_dir):
-        for root, dirs, files in os.walk(base_dir):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
-            for file in files:
-                if file.startswith("."): continue
-                _, ext = os.path.splitext(file)
-                if ext.lower() in BLOCKED_EXTENSIONS: continue
-                yield os.path.join(root, file), file
-
-    for full_path, filename in file_generator(HOME):
-        current_batch.append({"filename": filename, "path": full_path})
-
-        if len(current_batch) >= BATCH_SIZE:
-            names = [x['filename'] for x in current_batch]
-            try:
-                vectors = _remote_encode(names)
-            except Exception as e:
-                logging.error(f"Remote encode failed: {e}")
-                current_batch = []
-                continue
-
-            data = [
-                {"vector": vectors[i], "filename": item['filename'], "path": item['path']}
-                for i, item in enumerate(current_batch)
-            ]
-
-            if table is None:
-                table = db.create_table(TABLE_NAME, data=data)
-            else:
-                table.add(data)
-
-            total_files += len(data)
-            current_batch = []
-            del vectors, data
-            gc.collect()
-
-    # Final filename batch
-    if current_batch:
-        names = [x['filename'] for x in current_batch]
+        BATCH_SIZE = 512
         try:
+            db.drop_table(TABLE_NAME)
+        except Exception:
+            pass
+        table = None
+        next_sample_at = 5000
+
+        def _encode_filename_batch(batch):
+            """Encode a batch of filenames. Returns list of dicts ready for LanceDB."""
+            names = [x["filename"] for x in batch]
             vectors = _remote_encode(names)
-            data = [
-                {"vector": vectors[i], "filename": item['filename'], "path": item['path']}
-                for i, item in enumerate(current_batch)
+            return [
+                {"vector": vectors[i], "filename": item["filename"], "path": item["path"]}
+                for i, item in enumerate(batch)
             ]
-            if table is None:
-                table = db.create_table(TABLE_NAME, data=data)
-            else:
-                table.add(data)
-            total_files += len(data)
-            del vectors, data
-            gc.collect()
-        except Exception as e:
-            logging.error(f"Remote encode failed for final batch: {e}")
 
-    logging.info(f"Filename indexing complete. Total files: {total_files}")
+        pending_futures = []
+        current_batch = []
 
-    # --- CONTENT INDEXING ---
-    logging.info("Scanning for text files to index content...")
+        with ThreadPoolExecutor(max_workers=EMBED_WORKERS) as pool:
+            for full_path, filename in all_files:
+                current_batch.append({"filename": filename, "path": full_path})
+
+                if len(current_batch) >= BATCH_SIZE:
+                    pending_futures.append(pool.submit(_encode_filename_batch, current_batch))
+                    current_batch = []
+
+                    while len(pending_futures) >= EMBED_WORKERS:
+                        fut = pending_futures.pop(0)
+                        try:
+                            data = fut.result()
+                        except Exception as e:
+                            logging.error(f"Remote encode failed: {e}")
+                            continue
+
+                        if table is None:
+                            table = db.create_table(TABLE_NAME, data=data)
+                        else:
+                            table.add(data)
+
+                        total_files_indexed += len(data)
+                        pct = 100.0 * total_files_indexed / total_files_count
+                        eta = _eta(phase_start, total_files_indexed, total_files_count)
+                        logging.info(
+                            f"  [filenames] {total_files_indexed:,} / {total_files_count:,} "
+                            f"({pct:.1f}%)  ({_elapsed(phase_start)})  ETA {eta}"
+                        )
+
+                        if total_files_indexed >= next_sample_at:
+                            samples = [d["path"] for d in data[:3]]
+                            logging.info(f"    sample: {samples}")
+                            next_sample_at += 5000
+
+                        del data
+                        gc.collect()
+
+            if current_batch:
+                pending_futures.append(pool.submit(_encode_filename_batch, current_batch))
+
+            for fut in pending_futures:
+                try:
+                    data = fut.result()
+                except Exception as e:
+                    logging.error(f"Remote encode failed: {e}")
+                    continue
+
+                if table is None:
+                    table = db.create_table(TABLE_NAME, data=data)
+                else:
+                    table.add(data)
+
+                total_files_indexed += len(data)
+                del data
+                gc.collect()
+
+        logging.info(f"Phase 1/3 complete — {total_files_indexed:,} filenames indexed in {_elapsed(phase_start)}")
+
+    # ── Phase 2: Content indexing ─────────────────────────────────
+    logging.info("Phase 2/3 — Indexing file content (text/PDF/DOCX/XLSX/PPTX/CSV)...")
+    phase_start = time.time()
 
     CHUNKS_TABLE = "file_chunks"
     try:
         db.drop_table(CHUNKS_TABLE)
-    except: pass
+    except Exception:
+        pass
     chunk_table = None
 
     CHUNK_BATCH_SIZE = 16
     current_batch_chunks = []
     current_batch_metadata = []
     total_chunks_indexed = 0
+    content_files = 0
+    total_text_count = len(text_files)
+    next_sample_at = 50
 
-    for full_path, filename in file_generator(HOME):
-        if not is_text_file(full_path): continue
+    skipped_content = 0
+    for full_path, filename in text_files:
+        path_parts = set(full_path.split(os.sep))
+        if (filename in CONTENT_SKIP_FILENAMES
+                or path_parts & CONTENT_SKIP_DIRS
+                or any(filename.endswith(s) for s in CONTENT_SKIP_SUFFIXES)):
+            skipped_content += 1
+            continue
 
         try:
             chunks = process_file_content(full_path, chunk_size=512)
-            if not chunks: continue
+            if not chunks:
+                continue
+
+            content_files += 1
+            logging.info(f"  [content] indexing: {full_path}")
 
             for i, chunk in enumerate(chunks):
-                if len(chunk) > 512: chunk = chunk[:512]
+                if len(chunk) > 512:
+                    chunk = chunk[:512]
 
                 current_batch_chunks.append(chunk)
                 current_batch_metadata.append({
                     "filename": filename,
                     "path": full_path,
                     "chunk_id": i,
-                    "content": chunk
+                    "content": chunk,
                 })
 
                 if len(current_batch_chunks) >= CHUNK_BATCH_SIZE:
@@ -193,10 +325,10 @@ def main():
                     batch_data = [
                         {
                             "vector": vectors[idx],
-                            "filename": meta['filename'],
-                            "path": meta['path'],
-                            "chunk_id": meta['chunk_id'],
-                            "content": meta['content']
+                            "filename": meta["filename"],
+                            "path": meta["path"],
+                            "chunk_id": meta["chunk_id"],
+                            "content": meta["content"],
                         }
                         for idx, meta in enumerate(current_batch_metadata)
                     ]
@@ -207,8 +339,17 @@ def main():
                         chunk_table.add(batch_data)
 
                     total_chunks_indexed += len(batch_data)
-                    if total_chunks_indexed % 1000 == 0:
-                        logging.info(f"Indexed {total_chunks_indexed} chunks...")
+                    pct = 100.0 * content_files / total_text_count if total_text_count else 0
+                    eta = _eta(phase_start, content_files, total_text_count)
+                    logging.info(
+                        f"  [content] {content_files:,} / {total_text_count:,} files "
+                        f"({pct:.1f}%), {total_chunks_indexed:,} chunks  "
+                        f"({_elapsed(phase_start)})  ETA {eta}"
+                    )
+
+                    if content_files >= next_sample_at:
+                        logging.info(f"    sample: {full_path}")
+                        next_sample_at += 500
 
                     current_batch_chunks = []
                     current_batch_metadata = []
@@ -218,17 +359,16 @@ def main():
         except Exception:
             pass
 
-    # Final content batch
     if current_batch_chunks:
         try:
             vectors = _remote_encode(current_batch_chunks)
             batch_data = [
                 {
                     "vector": vectors[idx],
-                    "filename": meta['filename'],
-                    "path": meta['path'],
-                    "chunk_id": meta['chunk_id'],
-                    "content": meta['content']
+                    "filename": meta["filename"],
+                    "path": meta["path"],
+                    "chunk_id": meta["chunk_id"],
+                    "content": meta["content"],
                 }
                 for idx, meta in enumerate(current_batch_metadata)
             ]
@@ -242,8 +382,96 @@ def main():
         except Exception as e:
             logging.error(f"Remote encode failed for final chunk batch: {e}")
 
-    logging.info(f"Content indexing complete. Total chunks: {total_chunks_indexed}")
-    logging.info("Indexing complete!")
+    logging.info(
+        f"Phase 2/3 complete — {content_files:,} files, "
+        f"{total_chunks_indexed:,} chunks in {_elapsed(phase_start)} "
+        f"({skipped_content:,} boilerplate files skipped)"
+    )
+
+    # ── Phase 3: Image indexing (CLIP) ────────────────────────────
+    logging.info("Phase 3/3 — Indexing images with CLIP...")
+    phase_start = time.time()
+
+    IMAGES_TABLE = "images"
+    try:
+        db.drop_table(IMAGES_TABLE)
+    except Exception:
+        pass
+    img_table = None
+
+    vision_model = None
+    IMAGE_BATCH_SIZE = 32
+    img_batch = []
+    total_images = 0
+    total_image_count = len(image_files)
+
+    def _flush_image_batch(batch, vmodel, tbl, count):
+        """Encode and store a batch of images. Returns (model, table, new_count)."""
+        if not batch:
+            return vmodel, tbl, count
+
+        if vmodel is None:
+            from sentence_transformers import SentenceTransformer
+            logging.info("  Loading CLIP vision model (first time)...")
+            vmodel = SentenceTransformer("clip-ViT-B-32", device="cpu")
+
+        vectors = []
+        valid = []
+        for item in batch:
+            try:
+                img = Image.open(item["path"])
+                vectors.append(vmodel.encode(img).tolist())
+                valid.append(item)
+            except Exception as e:
+                logging.warning(f"  Skipping image {item['path']}: {e}")
+
+        if valid:
+            data = [
+                {"vector": vectors[i], "filename": v["filename"], "path": v["path"]}
+                for i, v in enumerate(valid)
+            ]
+            if tbl is None:
+                tbl = db.create_table(IMAGES_TABLE, data=data)
+            else:
+                tbl.add(data)
+            count += len(data)
+            del vectors, data
+
+        gc.collect()
+        return vmodel, tbl, count
+
+    for full_path, filename in image_files:
+        img_batch.append({"filename": filename, "path": full_path})
+
+        if len(img_batch) >= IMAGE_BATCH_SIZE:
+            vision_model, img_table, total_images = _flush_image_batch(
+                img_batch, vision_model, img_table, total_images
+            )
+            pct = 100.0 * total_images / total_image_count if total_image_count else 0
+            eta = _eta(phase_start, total_images, total_image_count)
+            logging.info(
+                f"  [images] {total_images:,} / {total_image_count:,} "
+                f"({pct:.1f}%)  ({_elapsed(phase_start)})  ETA {eta}"
+            )
+            img_batch = []
+
+    vision_model, img_table, total_images = _flush_image_batch(
+        img_batch, vision_model, img_table, total_images
+    )
+
+    if vision_model is not None:
+        del vision_model
+        gc.collect()
+
+    logging.info(f"Phase 3/3 complete — {total_images:,} images indexed in {_elapsed(phase_start)}")
+
+    # ── Done ──────────────────────────────────────────────────────
+    with open(INDEX_DONE_MARKER, "w") as f:
+        f.write(f"files={total_files_indexed} chunks={total_chunks_indexed} images={total_images}\n")
+
+    logging.info(
+        f"All done!  files={total_files_indexed:,}  chunks={total_chunks_indexed:,}  images={total_images:,}"
+    )
 
 
 if __name__ == "__main__":
