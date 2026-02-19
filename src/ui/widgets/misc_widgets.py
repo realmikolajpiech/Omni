@@ -619,7 +619,7 @@ class _BubbleInner(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(self.PADDING_H, self.PADDING_V,
                                self.PADDING_H, self.PADDING_V)
-        lay.setSpacing(0)
+        lay.setSpacing(8 if is_markdown else 0)
 
         if is_markdown:
             self.edit = UnscrollableTextEdit()
