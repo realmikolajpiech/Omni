@@ -128,6 +128,22 @@ def _create_xai_client():
     )
 
 
+def _get_custom_client_and_model():
+    """Return (OpenAI client, model_name) from user settings, or (None, None) if not configured."""
+    try:
+        import src.core.settings_store as settings_store
+        url = settings_store.get("custom_api_url", "")
+        key = settings_store.get("custom_api_key", "")
+        model = settings_store.get("custom_model", "")
+        if url and key and model:
+            from openai import OpenAI
+            client = OpenAI(api_key=key, base_url=url)
+            return client, model
+    except Exception as e:
+        logging.warning(f"Could not load custom API settings: {e}")
+    return None, None
+
+
 class GroqFastWrapper:
     """Wrapper for Groq GPT-OSS 20B - fast model for intents/actions."""
 
@@ -172,10 +188,11 @@ class GroqFastWrapper:
 
 
 class XAIMainWrapper:
-    """Wrapper for xAI Grok - main model. Uses vision model when images present."""
+    """Wrapper for the main model (xAI Grok by default, or custom API)."""
 
-    def __init__(self, client):
+    def __init__(self, client, model: str = MAIN_MODEL_XAI):
         self.client = client
+        self.model = model
 
     def reset(self):
         pass
@@ -186,12 +203,12 @@ class XAIMainWrapper:
 
         temperature = float(temperature)
 
-        # Filter unsupported kwargs for xAI
+        # Filter unsupported kwargs for xAI / generic OpenAI-compatible APIs
         extra = {k: v for k, v in kwargs.items() if k not in ("chat_template_kwargs",)}
 
         if stream:
             return self.client.chat.completions.create(
-                model=MAIN_MODEL_XAI,
+                model=self.model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -200,7 +217,7 @@ class XAIMainWrapper:
             )
 
         response = self.client.chat.completions.create(
-            model=MAIN_MODEL_XAI,
+            model=self.model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -273,7 +290,7 @@ def ensure_resources():
 
 
 def ensure_main_model():
-    """Load main model (xAI Grok)."""
+    """Load main model — custom API if configured in settings, otherwise xAI Grok."""
     global llm, init_error
 
     ensure_resources()
@@ -284,10 +301,24 @@ def ensure_main_model():
     with main_lock:
         if llm:
             return
+        # Prefer custom API from user settings
+        custom_client, custom_model = _get_custom_client_and_model()
+        if custom_client and custom_model:
+            logging.info(f"Loading Main Model (custom API): {custom_model}")
+            try:
+                llm = XAIMainWrapper(custom_client, model=custom_model)
+                init_error = None
+                logging.info(f"Main Model Loaded (custom): {custom_model}")
+                return
+            except Exception as e:
+                logging.error(f"Custom Model Load Error: {e}")
+                init_error = str(e)
+                return
+
         logging.info(f"Loading Main Model (xAI): {MAIN_MODEL_XAI}")
         try:
             client = _create_xai_client()
-            llm = XAIMainWrapper(client)
+            llm = XAIMainWrapper(client, model=MAIN_MODEL_XAI)
             init_error = None
             logging.info("Main Model Loaded (xAI).")
         except Exception as e:

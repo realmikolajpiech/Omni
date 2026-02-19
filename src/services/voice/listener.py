@@ -381,12 +381,19 @@ class VoiceService:
             sf.write(wav_buffer, full_audio, SAMPLE_RATE, format="WAV", subtype="PCM_16")
             wav_buffer.seek(0)
 
-            logger.info(f"Sending {len(full_audio)/SAMPLE_RATE:.2f}s audio to Groq Whisper ({GROQ_WHISPER_MODEL})...")
-            transcription = self.groq_client.audio.transcriptions.create(
-                file=("audio.wav", wav_buffer.read()),
-                model=GROQ_WHISPER_MODEL,
-                response_format="text",
-            )
+            import src.core.settings_store as settings_store
+            lang_setting = settings_store.get("transcription_language", "auto")
+            lang_param = None if (not lang_setting or lang_setting == "auto") else lang_setting
+
+            logger.info(f"Sending {len(full_audio)/SAMPLE_RATE:.2f}s audio to Groq Whisper ({GROQ_WHISPER_MODEL}, lang={lang_param or 'auto'})...")
+            transcription_kwargs: dict = {
+                "file": ("audio.wav", wav_buffer.read()),
+                "model": GROQ_WHISPER_MODEL,
+                "response_format": "text",
+            }
+            if lang_param:
+                transcription_kwargs["language"] = lang_param
+            transcription = self.groq_client.audio.transcriptions.create(**transcription_kwargs)
 
             # Groq returns the text directly as a string when response_format="text"
             text = transcription.strip() if isinstance(transcription, str) else (transcription.text or "").strip()

@@ -6,7 +6,8 @@ import json
 import time
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QListWidget, QListWidgetItem, QFrame, QAbstractItemView,
-                             QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect)
+                             QGraphicsDropShadowEffect, QLabel, QScrollArea, QProgressBar, QMessageBox, QGraphicsOpacityEffect,
+                             QPushButton)
 from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QEvent, QUrl, QParallelAnimationGroup, pyqtProperty, pyqtSignal, QThreadPool
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPainterPath, QBrush, QLinearGradient, QDesktopServices, QCursor, QGuiApplication, QFontDatabase, QPen, QBitmap
 
@@ -24,6 +25,7 @@ from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, Smooth
                                        FollowUpWidget, AnswerWidget, StandardItemWidget, 
                                        RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
+from src.ui.widgets.settings_panel import SettingsPanel
 
 from src.ui.workers.ai_worker import AIWorker
 from src.ui.workers.search_worker import SearchWorker
@@ -140,7 +142,7 @@ class OmniWindow(QWidget):
 
         self.logo_label = RotatingLabel()
         self.logo_label.setFixedSize(50, 50)
-        # self.logo_label.right_clicked.connect(self.enter_settings_mode)
+        self.logo_label.right_clicked.connect(self.enter_settings_mode)
         logo_pix = QPixmap(LOGO_PATH)
         if not logo_pix.isNull():
             self.logo_label.setPixmap(logo_pix.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -194,6 +196,22 @@ class OmniWindow(QWidget):
         self.cc_container.hide()
         input_layout.addWidget(self.cc_container)
 
+        # Settings mode: title + close button (hidden in normal mode)
+        self.settings_title = QLabel("Settings")
+        self.settings_title.setFont(QFont("Instrument Serif", 34))
+        self.settings_title.setStyleSheet("font-style: italic; color: rgba(255,255,255,0.6);")
+        self.settings_title.hide()
+
+        self.settings_close_btn = QPushButton("×")
+        self.settings_close_btn.setFixedSize(36, 36)
+        self.settings_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_close_btn.setObjectName("SettingsCloseBtn")
+        self.settings_close_btn.clicked.connect(self.exit_settings_mode)
+        self.settings_close_btn.hide()
+
+        input_layout.addWidget(self.settings_title, 1)
+        input_layout.addWidget(self.settings_close_btn)
+
         # Mic at the end (Right edge)
         input_layout.addWidget(self.mic_widget)
 
@@ -225,9 +243,13 @@ class OmniWindow(QWidget):
             }
         """)
 
+        self.settings_panel = SettingsPanel()
+        self.settings_panel.hide()
+
         content_layout.addWidget(self.input_container)
         content_layout.addWidget(self.divider)
         content_layout.addWidget(self.list_widget, 1) # Expand to fill available space
+        content_layout.addWidget(self.settings_panel, 1) # Shown in settings mode
         # content_layout.addStretch() # Removed to prevent squashing list
         main_layout.addWidget(self.frame)
 
@@ -236,7 +258,7 @@ class OmniWindow(QWidget):
         self.chat_history = []  
         self.is_history_mode = False
         self._streaming_answer_widget = None  # tracks widget currently being streamed
-        # self.is_settings_mode = False
+        self.is_settings_mode = False
 
         self.apps = self.load_apps()
         self.is_entry_animating = False
@@ -364,7 +386,12 @@ class OmniWindow(QWidget):
                 elif hasattr(widget_container, 'set_theme'):
                     widget_container.set_theme(theme_name)
                     
-        # 5. Update Glass Effect
+        # 5. Update Settings Panel
+        if hasattr(self, 'settings_panel'):
+            self.settings_panel.set_theme(theme_name)
+            self._apply_settings_close_btn_style()
+
+        # 6. Update Glass Effect
         self.update_glass_color()
         
     def update_glass_color(self):
@@ -696,9 +723,8 @@ class OmniWindow(QWidget):
                     self.follow_up_widget.set_active(True)
                     self.frame.set_minimal_mode(False)
             else:
-                # New session (manual open or no previous chat)
-                self.reset_to_search_mode(animate=False)
-                self.chat_history = []
+                # Manual open or no previous chat
+                # DO NOT clear the session so that previous chat remains!
                 self.show()
                 self.center()
                 self.animate_entry()
@@ -965,7 +991,11 @@ class OmniWindow(QWidget):
                         return True
             elif event.key() == Qt.Key.Key_Escape:
                 logging.info("Escape key pressed (Input Field)")
-                
+
+                if self.is_settings_mode:
+                    self.exit_settings_mode()
+                    return True
+
                 # Check if we are streaming response
                 if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
                     self.abort_ai_generation()
@@ -1053,7 +1083,7 @@ class OmniWindow(QWidget):
 
     def animate_close(self):
         if self._is_closing: return
-
+        
         # Always switch back to IDLE (Wake Word) mode when closing
         self.send_udp_command("SET_MODE:IDLE")
         
@@ -1113,6 +1143,133 @@ class OmniWindow(QWidget):
         self.anim_close_group.addAnimation(anim_opa)
         self.anim_close_group.start()
 
+    # ------------------------------------------------------------------
+    # Settings mode
+    # ------------------------------------------------------------------
+
+    _SETTINGS_HEIGHT = 480
+
+    def enter_settings_mode(self):
+        if self.is_settings_mode:
+            return
+        self.is_settings_mode = True
+
+        # Apply current theme to settings panel before showing
+        self.settings_panel.set_theme(self.current_theme)
+        self._apply_settings_close_btn_style()
+
+        # Swap input-bar widgets
+        self.input_field.hide()
+        self.follow_up_widget.hide()
+        self.mic_widget.hide()
+        self.cc_container.hide()
+        self.settings_title.show()
+        self.settings_close_btn.show()
+
+        # Hide chat content
+        self.divider.hide()
+        self.list_widget.hide()
+
+        # Fade in settings panel
+        settings_effect = QGraphicsOpacityEffect(self.settings_panel)
+        self.settings_panel.setGraphicsEffect(settings_effect)
+        settings_effect.setOpacity(0.0)
+        self.settings_panel.show()
+
+        self._settings_fade_in = QPropertyAnimation(settings_effect, b"opacity")
+        self._settings_fade_in.setDuration(220)
+        self._settings_fade_in.setStartValue(0.0)
+        self._settings_fade_in.setEndValue(1.0)
+        self._settings_fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._settings_fade_in.start()
+
+        # Resize window to settings height
+        current_geo = self.geometry()
+        target_geo = QRect(current_geo.x(), current_geo.y(), current_geo.width(), self._SETTINGS_HEIGHT)
+        self._settings_resize_anim = QPropertyAnimation(self, b"geometry")
+        self._settings_resize_anim.setDuration(280)
+        self._settings_resize_anim.setStartValue(current_geo)
+        self._settings_resize_anim.setEndValue(target_geo)
+        self._settings_resize_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._settings_resize_anim.start()
+
+    def exit_settings_mode(self):
+        if not self.is_settings_mode:
+            return
+        self.is_settings_mode = False
+
+        # Fade out settings panel
+        current_effect = self.settings_panel.graphicsEffect()
+        if isinstance(current_effect, QGraphicsOpacityEffect):
+            fade_effect = current_effect
+        else:
+            fade_effect = QGraphicsOpacityEffect(self.settings_panel)
+            self.settings_panel.setGraphicsEffect(fade_effect)
+
+        self._settings_fade_out = QPropertyAnimation(fade_effect, b"opacity")
+        self._settings_fade_out.setDuration(160)
+        self._settings_fade_out.setStartValue(1.0)
+        self._settings_fade_out.setEndValue(0.0)
+        self._settings_fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        # Simultaneously shrink window back to the bare input-bar height
+        current_geo = self.geometry()
+        target_geo = QRect(current_geo.x(), current_geo.y(), current_geo.width(), 84)
+        self._settings_shrink_anim = QPropertyAnimation(self, b"geometry")
+        self._settings_shrink_anim.setDuration(260)
+        self._settings_shrink_anim.setStartValue(current_geo)
+        self._settings_shrink_anim.setEndValue(target_geo)
+        self._settings_shrink_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _on_fade_out_done():
+            self.settings_panel.hide()
+            self.settings_panel.setGraphicsEffect(None)
+            # Restore input bar
+            self.settings_title.hide()
+            self.settings_close_btn.hide()
+            self.input_field.show()
+            self.follow_up_widget.show()
+            self.mic_widget.show()
+            # Restore chat area and let refresh_list handle height
+            self.divider.show()
+            self.list_widget.show()
+            self.setMaximumHeight(16777215)
+            self.refresh_list(self.input_field.text(), animate=False)
+            self.input_field.setFocus()
+
+        self._settings_shrink_anim.start()
+
+        self._settings_fade_out.finished.connect(_on_fade_out_done)
+        self._settings_fade_out.start()
+
+    def _apply_settings_close_btn_style(self):
+        t = THEMES.get(self.current_theme, THEMES["dark"])
+        primary = t["text_primary"]
+        placeholder = t["placeholder"]
+        border = t["border_color"]
+        is_dark = self.current_theme == "dark"
+        btn_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.05)"
+        btn_hover = "rgba(255,255,255,0.15)" if is_dark else "rgba(0,0,0,0.09)"
+
+        # Title matches the input field placeholder style
+        self.settings_title.setStyleSheet(
+            f"font-style: italic; color: {placeholder};"
+        )
+
+        self.settings_close_btn.setStyleSheet(f"""
+            QPushButton#SettingsCloseBtn {{
+                background: {btn_bg};
+                border: 1px solid {border};
+                border-radius: 18px;
+                color: {primary};
+                font-size: 20px;
+                font-family: "Manrope";
+            }}
+            QPushButton#SettingsCloseBtn:hover {{
+                background: {btn_hover};
+            }}
+        """)
+
     def keyPressEvent(self, event):
         # Handle CTRL+S for preview on selected file (backup handler)
         if event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -1149,14 +1306,19 @@ class OmniWindow(QWidget):
         
         if event.key() == Qt.Key.Key_Escape:
             logging.info("Escape key pressed (Global)")
-            
+
+            if self.is_settings_mode:
+                self.exit_settings_mode()
+                return
+
             # Check if we are streaming response (Global Handler)
             if hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning():
                 self.abort_ai_generation()
                 return
 
-            if self.is_history_mode:
+            if self.is_history_mode or self.input_field.text():
                 self.reset_to_search_mode()
+                self.chat_history = []
             else:
                 self.input_field.clear()
                 self.animate_close()
