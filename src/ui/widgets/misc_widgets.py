@@ -242,13 +242,15 @@ class SmoothEntryWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(content_widget)
 
-        self.opacity_eff = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_eff)
-
+        # For instant: no opacity effect — QGraphicsOpacityEffect at opacity=1 on macOS
+        # can block child-widget rendering until the next layout/repaint cycle.
+        self.opacity_eff = None
         if not animate or animation == "instant":
-            self.opacity_eff.setOpacity(1)
+            pass  # render immediately, no effect needed
 
         elif animation == "pop":
+            self.opacity_eff = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self.opacity_eff)
             self.opacity_eff.setOpacity(0)
             self.op_anim = QPropertyAnimation(self.opacity_eff, b"opacity")
             self.op_anim.setStartValue(0)
@@ -258,6 +260,8 @@ class SmoothEntryWidget(QWidget):
             QTimer.singleShot(10, self.op_anim.start)
 
         elif animation == "slide":
+            self.opacity_eff = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self.opacity_eff)
             self.opacity_eff.setOpacity(0)
             final_h = target_height or content_widget.sizeHint().height() or 80
             self.setMaximumHeight(0)
@@ -286,6 +290,8 @@ class SmoothEntryWidget(QWidget):
             QTimer.singleShot(10, self.anim_group.start)
 
         else:  # "fade" (default)
+            self.opacity_eff = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self.opacity_eff)
             self.opacity_eff.setOpacity(0)
             self.anim_group = QParallelAnimationGroup()
 
@@ -581,6 +587,11 @@ class _BubbleWidget(QWidget):
         self._text = text
         self.bubble.set_text(text)
 
+    def play_done_animation(self):
+        """Play a short highlight when AI has finished (thinking done, answer shown)."""
+        if hasattr(self.bubble, 'play_done_animation'):
+            self.bubble.play_done_animation()
+
     def update_style(self):
         t = THEMES.get(self.current_theme, THEMES["light"])
         name_color = t["text_secondary"]
@@ -603,8 +614,8 @@ class _BubbleWidget(QWidget):
 class _BubbleInner(QWidget):
     """Draws the rounded rect background and hosts the text inside."""
 
-    PADDING_H = 14
-    PADDING_V = 10
+    PADDING_H = 18
+    PADDING_V = 14
     RADIUS = 18
     MAX_FRACTION = 0.78
 
@@ -615,6 +626,8 @@ class _BubbleInner(QWidget):
         self.current_theme = "light"
         self._bg = QColor("#000000")
         self._extra_top_widgets = []
+        self._highlight_opacity = 0.0
+        self._placeholder_shown = False  # set True below when placeholder is created
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(self.PADDING_H, self.PADDING_V,
@@ -622,6 +635,14 @@ class _BubbleInner(QWidget):
         lay.setSpacing(8 if is_markdown else 0)
 
         if is_markdown:
+            # Placeholder shown while AI is "thinking" (no answer/thinking content yet)
+            self.thinking_placeholder = QLabel("Thinking…")
+            self.thinking_placeholder.setFont(QFont("Manrope", 14, QFont.Weight.Normal))
+            self.thinking_placeholder.setMinimumHeight(28)
+            self.thinking_placeholder.setStyleSheet("color: rgba(128,128,128,0.9); background: transparent;")
+            lay.addWidget(self.thinking_placeholder)
+            self._placeholder_shown = True  # placeholder starts visible
+
             self.edit = UnscrollableTextEdit()
             self.edit.setReadOnly(True)
             self.edit.setFrameStyle(QFrame.Shape.NoFrame)
@@ -630,8 +651,10 @@ class _BubbleInner(QWidget):
             self.edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
             self.edit.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
             lay.addWidget(self.edit)
+            self.edit.setVisible(False)
             self.label = None
         else:
+            self.thinking_placeholder = None
             self.label = QLabel()
             self.label.setWordWrap(True)
             self.label.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
@@ -646,10 +669,18 @@ class _BubbleInner(QWidget):
         """Insert a thinking widget at the top of the bubble content (before answer text)."""
         self._extra_top_widgets.append(widget)
         self.layout().insertWidget(0, widget)
+        if self.thinking_placeholder is not None:
+            self._placeholder_shown = False
+            self.thinking_placeholder.setVisible(False)
 
     def set_text(self, text):
         if self.edit is not None:
-            self.edit.setVisible(bool(text and text.strip()))
+            has_text = bool(text and text.strip())
+            self.edit.setVisible(has_text)
+            if self.thinking_placeholder is not None:
+                show_ph = (not has_text) and (not self._extra_top_widgets)
+                self._placeholder_shown = show_ph
+                self.thinking_placeholder.setVisible(show_ph)
             if text:
                 self.edit.setMarkdown(text)
         elif self.label is not None:
@@ -677,19 +708,55 @@ class _BubbleInner(QWidget):
             self.edit.setStyleSheet(f"background: transparent; color: {text_color};")
         elif self.label is not None:
             self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
+        if self.thinking_placeholder is not None:
+            ph_color = t.get("text_secondary", "#888888")
+            self.thinking_placeholder.setStyleSheet(
+                f"color: {ph_color}; background: transparent;"
+            )
         for w in self._extra_top_widgets:
             if hasattr(w, 'set_theme'):
                 w.set_theme(theme)
         self.update()
 
+    @pyqtProperty(float)
+    def highlight_opacity(self):
+        return self._highlight_opacity
+
+    @highlight_opacity.setter
+    def highlight_opacity(self, value):
+        self._highlight_opacity = max(0.0, min(1.0, value))
+        self.update()
+
+    def play_done_animation(self):
+        """Short highlight flash when AI finishes thinking (0 -> 0.35 -> 0)."""
+        prev = getattr(self, "_done_anim", None)
+        if prev is not None:
+            try:
+                prev.stop()
+            except RuntimeError:
+                pass
+        self._done_anim = QPropertyAnimation(self, b"highlight_opacity")
+        self._done_anim.setStartValue(0.0)
+        self._done_anim.setKeyValueAt(0.4, 0.35)
+        self._done_anim.setEndValue(0.0)
+        self._done_anim.setDuration(500)
+        self._done_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._done_anim.start()
+
     def paintEvent(self, event):
-        if self._bg.alpha() == 0:
+        if self._bg.alpha() == 0 and self._highlight_opacity <= 0:
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(self._bg))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), self.RADIUS, self.RADIUS)
+        if self._bg.alpha() > 0:
+            p.setBrush(QBrush(self._bg))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(self.rect(), self.RADIUS, self.RADIUS)
+        if self._highlight_opacity > 0:
+            highlight = QColor(255, 255, 255, int(80 * self._highlight_opacity))
+            p.setBrush(QBrush(highlight))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(self.rect(), self.RADIUS, self.RADIUS)
 
     def _max_width(self):
         w = 660
@@ -711,14 +778,27 @@ class _BubbleInner(QWidget):
             has_text = bool(self.edit.toPlainText().strip())
 
             extra_h = sum(w.sizeHint().height() for w in self._extra_top_widgets if w.isVisible())
+            # Use _placeholder_shown flag — isVisible() is False before widget is parented
+            placeholder_h = (
+                self.thinking_placeholder.minimumHeight()
+                if (self.thinking_placeholder is not None and self._placeholder_shown)
+                else 0
+            )
 
             if has_text:
+                self.edit.document().setTextWidth(inner_w)
                 doc_h = int(self.edit.document().size().height())
+                if doc_h <= 0:
+                    # Document not yet laid out — estimate from line count
+                    doc_h = max(self.edit.fontMetrics().height() + 8, 24)
                 self.edit.setFixedHeight(doc_h)
-                total_h = doc_h + extra_h + 2 * self.PADDING_V
+                total_h = doc_h + extra_h + placeholder_h + 2 * self.PADDING_V
                 return QSize(max_w, max(total_h, 36))
             elif extra_h > 0:
                 total_h = extra_h + 2 * self.PADDING_V
+                return QSize(max_w, max(total_h, 36))
+            elif placeholder_h > 0:
+                total_h = placeholder_h + 2 * self.PADDING_V
                 return QSize(max_w, max(total_h, 36))
             else:
                 return QSize(max_w, 0)
@@ -768,11 +848,15 @@ class AnswerWidget(QWidget):
         self.current_theme = "light"
         self.chat_mode = chat_mode
         self._query_text = query_text or ""
+        # Track intended visibility independently of Qt's isVisible() which requires a visible
+        # parent chain — sizeHint() is called before the widget is shown so isVisible()=False.
+        self._show_user_bubble = False
 
         # ── USER BUBBLE (chat mode only) ───────────────────────────────
         if chat_mode:
             self.user_bubble = _BubbleWidget(self._query_text, sender="user")
-            self.user_bubble.setVisible(bool(self._query_text))
+            self._show_user_bubble = bool(self._query_text)
+            self.user_bubble.setVisible(self._show_user_bubble)
             self.outer_layout.addWidget(self.user_bubble)
         else:
             self.user_bubble = None
@@ -810,8 +894,12 @@ class AnswerWidget(QWidget):
 
         self._answer_text = text or ""
         if text:
-            self.text_edit.setVisible(True)
-            self.text_edit.setMarkdown(text)
+            if chat_mode and self.ai_bubble:
+                # Route through proper path so thinking_placeholder is hidden
+                self.ai_bubble.bubble.set_text(text)
+            else:
+                self.text_edit.setVisible(True)
+                self.text_edit.setMarkdown(text)
 
         self.update_style()
 
@@ -835,7 +923,8 @@ class AnswerWidget(QWidget):
 
     def set_query_visible(self, visible):
         if self.user_bubble and self.chat_mode:
-            self.user_bubble.setVisible(visible and bool(self._query_text))
+            self._show_user_bubble = visible and bool(self._query_text)
+            self.user_bubble.setVisible(self._show_user_bubble)
 
     # ── Thinking ───────────────────────────────────────────────────────
 
@@ -865,6 +954,30 @@ class AnswerWidget(QWidget):
             self.thinking_widget.set_collapsed(collapsed)
             self.update_item_size()
 
+    def set_answer(self, text):
+        """Set the AI answer text through the proper path (hides Thinking… placeholder)."""
+        if self.chat_mode and self.ai_bubble is not None:
+            self.ai_bubble.bubble.set_text(text)
+        elif self.text_edit is not None:
+            has_text = bool(text and text.strip())
+            self.text_edit.setVisible(has_text)
+            if text:
+                self.text_edit.setMarkdown(text)
+        # Always update item size so the list allocates correct height
+        self.update_item_size()
+
+    def hide_thinking_and_play_done(self):
+        """Remove thinking block from the bubble and play a short 'done' highlight."""
+        if self.thinking_widget is not None:
+            self.thinking_widget.setVisible(False)
+        # Also ensure the placeholder is hidden (covers case when no CollapsibleThinkingWidget)
+        if self.ai_bubble is not None and self.ai_bubble.bubble.thinking_placeholder is not None:
+            self.ai_bubble.bubble._placeholder_shown = False
+            self.ai_bubble.bubble.thinking_placeholder.setVisible(False)
+        self.update_item_size()
+        if self.ai_bubble is not None:
+            self.ai_bubble.play_done_animation()
+
     # ── Size ───────────────────────────────────────────────────────────
 
     def sizeHint(self):
@@ -876,7 +989,7 @@ class AnswerWidget(QWidget):
         h = margins.top() + margins.bottom()
         spacing = self.outer_layout.spacing()
 
-        if self.user_bubble and self.user_bubble.isVisible():
+        if self.user_bubble and self._show_user_bubble:
             h += self.user_bubble.sizeHint().height() + spacing
 
         # Skip thinking here when in chat mode — it's inside ai_bubble and counted there

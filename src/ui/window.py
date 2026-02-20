@@ -1272,6 +1272,13 @@ class OmniWindow(QWidget):
         """)
 
     def keyPressEvent(self, event):
+        # Cmd+Option (macOS) → hide window
+        cmd_opt = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier
+        if event.modifiers() == cmd_opt:
+            self.animate_close()
+            event.accept()
+            return
+
         # Handle CTRL+S for preview on selected file (backup handler)
         if event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             logging.debug("keyPressEvent: CTRL+S detected")
@@ -1928,10 +1935,20 @@ class OmniWindow(QWidget):
             answer_widget = AnswerWidget("", query_text=query, chat_mode=True)
             answer_widget.set_query_visible(True)
             self._streaming_answer_widget = answer_widget
-            self.insert_list_item(0, answer_widget, "answer")
+            # instant = bubbles visible immediately, no fade delay
+            self.insert_list_item(0, answer_widget, "answer", animation="instant")
+
+            # Clear input so user sees their question only in the bubble (not duplicated in the field)
+            self.input_field.blockSignals(True)
+            self.input_field.clear()
+            self.input_field.blockSignals(False)
 
             if self.list_widget.count() > 0:
                 self.list_widget.scrollToItem(self.list_widget.item(0))
+            self.list_widget.update()
+            QApplication.processEvents()
+            # After Qt has processed events and run the layout pass, re-measure so sizes are correct
+            QTimer.singleShot(0, answer_widget.update_item_size)
         else:
             # Normal mode: show animated spinner while waiting
             self.thinking_widget = ThinkingWidget("")
@@ -2097,18 +2114,15 @@ class OmniWindow(QWidget):
             if thinking:
                 answer_widget.ensure_thinking_widget()
                 answer_widget.update_thinking(thinking)
-            
+
             if answer:
-                # When answer appears, collapse thinking and show answer in main text
+                # Collapse thinking when answer starts appearing
                 if thinking:
                     answer_widget.set_thinking_collapsed(True)
-                if hasattr(answer_widget, 'text_edit'):
-                    answer_widget.text_edit.setVisible(True)
-                    answer_widget.text_edit.setMarkdown(answer)
-            # Don't force expand/collapse while streaming - let user control it or auto-expand only once on first update
-            
-            answer_widget.updateGeometry()
-            if answer_item is not None:
+                # set_answer also calls update_item_size() internally
+                answer_widget.set_answer(answer)
+            elif answer_item is not None:
+                # No answer yet but size may have changed (thinking expanded)
                 answer_item.setSizeHint(answer_widget.sizeHint())
                 self.adjust_window_height(animate=False)
 
@@ -2129,9 +2143,10 @@ class OmniWindow(QWidget):
                 new_w._answer_text = answer_text
                 new_w.set_query_visible(bool(query_text))
                 self.list_widget.takeItem(i)
-                self.insert_list_item(i, new_w, "answer")
+                self.insert_list_item(i, new_w, "answer", animation="instant")
                 new_item = self.list_widget.item(i)
                 new_item.setSizeHint(new_w.sizeHint())
+                QTimer.singleShot(0, new_w.update_item_size)
 
     def _finalize_response_ui(self):
         """Called once after every AI response (streaming or non-streaming) to tidy the UI."""
@@ -2164,7 +2179,10 @@ class OmniWindow(QWidget):
                 widget.update_thinking(thinking)
                 widget.set_thinking_collapsed(True)
 
-            widget.text_edit.setMarkdown(answer)
+            widget.set_answer(answer)
+
+            # Remove thinking from bubble and play "done" highlight
+            QTimer.singleShot(80, lambda w=widget: w.hide_thinking_and_play_done() if hasattr(w, 'hide_thinking_and_play_done') else None)
 
             # Find list item for this widget
             item = None
