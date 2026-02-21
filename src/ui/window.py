@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import logging
 import subprocess
@@ -16,14 +17,11 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, FileActionWidget, 
-                                         PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget)
-from src.ui.widgets.install_widget import InstallProgressWidget
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget,WikiCardWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget)
+from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
-from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, 
-                                       FollowUpWidget, AnswerWidget, StandardItemWidget, 
-                                       RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget)
+from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, FollowUpWidget, AnswerWidget, StandardItemWidget, RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 from src.ui.widgets.settings_panel import SettingsPanel
 
@@ -31,9 +29,50 @@ from src.ui.workers.ai_worker import AIWorker
 from src.ui.workers.search_worker import SearchWorker
 from src.ui.workers.action_worker import ActionWorker
 from src.ui.workers.screenshot_worker import ScreenshotWorker
-from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker
+from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker, UninstallOrchestrator
 from src.ui.workers.file_search_worker import FileSearchWorker
 from src.ui.workers.tts_worker import TTSWorker
+from src.ui.workers.wiki_worker import WikiWorker
+from src.ui.workers.og_worker import OGWorker
+
+# ---------------------------------------------------------------------------
+# URL / domain instant-detection helper
+# ---------------------------------------------------------------------------
+_INSTANT_URL_RE = re.compile(
+    r'^(?:https?://\S+|'
+    r'(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9\-]*'
+    r'(?:\.[a-zA-Z0-9][a-zA-Z0-9\-]*)*'
+    r'\.[a-zA-Z]{2,6}'
+    r'(?:/\S*)?)$',
+    re.IGNORECASE,
+)
+# Extensions that look like domains but are actually filenames
+_FILE_EXT_RE = re.compile(
+    r'\.(js|ts|py|css|html|jsx|tsx|md|txt|json|xml|yml|yaml|sh|env|svg|png|jpg|gif|mp4)$',
+    re.IGNORECASE,
+)
+
+
+def _detect_url(text: str):
+    """
+    Return (normalised_url, domain) if *text* looks like a URL/domain, else None.
+    Requires a proper TLD — rejects bare words like "tesla" or filenames like "app.js".
+    """
+    t = text.strip()
+    if not t or ' ' in t:
+        return None
+    if _FILE_EXT_RE.search(t):
+        return None
+    if not _INSTANT_URL_RE.match(t):
+        return None
+    url = t if t.startswith('http') else f'https://{t}'
+    try:
+        from urllib.parse import urlparse as _up
+        domain = _up(url).netloc.replace('www.', '')
+        return (url, domain) if domain and '.' in domain else None
+    except Exception:
+        return None
+
 
 try:
     from BlurWindow.blurWindow import blur
@@ -274,6 +313,7 @@ class OmniWindow(QWidget):
         self.ai_worker = None
         self.file_search_worker = None
         self.tts_worker = None
+        self.og_worker = None
         self.is_tts_playing = False
 
         self.current_theme = "dark" # Default
@@ -285,6 +325,9 @@ class OmniWindow(QWidget):
         self.external_actions = []
         self.external_search_results = []
         self.local_file_results = []
+        self.wiki_data = None      # Wikipedia knowledge card data
+        self.og_data = None        # Open Graph website preview data
+        self.instant_url = None    # (url, domain) when query is a URL/domain — shown instantly
 
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
@@ -300,6 +343,10 @@ class OmniWindow(QWidget):
 
         # Apply initial blur
         self.apply_blur()
+
+        # Install an application-wide event filter to catch global shortcuts
+        # (like Cmd+Option) regardless of which widget has focus (e.g. UnscrollableTextEdit)
+        QApplication.instance().installEventFilter(self)
 
     def detect_system_theme(self):
         """Detect MacOS system theme."""
@@ -617,6 +664,7 @@ class OmniWindow(QWidget):
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
             except Exception as e:
                 logging.debug(f"SetForegroundWindow failed: {e}")
+        self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.input_field.setFocus()
         
     def resizeEvent(self, event):
@@ -647,10 +695,12 @@ class OmniWindow(QWidget):
             
         if target_screen:
             geo = target_screen.availableGeometry()
-            x = geo.x() + (geo.width() - self.width()) // 2
-            y = geo.y() + (geo.height() - self.height()) // 2
-            
-            # Ensure y is relative to screen top! 
+            x = geo.x() + (geo.width() - DEFAULT_WIDTH) // 2
+            # Always position based on collapsed height (84px) so that reopening with
+            # chat history doesn't push the window to the top of the screen.
+            y = geo.y() + (geo.height() - 84) // 2
+
+            # Ensure y is relative to screen top!
             # We want it slightly higher than center (y-150), but at least 40px from top of screen
             y = max(geo.y() + 40, y - 150)
             
@@ -680,11 +730,11 @@ class OmniWindow(QWidget):
         
         text = self.input_field.text() if not clear else ""
         
-        # Ensure width is standard, but don't hard-reset the height! 
+        # Ensure width is standard, but don't hard-reset the height!
         # Keeping current height allows refresh_list to animate the shrink.
         if self.width() != DEFAULT_WIDTH:
             self.resize(DEFAULT_WIDTH, self.height())
-            
+
         self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self, source="manual"):
@@ -815,11 +865,13 @@ class OmniWindow(QWidget):
         self.anim_group.finished.connect(on_finished)
         
         # Zoom In Animation
+        # Use DEFAULT_WIDTH to prevent width from drifting on repeated show/hide cycles
         target_geo = self.geometry()
+        target_geo.setWidth(DEFAULT_WIDTH)
         center = target_geo.center()
-        
+
         # Start size: 92% (Subtle zoom)
-        start_w = int(target_geo.width() * 0.92)
+        start_w = int(DEFAULT_WIDTH * 0.92)
         start_h = int(target_geo.height() * 0.92)
         start_x = center.x() - start_w // 2
         start_y = center.y() - start_h // 2
@@ -938,6 +990,11 @@ class OmniWindow(QWidget):
              logging.info("Window deactivated but AI is thinking - keeping window open.")
              return
 
+        # Prevent closing if screenshot worker is running
+        if hasattr(self, 'screenshot_worker') and self.screenshot_worker and self.screenshot_worker.isRunning():
+             logging.info("Window deactivated but screenshot taking - keeping window open.")
+             return
+
         if self.isVisible() and not self.is_entry_animating:
             self.animate_close()
 
@@ -948,7 +1005,21 @@ class OmniWindow(QWidget):
         return super().event(event)
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            # Cmd+Option (macOS) → hide window globally across the app
+            cmd_opt = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier
+            # Mask out keypads/etc just in case, but strictly require Cmd+Opt and no other main mods
+            mask = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+            
+            if (event.modifiers() & mask) == cmd_opt:
+                # Ensure no other key is pressed (e.g. Cmd+Opt+C should not hide window)
+                if event.key() in (Qt.Key.Key_Meta, Qt.Key.Key_Alt, Qt.Key.Key_Option):
+                    if self.isVisible() and not self._is_closing:
+                        self.animate_close()
+                    return True
+
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
+
             if event.key() == Qt.Key.Key_Down:
                 current_row = self.list_widget.currentRow()
                 if current_row < 0 and self.list_widget.count() > 0:
@@ -1128,8 +1199,9 @@ class OmniWindow(QWidget):
              self.hide()
              self._is_closing = False
              self.setWindowOpacity(1.0)
-             # Reset geometry for next show so we don't shrink every time
-             self.setGeometry(current_geo) 
+             # Reset to clean default geometry so the next show always starts from
+             # the correct width and a minimal height. center() will re-position it.
+             self.resize(DEFAULT_WIDTH, 84)
              
              # Reset MacOS blur view reference so it gets recreated on next show
              if sys.platform == 'darwin' and hasattr(self, 'mac_blur_view'):
@@ -1274,8 +1346,10 @@ class OmniWindow(QWidget):
     def keyPressEvent(self, event):
         # Cmd+Option (macOS) → hide window
         cmd_opt = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier
-        if event.modifiers() == cmd_opt:
-            self.animate_close()
+        mask = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        if (event.modifiers() & mask) == cmd_opt and event.key() in (Qt.Key.Key_Meta, Qt.Key.Key_Alt, Qt.Key.Key_Option):
+            if self.isVisible() and not self._is_closing:
+                self.animate_close()
             event.accept()
             return
 
@@ -1356,6 +1430,9 @@ class OmniWindow(QWidget):
             self.external_actions = []
             self.external_search_results = []
             self.local_file_results = []
+            self.wiki_data = None
+            self.og_data = None
+            self.instant_url = None
             self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             return
@@ -1364,6 +1441,22 @@ class OmniWindow(QWidget):
         self.external_actions = []
         self.external_search_results = []
         self.local_file_results = []
+        self.fast_chips = []
+        self.wiki_data = None
+        self.og_data = None
+
+        # Detect URL/domain instantly — no debounce, no API call needed
+        detected = _detect_url(text.strip())
+        if detected != self.instant_url:
+            self.instant_url = detected
+            if detected:
+                # Start OGWorker immediately for richer preview later
+                url, _domain = detected
+                self.cleanup_worker("og_worker")
+                self.og_worker = OGWorker(url, text.strip())
+                self.og_worker.og_result.connect(self.on_og_result)
+                self.og_worker.no_result.connect(lambda _q: None)
+                self.og_worker.start()
         
         self.frame.set_minimal_mode(True)
         self.refresh_list(text, animate=True)
@@ -1375,32 +1468,103 @@ class OmniWindow(QWidget):
             self.external_actions = []
             self.external_search_results = []
             self.local_file_results = []
+            self.wiki_data = None
+            self.og_data = None
+            self.instant_url = None
             self.adjust_window_height(animate)
             return
 
         # Calculate new items to display
         new_items_data = [] # List of (key, data, widget_factory_func)
 
+        # -1. Quick URL card — shown instantly when user types a domain/URL.
+        #     Replaced by OGPreviewWidget once OG data arrives (different key → smooth swap).
+        if self.instant_url and not self.og_data and not self.wiki_data:
+            _iu_url, _iu_domain = self.instant_url
+            _iu_theme = getattr(self, "current_theme", "dark")
+
+            def _create_quick_url(u=_iu_url, d=_iu_domain, th=_iu_theme):
+                return QuickURLWidget(url=u, domain=d, theme=th)
+
+            _iu_data = {"type": "quick_url", "url": _iu_url, "domain": _iu_domain}
+            new_items_data.append((f"quick_url:{_iu_url}", _iu_data, _create_quick_url))
+
+        # 0.5. Wikipedia Knowledge Card — appears before action cards
+        if self.wiki_data:
+            wiki_key = f"wiki:{self.wiki_data.get('title', '')}"
+            wiki_data_snap = self.wiki_data
+            current_theme_snap = getattr(self, 'current_theme', 'light')
+
+            def create_wiki_widget(wd=wiki_data_snap, theme=current_theme_snap):
+                return WikiCardWidget(wd, theme=theme)
+
+            wiki_item_data = {"type": "wiki_card", **wiki_data_snap}
+            new_items_data.append((wiki_key, wiki_item_data, create_wiki_widget))
+
+        # 0.6. OG Website Preview — for link-type actions (shown when wiki not available)
+        if self.og_data and not self.wiki_data:
+            og_url = self.og_data.get("source_url", "")
+            og_key = f"og:{og_url}"
+            og_snap = self.og_data
+            og_theme = getattr(self, "current_theme", "dark")
+
+            def create_og_widget(od=og_snap, url=og_url, theme=og_theme):
+                return OGPreviewWidget(od, url=url, theme=theme)
+
+            og_item_data = {"type": "og_preview", "url": og_url}
+            new_items_data.append((og_key, og_item_data, create_og_widget))
+
         # 1. External Actions (from LLM/Fast Search)
         for act in self.external_actions:
             key = self.get_item_key(act)
             if not key: continue
-            
+
             def create_act_widget(a=act):
                 if a.get('type') == 'link':
+                    # Instead of ignoring search links, we display SearchActionWidget
+                    from urllib.parse import urlparse as _urlp
+                    _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
+                    _root = ".".join(_host.split(".")[-2:])
+                    _SEARCH_HOSTS = {
+                        "duckduckgo.com", "google.com", "bing.com",
+                        "search.yahoo.com", "startpage.com", "perplexity.ai",
+                        "you.com", "kagi.com",
+                    }
+                    if _root in _SEARCH_HOSTS:
+                        # Extract query if possible, else use raw query
+                        import urllib.parse
+                        parsed = urllib.parse.urlparse(a.get("url", ""))
+                        qs = urllib.parse.parse_qs(parsed.query)
+                        q = qs.get("q", [a.get("title", "").replace("Search ", "")])[0]
+                        return SearchActionWidget(q)
                     return LinkActionWidget(a['title'], a['url'], a['description'])
                 elif a.get('type') == 'install':
-                    return InstallActionWidget(a['name'], a.get('website'))
+                    w = InstallActionWidget(a['name'], a.get('website'))
+                    w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
+                    return w
+                elif a.get('type') == 'uninstall':
+                    w = UninstallActionWidget(a['name'])
+                    w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
+                    return w
                 elif a.get('type') == 'open_app':
                     return AppActionWidget(a['name'])
                 elif a.get('type') == 'person':
                     return PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
                 elif a.get('type') == 'place':
-                    return PlaceActionWidget(a['name'], a['address'], a.get('image'), a.get('url'), a.get('latitude'), a.get('longitude'))
+                    # Use MapNavigationWidget for all places for consistent "Google Maps" style
+                    return MapNavigationWidget(a['name'], a.get('address'))
                 elif a.get('type') == 'status':
                     return StandardItemWidget(a['description'], icon_name="dialog-information")
                 elif a.get('type') == 'calc':
                     return CalcActionWidget(a['content'], a.get('equation', ''))
+                elif a.get('type') == 'currency':
+                    return CurrencyActionWidget(a.get('amount', '0'), a.get('from_unit', ''), a.get('to_unit', ''), a.get('converted_value', ''))
+                elif a.get('type') == 'weather':
+                    return WeatherActionWidget(a.get('location', ''), a.get('temp', ''), a.get('condition', ''))
+                elif a.get('type') == 'unit':
+                    return UnitActionWidget(a.get('amount', '0'), a.get('from_unit', ''), a.get('to_unit', ''), a.get('converted_value', ''))
+                elif a.get('type') == 'translate':
+                    return TranslateActionWidget(a.get('source_text', ''), a.get('from_lang', ''), a.get('to_lang', ''), a.get('translated_text', ''))
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
@@ -1505,6 +1669,9 @@ class OmniWindow(QWidget):
 
     def get_item_key(self, data):
         if not isinstance(data, dict): return None
+        if data.get('type') == 'wiki_card': return f"wiki:{data.get('title', '')}"
+        if data.get('type') == 'og_preview': return f"og:{data.get('url', '')}"
+        if data.get('type') == 'quick_url': return f"quick_url:{data.get('url', '')}"
         if data.get('type') == 'ask_omni': return 'ask_omni'
         if 'orig_name' in data and 'cmd' in data: return f"app:{data['orig_name']}" # App
         if data.get('type') == 'open_file': return f"file:{data.get('path')}"
@@ -1512,6 +1679,12 @@ class OmniWindow(QWidget):
         if data.get('type') == 'person': return f"person:{data.get('url') or data.get('name')}"
         if data.get('type') == 'place': return f"place:{data.get('url') or data.get('name')}"
         if data.get('type') == 'calc': return f"calc:{data.get('content')}"
+        if data.get('type') == 'currency': return f"currency:{data.get('amount')}_{data.get('from_unit')}"
+        if data.get('type') == 'weather': return f"weather:{data.get('location')}"
+        if data.get('type') == 'unit': return f"unit:{data.get('amount')}_{data.get('from_unit')}"
+        if data.get('type') == 'translate': return f"translate:{data.get('source_text')}_{data.get('to_lang')}"
+        if data.get('type') == 'install': return f"install:{data.get('name')}"
+        if data.get('type') == 'uninstall': return f"uninstall:{data.get('name')}"
         # Fallback for others
         return str(data)
 
@@ -1597,8 +1770,6 @@ class OmniWindow(QWidget):
                     new_item.setSizeHint(widget.sizeHint())
                     new_item.setData(Qt.ItemDataRole.UserRole, data)
                     
-
-                    
                     self.list_widget.insertItem(i, new_item)
                     
                     anim_w = SmoothEntryWidget(widget, animate=True)
@@ -1652,9 +1823,18 @@ class OmniWindow(QWidget):
         """Safely cleanup a worker thread by keeping a reference if it's still running."""
         worker = getattr(self, attr_name, None)
         if worker:
-            # Disconnect all signals to avoid side effects
-            try: worker.disconnect()
-            except: pass
+            # Disconnect known signals to avoid side effects and C++ "destroyed signal" warnings
+            signals = [
+                'results_found', 'action_found', 'wiki_result', 'no_result', 
+                'og_result', 'finished', 'failed', 'partial_response', 
+                'finished_speaking', 'error'
+            ]
+            for sig in signals:
+                if hasattr(worker, sig):
+                    try: 
+                        getattr(worker, sig).disconnect()
+                    except (TypeError, RuntimeError): 
+                        pass
             
             if worker.isRunning():
                 self.old_workers.append(worker)
@@ -1668,6 +1848,10 @@ class OmniWindow(QWidget):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
 
+        # Don't start action/search workers while AI is streaming a response
+        if self.ai_worker and self.ai_worker.isRunning():
+            return
+
         # Start Search Worker
         self.cleanup_worker('search_worker')
         self.search_worker = SearchWorker(query)
@@ -1679,8 +1863,15 @@ class OmniWindow(QWidget):
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
-        
-        # Start File Search Worker (NEW) - OPTIMIZED FOR SPEED
+
+        # Start Wikipedia Worker (parallel, fast ~200-400ms)
+        self.cleanup_worker('wiki_worker')
+        self.wiki_worker = WikiWorker(query)
+        self.wiki_worker.wiki_result.connect(self.on_wiki_result)
+        self.wiki_worker.no_result.connect(lambda _: None)  # Ignore no-result silently
+        self.wiki_worker.start()
+
+        # Start File Search Worker - OPTIMIZED FOR SPEED
         self.cleanup_worker('file_search_worker')
         self.file_search_worker = FileSearchWorker(query, max_results=8)  # Reduced for speed
         self.file_search_worker.results_found.connect(self.on_file_search_results)
@@ -1688,23 +1879,85 @@ class OmniWindow(QWidget):
 
     def on_search_results(self, results, query):
         if self.input_field.text().strip() != query: return
-        
+        if self.ai_worker and self.ai_worker.isRunning(): return
+
         self.external_search_results = results
         self.refresh_list(query, animate=False)
 
-    def on_action_found(self, actions, query):
+    def on_action_found(self, actions, chips, query):
         if self.input_field.text().strip() != query: return
-        
+        # Discard stale action results if AI is already running
+        if self.ai_worker and self.ai_worker.isRunning(): return
+
+        # Sort external actions to prioritize interactive cards
+        def action_priority(a):
+            t = a.get('type')
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit'): return 0
+            if t == 'link':
+                from urllib.parse import urlparse as _urlp
+                _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
+                _root = ".".join(_host.split(".")[-2:])
+                _SEARCH_HOSTS = {"duckduckgo.com", "google.com", "bing.com", "search.yahoo.com", "startpage.com", "perplexity.ai", "you.com", "kagi.com"}
+                if _root in _SEARCH_HOSTS: return 0
+            if t in ('place', 'person'): return 1
+            return 2
+
+        actions.sort(key=action_priority)
         self.external_actions = actions
+        self.og_data = None   # reset previous OG data when action changes
         self.refresh_list(query, animate=False)
-    
+
+        # For link-type actions start an OG preview fetch
+        if actions and actions[0].get("type") == "link":
+            link_url = actions[0].get("url", "")
+            if link_url and link_url.startswith("http"):
+                self.cleanup_worker("og_worker")
+                self.og_worker = OGWorker(link_url, query)
+                self.og_worker.og_result.connect(self.on_og_result)
+                self.og_worker.no_result.connect(lambda _q: None)
+                self.og_worker.start()
+
+    def on_og_result(self, og_data: dict, query: str):
+        """Handle Open Graph metadata — show website preview card."""
+        if self.input_field.text().strip() != query:
+            return
+        if self.ai_worker and self.ai_worker.isRunning(): return
+        self.og_data = og_data
+        self.refresh_list(query, animate=False)
+
+    def on_wiki_result(self, wiki_data: dict, query: str):
+        """Handle Wikipedia result — show a knowledge card."""
+        if self.input_field.text().strip() != query:
+            return
+        if self.ai_worker and self.ai_worker.isRunning(): return
+        self.wiki_data = wiki_data
+        self.refresh_list(query, animate=False)
+
     def on_file_search_results(self, results, query):
         """Handle file search results from the file search worker."""
         if self.input_field.text().strip() != query: return
-        
+        if self.ai_worker and self.ai_worker.isRunning(): return
+
         # Store in separate list to avoid overwrite by slow search_worker
         self.local_file_results = results
         self.refresh_list(query, animate=False)
+
+    def _on_chip_clicked(self, action: dict):
+        """Execute a fast action chip's action."""
+        action_type = action.get("type")
+        if action_type == "link":
+            url = action.get("url", "")
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+                self.animate_close()
+        elif action_type == "copy_text":
+            text = action.get("text", "")
+            if text:
+                QGuiApplication.clipboard().setText(text)
+        elif action_type == "ask_omni":
+            self.perform_ai_query(action.get("query", ""))
+        else:
+            logging.warning(f"Unknown chip action type: {action_type}")
 
     def on_entered(self, item=None):
         # We assume manual entry if on_entered is called
@@ -1727,7 +1980,26 @@ class OmniWindow(QWidget):
         data = item.data(Qt.ItemDataRole.UserRole)
         
         if isinstance(data, dict):
-            if data.get('type') == 'link':
+            if data.get('type') == 'quick_url':
+                url = data.get('url', '')
+                if url:
+                    QDesktopServices.openUrl(QUrl(url))
+                    self.animate_close()
+                return
+            elif data.get('type') == 'og_preview':
+                url = data.get('url', '')
+                if url:
+                    QDesktopServices.openUrl(QUrl(url))
+                    self.animate_close()
+                return
+            elif data.get('type') == 'wiki_card':
+                # Enter on wiki card opens the Wikipedia article
+                url = data.get('url', '')
+                if url:
+                    QDesktopServices.openUrl(QUrl(url))
+                    self.animate_close()
+                return
+            elif data.get('type') == 'link':
                 QDesktopServices.openUrl(QUrl(data['url']))
                 self.animate_close()
             elif data.get('type') in ('person', 'place'):
@@ -1736,7 +2008,11 @@ class OmniWindow(QWidget):
                     QDesktopServices.openUrl(QUrl(url))
                 self.animate_close()
             elif data.get('type') == 'install':
-                self.start_install(data['name'])
+                # Installation is now handled interactively by the InstallActionWidget's yes/no buttons.
+                return
+            elif data.get('type') == 'uninstall':
+                # Uninstallation is handled interactively by the UninstallActionWidget's yes/no buttons.
+                return
             elif data.get('type') == 'open_app':
                 # Launch App (from Regex Shortcut)
                 app_name = data.get('name')
@@ -1772,6 +2048,16 @@ class OmniWindow(QWidget):
                     logging.error(f"Failed to execute command '{data['cmd']}': {e}")
             elif data.get('type') == 'ask_omni':
                 self.perform_ai_query(data['query'])
+            elif data.get('type') == 'translate':
+                text = data.get('translated_text', '')
+                if text:
+                    QGuiApplication.clipboard().setText(text)
+                self.animate_close()
+            elif data.get('type') == 'currency':
+                text = data.get('converted_value', '')
+                if text:
+                    QGuiApplication.clipboard().setText(text)
+                self.animate_close()
         else:
             # Fallback
             query = self.input_field.text().strip()
@@ -1813,20 +2099,37 @@ class OmniWindow(QWidget):
         except Exception as e:
             logging.error(f"Error toggling preview: {e}")
 
-    def start_install(self, app_name):
-        self.list_widget.clear()
+    def start_install(self, app_name, source_widget=None):
+        if not source_widget:
+            self.list_widget.clear()
+        # Do NOT touch input_field text — it would create ghost user bubbles
         self.input_field.setDisabled(True)
-        self.input_field.setText(f"Installing {app_name}...")
+        self._installing_app_name = app_name
         
         # Add Progress Widget
-        self.install_widget = InstallProgressWidget(app_name)
+        current_theme = getattr(self, '_current_theme', 'dark')
+        self.install_widget = InstallProgressWidget(app_name, theme=current_theme)
         self.install_widget.candidate_confirmed.connect(self.on_install_candidate_confirmed)
         
-        item = QListWidgetItem()
-        item.setSizeHint(self.install_widget.sizeHint())
-        self.list_widget.addItem(item)
-        self.list_widget.setItemWidget(item, self.install_widget)
-        self.adjust_window_height()
+        if source_widget:
+            if self.is_history_mode:
+                # In chat mode: list is reversed, so insert at 0 = top (newest)
+                self.insert_list_item(0, self.install_widget, "install_progress", animation="fade")
+            else:
+                # Normal mode: add at bottom
+                self.add_list_item(self.install_widget, "install_progress", animation="fade")
+            QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
+            is_chat = self.is_history_mode
+            if is_chat:
+                QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
+                    self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
+                ))
+        else:
+            item = QListWidgetItem()
+            item.setSizeHint(self.install_widget.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, self.install_widget)
+            self.adjust_window_height()
         
         # Start Orchestrator
         self.install_worker = InstallOrchestrator(app_name)
@@ -1834,15 +2137,87 @@ class OmniWindow(QWidget):
         self.install_worker.log_entry.connect(self.install_widget.add_log)
         self.install_worker.finished.connect(self.install_widget.set_finished)
         self.install_worker.candidates_found.connect(self.install_widget.show_candidates)
+        self.install_worker.finished.connect(self._on_install_finished)
         self.install_worker.start()
 
+    def _on_install_finished(self, success, msg):
+        self.input_field.setDisabled(False)
+        self.input_field.setPlaceholderText("Ask a follow-up...")
+        self.input_field.setFocus()
+        app_name = getattr(self, '_installing_app_name', 'the app')
+        display_name = app_name.replace('-', ' ').title()
+        if success:
+            self.perform_silent_ai_query(
+                f"[SYSTEM] Installation of {display_name} has just completed successfully. "
+                f"Confirm this to the user in one short friendly sentence and suggest a next step (e.g. open the app)."
+            )
+        else:
+            self.perform_silent_ai_query(
+                f"[SYSTEM] Installation of {display_name} failed. Error: {msg}. "
+                f"Inform the user briefly and suggest what they can do to fix the issue."
+            )
+        
     def on_install_candidate_confirmed(self, pkg_data):
         # Restart orchestrator with forced package
         self.install_worker = InstallOrchestrator(pkg_data['name'], forced_package=pkg_data)
         self.install_worker.status_update.connect(self.install_widget.update_status)
         self.install_worker.log_entry.connect(self.install_widget.add_log)
         self.install_worker.finished.connect(self.install_widget.set_finished)
+        self.install_worker.finished.connect(self._on_install_finished)  # was missing — caused input to stay disabled
         self.install_worker.start()
+
+    def start_uninstall(self, app_name, source_widget=None):
+        if not source_widget:
+            self.list_widget.clear()
+        # Do NOT touch input_field text — it would create ghost user bubbles
+        self.input_field.setDisabled(True)
+        self._uninstalling_app_name = app_name
+
+        # Add Progress Widget
+        current_theme = getattr(self, '_current_theme', 'dark')
+        self.uninstall_widget = UninstallProgressWidget(app_name, theme=current_theme)
+
+        if source_widget:
+            if self.is_history_mode:
+                self.insert_list_item(0, self.uninstall_widget, "uninstall_progress", animation="fade")
+            else:
+                self.add_list_item(self.uninstall_widget, "uninstall_progress", animation="fade")
+            QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
+            if self.is_history_mode:
+                QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
+                    self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
+                ))
+        else:
+            item = QListWidgetItem()
+            item.setSizeHint(self.uninstall_widget.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, self.uninstall_widget)
+            self.adjust_window_height()
+
+        # Start Orchestrator
+        self.uninstall_worker = UninstallOrchestrator(app_name)
+        self.uninstall_worker.status_update.connect(self.uninstall_widget.update_status)
+        self.uninstall_worker.log_entry.connect(self.uninstall_widget.add_log)
+        self.uninstall_worker.finished.connect(self.uninstall_widget.set_finished)
+        self.uninstall_worker.finished.connect(self._on_uninstall_finished)
+        self.uninstall_worker.start()
+
+    def _on_uninstall_finished(self, success, msg):
+        self.input_field.setDisabled(False)
+        self.input_field.setPlaceholderText("Ask a follow-up...")
+        self.input_field.setFocus()
+        app_name = getattr(self, '_uninstalling_app_name', 'the app')
+        display_name = app_name.replace('-', ' ').title()
+        if success:
+            self.perform_silent_ai_query(
+                f"[SYSTEM] Uninstallation of {display_name} has just completed successfully. "
+                f"Confirm this to the user in one short friendly sentence."
+            )
+        else:
+            self.perform_silent_ai_query(
+                f"[SYSTEM] Uninstallation of {display_name} failed. Error: {msg}. "
+                f"Inform the user briefly and suggest what they can try."
+            )
 
     def abort_ai_generation(self):
         """Abort current AI generation and restore UI state."""
@@ -1979,7 +2354,40 @@ class OmniWindow(QWidget):
             logging.info("Screenshot worker started with 5-second timeout")
         else:
             self.start_ai_worker(query, None)
-    
+
+    def perform_silent_ai_query(self, system_query):
+        """Send a query to AI and show only the AI response — no user bubble created."""
+        self.debounce_timer.stop()
+        self._current_query = system_query
+        self.input_field.setReadOnly(True)
+        self.cleanup_worker('search_worker')
+        self.cleanup_worker('action_worker')
+
+        import src.services.llm.model_manager as mm
+        mm.abort_fast_event.set()
+
+        self._streaming_answer_widget = None
+
+        # In follow-up / chat mode: just add an answer widget with no user bubble
+        if self.is_history_mode:
+            if self.list_widget.count() > 0:
+                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
+            answer_widget = AnswerWidget("", query_text=None, chat_mode=True)
+            answer_widget.set_query_visible(False)
+            self._streaming_answer_widget = answer_widget
+            self.insert_list_item(0, answer_widget, "answer", animation="instant")
+            if self.list_widget.count() > 0:
+                self.list_widget.scrollToItem(self.list_widget.item(0))
+            QTimer.singleShot(0, answer_widget.update_item_size)
+        else:
+            self.thinking_widget = ThinkingWidget("")
+            self.add_list_item(self.thinking_widget, "thinking")
+
+        self.frame.set_minimal_mode(False)
+        self.logo_label.boost_speed()
+        self.adjust_window_height()
+        self.start_ai_worker(system_query, None)
+
     def _handle_screenshot_timeout(self):
         """Handle screenshot operation timeout."""
         if self.screenshot_worker and self.screenshot_worker.isRunning():
@@ -2206,23 +2614,46 @@ class OmniWindow(QWidget):
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'place':
-                            w = PlaceActionWidget(
-                                act['name'],
-                                act.get('address', ''),
-                                act.get('image'),
-                                act.get('url'),
-                                act.get('latitude'),
-                                act.get('longitude')
-                            )
+                            w = MapNavigationWidget(act['name'], act.get('address'))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'install':
                             w = InstallActionWidget(act['name'], act.get('website'))
+                            w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
                             self.insert_list_item(insert_pos, w, act, animation="fade")
+                            insert_pos += 1
+                        elif act.get('type') == 'uninstall':
+                            w = UninstallActionWidget(act['name'])
+                            w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
+                            self.insert_list_item(insert_pos, w, act, animation="fade")
+                            insert_pos += 1
+                        elif act.get('type') == 'open_app':
+                            w = AppActionWidget(act['name'])
+                            def launch_app(name, widget):
+                                success, msg = find_and_launch_app(name)
+                                self.animate_close()
+                            w.app_accepted.connect(launch_app)
+                            self.insert_list_item(insert_pos, w, act, animation="fade")
+                            insert_pos += 1
+                        elif act.get('type') == 'weather':
+                            w = WeatherActionWidget(act.get('location', ''), act.get('temp', ''), act.get('condition', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'unit':
+                            w = UnitActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'status':
                             w = StandardItemWidget(act['description'], icon_name="dialog-information")
                             self.insert_list_item(insert_pos, w, act, animation="fade")
+                            insert_pos += 1
+                        elif act.get('type') == 'currency':
+                            w = CurrencyActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'translate':
+                            w = TranslateActionWidget(act.get('source_text', ''), act.get('from_lang', ''), act.get('to_lang', ''), act.get('translated_text', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'system_settings':
                             try:
@@ -2240,6 +2671,8 @@ class OmniWindow(QWidget):
                             except Exception as _te:
                                 logging.warning(f"[settings] Failed to add settings widget: {_te}")
                         elif act.get('type') == 'terminal_command':
+                            if not act.get('command', '').strip():
+                                continue
                             w = TerminalActionWidget(
                                 command=act.get('command', ''),
                                 description=act.get('description', ''),
@@ -2479,7 +2912,25 @@ class OmniWindow(QWidget):
                     add_item(w, act, anim="pop")
                 elif act.get('type') == 'install':
                     w = InstallActionWidget(act['name'], act.get('website'))
+                    w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
                     add_item(w, act, anim="fade")
+                elif act.get('type') == 'uninstall':
+                    w = UninstallActionWidget(act['name'])
+                    w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
+                    add_item(w, act, anim="fade")
+                elif act.get('type') == 'open_app':
+                    w = AppActionWidget(act['name'])
+                    def launch_app(name, widget):
+                        success, msg = find_and_launch_app(name)
+                        self.animate_close()
+                    w.app_accepted.connect(launch_app)
+                    add_item(w, act, anim="fade")
+                elif act.get('type') == 'weather':
+                    w = WeatherActionWidget(act.get('location', ''), act.get('temp', ''), act.get('condition', ''))
+                    add_item(w, act, anim="pop")
+                elif act.get('type') == 'unit':
+                    w = UnitActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                    add_item(w, act, anim="pop")
                 elif act.get('type') == 'status':
                     w = StandardItemWidget(act['description'], icon_name="dialog-information")
                     add_item(w, act, anim="fade")
@@ -2498,6 +2949,8 @@ class OmniWindow(QWidget):
                     except Exception as _te:
                         logging.warning(f"[settings] Failed to show settings widget: {_te}")
                 elif act.get('type') == 'terminal_command':
+                    if not act.get('command', '').strip():
+                        continue
                     w = TerminalActionWidget(
                         command=act.get('command', ''),
                         description=act.get('description', ''),

@@ -283,6 +283,8 @@ class SmoothEntryWidget(QWidget):
                 self.h_anim.valueChanged.connect(
                     lambda v, it=_item: it.setSizeHint(QSize(-1, int(v)))
                 )
+                
+            self.h_anim.finished.connect(lambda: self.setMaximumHeight(16777215))
 
             self.anim_group = QParallelAnimationGroup()
             self.anim_group.addAnimation(self.op_anim)
@@ -787,19 +789,44 @@ class _BubbleInner(QWidget):
 
             if has_text:
                 self.edit.document().setTextWidth(inner_w)
+                
+                # Fit width to content (idealWidth)
+                ideal_w = int(self.edit.document().idealWidth()) + 5
+                
+                min_content_w = 60
+                if placeholder_h > 0 and self.thinking_placeholder:
+                    min_content_w = max(min_content_w, self.thinking_placeholder.sizeHint().width() + 10)
+                if extra_h > 0:
+                    min_content_w = max(min_content_w, 200) # Give CollapsibleThinkingWidget room
+                
+                used_inner_w = max(min_content_w, min(ideal_w, inner_w))
+                
+                # Re-layout text edit with actual smaller width for accurate height
+                self.edit.document().setTextWidth(used_inner_w)
                 doc_h = int(self.edit.document().size().height())
+                
                 if doc_h <= 0:
-                    # Document not yet laid out — estimate from line count
                     doc_h = max(self.edit.fontMetrics().height() + 8, 24)
-                self.edit.setFixedHeight(doc_h)
+                
+                self.edit.setFixedSize(used_inner_w, doc_h)
+                
+                used_max_w = used_inner_w + 2 * self.PADDING_H
+                self.setFixedWidth(used_max_w)
+                
                 total_h = doc_h + extra_h + placeholder_h + 2 * self.PADDING_V
-                return QSize(max_w, max(total_h, 36))
+                return QSize(used_max_w, max(total_h, 36))
             elif extra_h > 0:
+                used_inner_w = min(250, inner_w)
+                used_max_w = used_inner_w + 2 * self.PADDING_H
+                self.setFixedWidth(used_max_w)
                 total_h = extra_h + 2 * self.PADDING_V
-                return QSize(max_w, max(total_h, 36))
+                return QSize(used_max_w, max(total_h, 36))
             elif placeholder_h > 0:
+                min_content_w = max(60, self.thinking_placeholder.sizeHint().width() + 10)
+                used_max_w = min_content_w + 2 * self.PADDING_H
+                self.setFixedWidth(used_max_w)
                 total_h = placeholder_h + 2 * self.PADDING_V
-                return QSize(max_w, max(total_h, 36))
+                return QSize(used_max_w, max(total_h, 36))
             else:
                 return QSize(max_w, 0)
         else:
@@ -808,14 +835,18 @@ class _BubbleInner(QWidget):
             text = self.label.text()
             fm = QFontMetrics(self.label.font())
             if text:
-                single_line_w = fm.horizontalAdvance(text)
+                # Add a few pixels for overhangs to prevent trailing cutoff
+                single_line_w = fm.horizontalAdvance(text) + 8
                 natural_inner_w = min(single_line_w, inner_w)
                 # Compute height at this natural width (may wrap for very long text)
                 from PyQt6.QtCore import Qt as _Qt
                 rect = fm.boundingRect(0, 0, natural_inner_w, 100000,
                                        _Qt.TextFlag.TextWordWrap, text)
+                
+                # If wrapped, boundingRect might be narrower than natural_inner_w
+                # We use the wider bounding width to wrap smoothly
+                use_inner_w = min(natural_inner_w, rect.width() + 8)
                 h = rect.height()
-                use_inner_w = natural_inner_w
             else:
                 use_inner_w = 60
                 h = fm.height()
@@ -1401,3 +1432,5 @@ class GradientBorderFrame(QFrame):
             painter.setOpacity(self._mode_progress)
             painter.strokePath(border_path, QPen(QBrush(grad), 3))
             painter.setOpacity(1.0)
+
+

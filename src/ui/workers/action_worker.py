@@ -3,10 +3,13 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from src.core.config import ACTION_URL
 
 class ActionWorker(QThread):
-    action_found = pyqtSignal(object, str)
+    # (actions, chips, query)
+    action_found = pyqtSignal(object, object, str)
+
     def __init__(self, query):
         super().__init__()
         self.query = query
+
     def run(self):
         try:
             import logging
@@ -15,10 +18,12 @@ class ActionWorker(QThread):
             r = requests.post(ACTION_URL, json={"query": self.query}, timeout=90)
             data = r.json()
             actions = data.get("actions", [])
-            if not actions and data.get("action"): actions = [data.get("action")]
-            logging.info(f"ActionWorker: Found {len(actions)} actions for '{self.query}'")
-            self.action_found.emit(actions, self.query)
+            if not actions and data.get("action"):
+                actions = [data.get("action")]
+            chips = data.get("chips", [])
+            logging.info(f"ActionWorker: Found {len(actions)} actions, {len(chips)} chips for '{self.query}'")
+            self.action_found.emit(actions, chips, self.query)
         except Exception as e:
             import logging
             logging.error(f"ActionWorker Error: {e}")
-            self.action_found.emit([], self.query)
+            self.action_found.emit([], [], self.query)

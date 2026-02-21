@@ -286,6 +286,44 @@ def _split_thinking_and_answer(text):
     
     return "", text
 
+
+def _run_terminal_commands(actions: list) -> list:
+    """Execute all terminal_command actions in-place and return output strings for LLM feedback."""
+    results = []
+    for act in actions:
+        if act.get('type') != 'terminal_command':
+            continue
+        cmd = act.get('command', '').strip()
+        if not cmd:
+            continue
+        try:
+            proc = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=15
+            )
+            act['stdout'] = proc.stdout.strip()
+            act['stderr'] = proc.stderr.strip()
+            act['returncode'] = proc.returncode
+            act['success'] = proc.returncode == 0
+            logging.info(f"[terminal] {cmd!r} → rc={proc.returncode} out={proc.stdout[:200]!r}")
+            entry = f"$ {cmd}"
+            if proc.stdout.strip():
+                entry += f"\n{proc.stdout.strip()}"
+            if proc.stderr.strip():
+                entry += f"\nSTDERR: {proc.stderr.strip()}"
+            results.append(entry)
+        except subprocess.TimeoutExpired:
+            act['success'] = False
+            act['stdout'] = ''
+            act['stderr'] = 'Timed out after 15s'
+            results.append(f"$ {cmd}\nERROR: command timed out after 15 seconds")
+        except Exception as e:
+            act['success'] = False
+            act['stdout'] = ''
+            act['stderr'] = str(e)
+            results.append(f"$ {cmd}\nERROR: {e}")
+    return results
+
+
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
     abort_fast_event.set()
@@ -468,7 +506,18 @@ Location: {user_loc} | Date: {current_date}
 
 **Open application**
 {{"type": "open_app", "name": "google-chrome"}}
-→ "browser"/"chrome" → "google-chrome". Respond in ≤3 words: "Opening Chrome." No questions, no choices.
+→ "browser"/"chrome" → "google-chrome". This will prompt the user if they want to launch the app.
+
+**Install application**
+{{"type": "install", "name": "libreoffice"}}
+→ ALWAYS use this — never use terminal_command for installs.
+→ Your text answer MUST be ONLY a short question like: "Pobrać Steam?" or "Install Discord?" — no explanations.
+
+**Uninstall application**
+{{"type": "uninstall", "name": "steam"}}
+→ ALWAYS use this — never use terminal_command for uninstalls.
+→ Your text answer MUST be ONLY a short question like: "Odinstalować Steam?" or "Remove Discord?" — no explanations.
+→ Use when Mikołaj asks to remove, uninstall, delete, or odinstaluj any app.
 
 **Open URL** (ONLY links from Context data above — never invent)
 {{"type": "open_url", "url": "https://..."}}
@@ -666,12 +715,15 @@ Available settings and values:
                     # Split into thinking (collapsible, gray) and answer (main text) for UI
                     inline_thinking, answer_so_far = _split_thinking_and_answer(accumulated_text)
                     
+                    # Strip actions from streamed answer to prevent flashing JSON and TTS reading it
+                    ans_clean, _, _ = extract_actions(answer_so_far) if answer_so_far else ("", [], "")
+                    
                     # Combine external (field) and inline (tag) thinking
                     combined_thinking = external_thinking + inline_thinking
                     
-                    # Yield partial whenever we have thinking or answer (so UI can stream both)
-                    if combined_thinking or answer_so_far:
-                        yield ("partial", {"thinking": combined_thinking, "answer": answer_so_far})
+                    # Yield partial whenever we have thinking or answer
+                    if combined_thinking or ans_clean:
+                        yield ("partial", {"thinking": combined_thinking, "answer": ans_clean})
 
                 # Final processing: use the split result and then extract actions from answer only
                 inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
@@ -680,6 +732,60 @@ Available settings and values:
                 # Now extract actions/JSON from the answer text only (not from thinking)
                 answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
                 logging.info(f"[STREAM] final raw length={len(accumulated_text)}, thinking length={len(thinking_content)}, answer length={len(answer)}, actions count={len(actions)}")
+
+                # ── Terminal feedback loop (streaming) ──────────────────────
+                terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
+                if terminal_actions:
+                    desc_list = [a.get('description', '') for a in terminal_actions if a.get('description')]
+                    checking_msg = desc_list[0] if desc_list else "Wykonywanie komendy..."
+                    temp_thinking = thinking_content + f"\n\n⚙️ {checking_msg}" if thinking_content else f"⚙️ {checking_msg}"
+                    yield ("partial", {"thinking": temp_thinking, "answer": answer})
+                    
+                    cmd_outputs = _run_terminal_commands(terminal_actions)
+                    if cmd_outputs:
+                        tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
+                        logging.info(f"[terminal] streaming second pass ({len(cmd_outputs)} cmd(s))")
+                        messages.append({"role": "assistant", "content": accumulated_text})
+                        messages.append({"role": "user", "content": tool_feedback})
+                        if hasattr(model_manager.llm, 'reset'):
+                            model_manager.llm.reset()
+                        streamer2 = model_manager.llm.create_chat_completion(
+                            messages=messages, max_tokens=1024, temperature=0.6, stream=True
+                        )
+                        accumulated_text2 = ""
+                        external_thinking2 = ""
+                        for chunk2 in streamer2:
+                            if model_manager.abort_fast_event.is_set():
+                                break
+                            if hasattr(chunk2, 'choices') and chunk2.choices:
+                                delta2 = chunk2.choices[0].delta
+                                token2 = (delta2.content or "") if hasattr(delta2, 'content') else ""
+                                rt2 = ""
+                                if hasattr(delta2, 'reasoning_content') and delta2.reasoning_content:
+                                    rt2 = delta2.reasoning_content
+                                elif hasattr(delta2, 'model_extra') and delta2.model_extra:
+                                    rt2 = delta2.model_extra.get('reasoning_content', '')
+                            else:
+                                delta2_dict = (chunk2 or {}).get('choices', [{}])[0].get('delta', {}) if isinstance(chunk2, dict) else {}
+                                token2 = delta2_dict.get('content', '')
+                                rt2 = delta2_dict.get('reasoning_content', '')
+                            if rt2:
+                                external_thinking2 += rt2
+                            accumulated_text2 += token2
+                            it2, ans2_so_far = _split_thinking_and_answer(accumulated_text2)
+                            ct2 = external_thinking2 + it2
+                            ans_clean2, _, _ = extract_actions(ans2_so_far) if ans2_so_far else ("", [], "")
+                            
+                            if ct2 or ans_clean2:
+                                yield ("partial", {"thinking": thinking_content + ct2, "answer": ans_clean2})
+                        it2, answer_text2 = _split_thinking_and_answer(accumulated_text2)
+                        answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (accumulated_text2, [], "")
+                        if answer2:
+                            answer = answer2
+                        non_terminal = [a for a in actions if a.get('type') != 'terminal_command']
+                        actions = terminal_actions + non_terminal + actions2
+                # ───────────────────────────────────────────────────────────
+
                 yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
             else:
                 # Non-streaming mode (original behavior)
@@ -707,6 +813,32 @@ Available settings and values:
 
                 if not thinking_content and not answer:
                     answer = full_text
+
+                # ── Terminal feedback loop ──────────────────────────────────
+                terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
+                if terminal_actions:
+                    cmd_outputs = _run_terminal_commands(terminal_actions)
+                    if cmd_outputs:
+                        tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
+                        logging.info(f"[terminal] feeding back to LLM ({len(cmd_outputs)} cmd(s))")
+                        messages.append({"role": "assistant", "content": full_text})
+                        messages.append({"role": "user", "content": tool_feedback})
+                        if hasattr(model_manager.llm, 'reset'):
+                            model_manager.llm.reset()
+                        out2 = model_manager.llm.create_chat_completion(
+                            messages=messages, max_tokens=1024, temperature=0.6
+                        )
+                        msg2 = out2['choices'][0]['message']
+                        full_text2 = msg2['content'].strip()
+                        if full_text2.startswith(':'):
+                            full_text2 = full_text2[1:].strip()
+                        _, answer_text2 = _split_thinking_and_answer(full_text2)
+                        answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (full_text2, [], "")
+                        if answer2:
+                            answer = answer2
+                        non_terminal = [a for a in actions if a.get('type') != 'terminal_command']
+                        actions = terminal_actions + non_terminal + actions2
+                # ───────────────────────────────────────────────────────────
 
                 return {"answer": answer, "actions": actions, "thinking": thinking_content}
 
@@ -795,30 +927,6 @@ Available settings and values:
              except Exception as e:
                  logging.error(f"Failed to execute system settings: {e}")
 
-        if act.get('type') == 'terminal_command':
-            cmd = act.get('command', '').strip()
-            if cmd:
-                try:
-                    result = subprocess.run(
-                        cmd, shell=True, capture_output=True, text=True, timeout=15
-                    )
-                    act['stdout'] = result.stdout.strip()
-                    act['stderr'] = result.stderr.strip()
-                    act['returncode'] = result.returncode
-                    act['success'] = result.returncode == 0
-                    logging.info(
-                        f"[terminal] cmd={cmd!r} rc={result.returncode} "
-                        f"out={result.stdout[:120]!r} err={result.stderr[:80]!r}"
-                    )
-                except subprocess.TimeoutExpired:
-                    act['success'] = False
-                    act['stdout'] = ''
-                    act['stderr'] = 'Command timed out (15s)'
-                    logging.warning(f"[terminal] timed out: {cmd!r}")
-                except Exception as e:
-                    act['success'] = False
-                    act['stdout'] = ''
-                    act['stderr'] = str(e)
-                    logging.error(f"[terminal] error: {e}")
+        # terminal_command actions are now executed inside the LLM feedback loop above.
 
     return {"answer": answer, "actions": actions, "thinking": thinking_content}

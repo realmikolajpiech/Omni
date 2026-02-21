@@ -222,6 +222,58 @@ def search_endpoint():
 
     return jsonify({"results": results})
 
+def _chip_site_name(url: str) -> str:
+    """'https://www.tesla.com/path' → 'Tesla'"""
+    _KNOWN = {
+        "wikipedia": "Wikipedia",
+        "youtube": "YouTube",
+        "youtu": "YouTube",
+        "duckduckgo": "DuckDuckGo",
+        "google": "Google",
+        "google": "Google",
+        "github": "GitHub",
+        "reddit": "Reddit",
+        "twitter": "Twitter",
+        "x": "X",
+        "instagram": "Instagram",
+        "linkedin": "LinkedIn",
+        "facebook": "Facebook",
+        "amazon": "Amazon",
+        "apple": "Apple",
+        "microsoft": "Microsoft",
+    }
+    try:
+        from urllib.parse import urlparse as _up
+        host = _up(url).netloc.lower().replace("www.", "")
+        # For subdomains like "en.wikipedia.org" → use second part as key
+        parts = host.split(".")
+        key = parts[-2] if len(parts) >= 2 else parts[0]
+        return _KNOWN.get(key, key.title()) if key else "Site"
+    except Exception:
+        return "Site"
+
+
+_SEARCH_ENGINE_HOSTS = frozenset({
+    "duckduckgo.com", "google.com", "bing.com", "search.yahoo.com",
+    "startpage.com", "brave.com", "search.brave.com", "perplexity.ai",
+    "you.com", "kagi.com",
+})
+
+
+def _is_search_engine_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse as _up
+        host = _up(url).netloc.lower().replace("www.", "")
+        # also handle subdomains like search.google.com
+        parts = host.split(".")
+        root = ".".join(parts[-2:]) if len(parts) >= 2 else host
+        return root in _SEARCH_ENGINE_HOSTS
+    except Exception:
+        return False
+
+
+
+
 @api_bp.route('/action', methods=['POST'])
 def action_endpoint():
     # Create a unique request ID
@@ -245,7 +297,7 @@ def action_endpoint():
     # If so, this action request should be aborted immediately
     if model_manager.abort_fast_event.is_set():
         logging.info(f"Action endpoint {request_id}: Abort event already set, skipping action request")
-        return jsonify({"actions": []})
+        return jsonify({"actions": [], "chips": []})
     
     # Clear abort event for this new request to proceed
     # (set() was only for cancelling the old request)
@@ -254,10 +306,10 @@ def action_endpoint():
     model_manager.ensure_fast_model()
 
     try: req = request.get_json(force=True)
-    except: return jsonify({"actions": []}), 400
+    except: return jsonify({"actions": [], "chips": []}), 400
 
     query = req.get('query', "").strip()
-    if not query: return jsonify({"actions": []})
+    if not query: return jsonify({"actions": [], "chips": []})
 
     logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
     
@@ -271,7 +323,8 @@ def action_endpoint():
                 "description": f"Direct Shortcut"
             }
         logging.info(f"Shortcut match: {url}")
-        return jsonify({"action": act, "actions": [act]})
+        chips = []
+        return jsonify({"action": act, "actions": [act], "chips": chips})
 
     # 1.5 System Settings (instant – no LLM needed)
     import re
@@ -280,7 +333,7 @@ def action_endpoint():
         settings_act = detect_settings_command(query)
         if settings_act:
             logging.info(f"[settings] Fast-path action detected: {settings_act['setting']}")
-            return jsonify({"actions": [settings_act], "action": settings_act})
+            return jsonify({"actions": [settings_act], "action": settings_act, "chips": []})
     except Exception as _e:
         logging.warning(f"[settings] detect_settings_command failed: {_e}")
 
@@ -288,7 +341,7 @@ def action_endpoint():
     cc_keywords = ["click", "type", "scroll", "press", "copy", "paste", "move mouse", "drag", "select"]
     if any(k in query.lower() for k in cc_keywords):
         logging.info("Computer Control keyword detected. Skipping Fast Model.")
-        return jsonify({"actions": []})
+        return jsonify({"actions": [], "chips": []})
 
     # 1.7 Regex Shortcuts (Speed Optimization)
     # Open App
@@ -300,15 +353,30 @@ def action_endpoint():
              pass # Let LLM handle it as OPEN:url
         else:
              logging.info(f"Regex Open App: {app}")
-             # We just RETURN the action, UI handles execution on Enter
-             return jsonify({"actions": [{"type": "open_app", "name": app}]})
+             act = {"type": "open_app", "name": app}
+             return jsonify({"actions": [act], "chips": []})
     
     # Install
-    install_match = re.search(r"^install\s+(.+)$", query, re.IGNORECASE)
+    install_match = re.search(
+        r"^(?:install|zainstaluj|pobierz|pobierać|ściągnij|sciagnij|download)\s+(.+)$",
+        query, re.IGNORECASE
+    )
     if install_match:
         app = install_match.group(1).strip()
         logging.info(f"Regex Install: {app}")
-        return jsonify({"actions": [{"type": "install", "name": app}]})
+        act = {"type": "install", "name": app}
+        return jsonify({"actions": [act], "chips": []})
+
+    # Uninstall
+    uninstall_match = re.search(
+        r"^(?:uninstall|remove|delete|odinstaluj|usuń|usun|skasuj|wykasuj|odinstalowywać)\s+(.+)$",
+        query, re.IGNORECASE
+    )
+    if uninstall_match:
+        app = uninstall_match.group(1).strip()
+        logging.info(f"Regex Uninstall: {app}")
+        act = {"type": "uninstall", "name": app}
+        return jsonify({"actions": [act], "chips": []})
 
     # 1.7.5 Implicit Calculation
     # Check for simple math expressions like "12*3", "100/4", "5+5", "10-2"
@@ -328,7 +396,8 @@ def action_endpoint():
                          val = res.split("Result: ")[1].strip() if "Result: " in res else res
                          logging.info(f"Implicit Calc: {query} -> {val}")
                          # Return immediately to avoid search
-                         return jsonify({"actions": [{"type": "calc", "content": val, "equation": query}]})
+                         calc_act = {"type": "calc", "content": val, "equation": query}
+                         return jsonify({"actions": [calc_act], "chips": []})
                  except: pass
 
     # Calculate (Explicit)
@@ -338,8 +407,9 @@ def action_endpoint():
         res = perform_calculation(expr)
         val = res.split("Result: ")[1].strip() if "Result: " in res else res
         logging.info(f"Regex Calc: {expr} -> {val}")
-        return jsonify({"actions": [{"type": "calc", "content": val, "equation": expr}]})
-        
+        calc_act2 = {"type": "calc", "content": val, "equation": expr}
+        return jsonify({"actions": [calc_act2], "chips": []})
+
     # Open URL
     url_match = re.search(r"^(?:open|go to|visit)\s+(https?://[^\s]+|www\.[^\s]+|[a-z0-9]+\.[a-z]{2,}[^\s]*)$", query, re.IGNORECASE)
     if url_match:
@@ -347,7 +417,85 @@ def action_endpoint():
         if not url.startswith("http"): url = "https://" + url
         logging.info(f"Regex URL: {url}")
         title = url.replace("https://", "").replace("www.", "").split('/')[0]
-        return jsonify({"actions": [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]})
+        link_act = {"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}
+        return jsonify({"actions": [link_act], "chips": []})
+
+    # 1.75 Currency Conversion Fast Path (regex → live rate, no LLM needed)
+    _CURRENCY_RE = re.compile(
+        r'^(?:convert\s+)?(\d+(?:[.,]\d+)?)\s*([a-zA-Z]{2,4})\s+(?:to|in|na|w|do|auf|en|à)\s+([a-zA-Z]{2,4})$',
+        re.IGNORECASE
+    )
+    curr_m = _CURRENCY_RE.match(query.strip())
+    if curr_m:
+        amount_raw = curr_m.group(1).replace(',', '.')
+        from_unit = curr_m.group(2).upper()
+        to_unit = curr_m.group(3).upper()
+        converted = ""
+        try:
+            import requests as _req
+            resp = _req.get(
+                f"https://api.frankfurter.app/latest?amount={amount_raw}&from={from_unit}&to={to_unit}",
+                timeout=4
+            )
+            if resp.status_code == 200:
+                rv = resp.json().get("rates", {}).get(to_unit)
+                if rv is not None:
+                    converted = f"{rv:,.2f}"
+        except Exception as _ce:
+            logging.warning(f"Currency API: {_ce}")
+        if converted:
+            logging.info(f"Regex Currency: {amount_raw} {from_unit} -> {converted} {to_unit}")
+            return jsonify({"actions": [{"type": "currency", "amount": amount_raw,
+                                         "from_unit": from_unit, "to_unit": to_unit,
+                                         "converted_value": converted}], "chips": []})
+
+    # 1.76 Translate Fast Path — short phrase with non-ASCII letters (clearly foreign)
+    def _looks_foreign(text: str) -> bool:
+        words = text.strip().split()
+        return 1 <= len(words) <= 4 and any(ord(c) > 127 and c.isalpha() for c in text)
+
+    if _looks_foreign(query):
+        try:
+            import locale as _locale
+            _lc, _ = _locale.getdefaultlocale()
+            _target_lang = _lc.split('_')[0].lower() if _lc else 'en'
+        except Exception:
+            _target_lang = 'en'
+        model_manager.ensure_fast_model()
+        if model_manager.fast_model:
+            _tr_messages = [
+                {"role": "system", "content": (
+                    f"Translate to {_target_lang}. Output exactly one line in this format:\n"
+                    f"TRANSLATE:original|from_lang|{_target_lang}|translation\n"
+                    "Use ISO 639-1 two-letter language codes. No extra text."
+                )},
+                {"role": "user", "content": query},
+            ]
+            try:
+                if model_manager.fast_lock.acquire(timeout=5):
+                    try:
+                        _tr_out = model_manager.fast_model.create_chat_completion(
+                            messages=_tr_messages, max_tokens=80, temperature=0.0,
+                            request_id=request_id,
+                        )
+                    finally:
+                        model_manager.fast_lock.release()
+                    if _tr_out:
+                        _tr_text = _tr_out['choices'][0]['message']['content'].strip()
+                        _tr_text = re.sub(r'<think>.*?(?:</think>|$)', '', _tr_text, flags=re.DOTALL).strip()
+                        logging.info(f"Translate fast path output: {_tr_text!r}")
+                        if "TRANSLATE:" in _tr_text:
+                            _parts = _tr_text.split("TRANSLATE:")[1].strip().split("|")
+                            if len(_parts) >= 4:
+                                return jsonify({"actions": [{
+                                    "type": "translate",
+                                    "source_text": _parts[0].strip(),
+                                    "from_lang": _parts[1].strip(),
+                                    "to_lang": _parts[2].strip(),
+                                    "translated_text": "|".join(_parts[3:]).strip(),
+                                }], "chips": []})
+            except Exception as _te:
+                logging.warning(f"Translate fast path: {_te}")
 
     # 1.8 SEARCH FIRST (Workflow Optimization)
     # Perform general search immediately to provide context for the LLM.
@@ -377,26 +525,49 @@ def action_endpoint():
     system_prompt = """You are an intelligent action classifier.
 Analyze the user query and the provided search results to decide the best action.
 
-Output ONE command:
-- PERSON:Name (if search results confirm it's a real person/biography)
-- PLACE:Name (if results confirm it's a physical location/city/landmark)
-- OPEN:url (if results show a specific official website for the query, e.g. 'safelabs.info')
-- INSTALL:name (if results show it's downloadable software)
-- SEARCH:query (if it's a general topic or unclear)
+Output ONE command only:
+- TRANSLATE:source_text|from_lang|to_lang|translated_text (if query is a word/phrase in a foreign language that the user likely wants translated)
+- CURRENCY:amount|from_unit|to_unit|converted_value (if query asks for currency conversion, e.g. "22usd to pln")
+- WEATHER:location|temp|condition (if query asks for weather, use search results to find the answer)
+- UNIT:amount|from_unit|to_unit|converted_value (if query asks for unit conversion other than currency)
+- PERSON:Name (search results confirm real person/biography)
+- PLACE:Name (results confirm physical location/city/landmark or user asks for map/navigation/directions)
+- OPEN:url (results show specific official website, e.g. 'safelabs.info')
+- INSTALL:name (results show downloadable software/app)
+- UNINSTALL:name (user explicitly wants to remove/uninstall a software/app)
+- SEARCH:query (general topic or unclear)
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode|brightness|volume|mute|night_shift|dnd|wifi|bluetooth","value":true/false or 0-100}
 
 Rules:
-1. If the user asks for a website (e.g. "safelabs"), and Result 1 is the official site, output OPEN:url.
-2. If the user asks "who is...", output PERSON:Name.
-3. If the user asks "where is...", output PLACE:Name.
-4. If the results clearly show software/app, output INSTALL:Name.
-5. If the user wants to change a system setting like brightness, volume, dark mode, output SYSTEM_SETTINGS JSON.
-6. Otherwise, default to SEARCH:query.
+1. Foreign word/phrase typed by a user in another language → TRANSLATE:source_text|from_lang|to_lang|translated_text
+   - REQUIRED: Output exactly 4 parts separated by '|'.
+   - 'from_lang' and 'to_lang' must be 2-letter codes.
+   - If you are unsure of 'from_lang', use 'auto'.
+2. Currency conversion -> CURRENCY:amount|from_unit|to_unit|converted_value
+   - Calculate or estimate the conversion based on your knowledge.
+3. Weather -> WEATHER:location|temp|condition
+   - Estimate based on search results.
+   - Example: 'weather in london' -> WEATHER:London|15°C|Partly Cloudy
+4. Unit conversion -> UNIT:amount|from_unit|to_unit|converted_value
+   - Calculate conversion based on your knowledge.
+   - Example: '10 km to miles' -> UNIT:10|km|mi|6.21
+5. Website query + Result 1 is official site → OPEN:url
+6. "who is..." → PERSON:Name
+7. "where is..." → PLACE:Name
+8. Clearly downloadable software → INSTALL:Name
+9. User asks to remove/uninstall software → UNINSTALL:Name
+10. System setting change → SYSTEM_SETTINGS JSON
+11. Otherwise → SEARCH:query
 
 Examples:
+'amor' -> TRANSLATE:amor|es|pl|miłość
+'saudade' -> TRANSLATE:saudade|pt|pl|tęsknota
 'safelabs' + [Result 1: Safe Labs Official Site...] -> OPEN:https://safelabs.info
 'zmień tryb na ciemny' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
 'zwiększ jasność' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"brightness","value":80}
+'apple' (in PL context) -> TRANSLATE:apple|en|pl|jabłko
+'gato' (in EN context) -> TRANSLATE:gato|es|en|cat
+'po niemiecku kot' -> TRANSLATE:kot|pl|de|Katze
 """
     
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -448,13 +619,13 @@ Examples:
 
         out = _safe_fast_completion(
             messages=messages,
-            max_tokens=64,
+            max_tokens=128,
             temperature=0.0,
             step_name="Action intent",
             reset_model=True
         )
         if out is None:
-            return jsonify({"actions": []})
+            return jsonify({"actions": [], "chips": []})
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -462,7 +633,7 @@ Examples:
         # Check if this request was cancelled during inference
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"Request {request_id} was cancelled during inference")
-            return jsonify({"actions": []})
+            return jsonify({"actions": [], "chips": []})
 
         end_t = time.time()
         dur = end_t - start_t
@@ -483,7 +654,11 @@ Examples:
         
         # Also check if output contains only special tokens or is just newlines/spaces
         # by looking for actual keyword patterns
-        has_command = any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "SEARCH:", "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:"])
+        has_command = any(cmd in result_text for cmd in [
+            "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
+            "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
+            "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:"
+        ])
         if not has_command:
             logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
             result_text = f"SEARCH:{query}"
@@ -504,6 +679,70 @@ Examples:
                     actions.append({"type": "calc", "content": val, "equation": latex_eq})
                 except: pass
 
+            if "CURRENCY:" in line:
+                try:
+                    raw_content = line.split("CURRENCY:")[1].strip()
+                    parts = raw_content.split("|")
+                    if len(parts) >= 3:
+                        amount = parts[0].strip()
+                        from_unit = parts[1].strip().upper()
+                        to_unit = parts[2].strip().upper()
+                        llm_converted = parts[3].strip() if len(parts) >= 4 else ""
+
+                        # Try live exchange rate via Frankfurter (free, no API key)
+                        converted = llm_converted
+                        try:
+                            import requests as _req
+                            resp = _req.get(
+                                f"https://api.frankfurter.app/latest?amount={amount}&from={from_unit}&to={to_unit}",
+                                timeout=4
+                            )
+                            if resp.status_code == 200:
+                                rate_data = resp.json()
+                                rate_val = rate_data.get("rates", {}).get(to_unit)
+                                if rate_val is not None:
+                                    converted = f"{rate_val:,.2f}"
+                                    logging.info(f"Live rate: {amount} {from_unit} = {converted} {to_unit}")
+                        except Exception as _re:
+                            logging.warning(f"Exchange rate API failed ({_re}), using LLM estimate")
+
+                        actions.append({
+                            "type": "currency",
+                            "amount": amount,
+                            "from_unit": from_unit,
+                            "to_unit": to_unit,
+                            "converted_value": converted
+                        })
+                except Exception as e:
+                    logging.error(f"Failed to parse CURRENCY action: {e}")
+
+            if "WEATHER:" in line:
+                try:
+                    parts = line.split("WEATHER:")[1].strip().split("|")
+                    if len(parts) >= 3:
+                        actions.append({
+                            "type": "weather",
+                            "location": parts[0].strip(),
+                            "temp": parts[1].strip(),
+                            "condition": parts[2].strip()
+                        })
+                except Exception as e:
+                    logging.error(f"Failed to parse WEATHER action: {e}")
+
+            if "UNIT:" in line:
+                try:
+                    parts = line.split("UNIT:")[1].strip().split("|")
+                    if len(parts) >= 4:
+                        actions.append({
+                            "type": "unit",
+                            "amount": parts[0].strip(),
+                            "from_unit": parts[1].strip(),
+                            "to_unit": parts[2].strip(),
+                            "converted_value": parts[3].strip()
+                        })
+                except Exception as e:
+                    logging.error(f"Failed to parse UNIT action: {e}")
+
             if "FA:" in line:
                 fact = line.split("FA:")[1].strip()
                 if fact and "[Unknown]" not in fact:
@@ -520,7 +759,7 @@ Examples:
             elif "SEARCH:" in line:
                 if model_manager.current_fast_request_id != request_id:
                     logging.info(f"Fast Action Aborted (request {request_id} cancelled by newer request).")
-                    return jsonify({"actions": []})
+                    return jsonify({"actions": [], "chips": []})
 
                 raw_q = line.split("SEARCH:")[1].strip()
                 q = _sanitize_search_query(raw_q, query)
@@ -711,8 +950,49 @@ Output exactly one word."""
                     logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
                     actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
                 else:
-                    url = f"https://duckduckgo.com/?q=!ducky+{q}"
+                    url = f"https://www.google.com/search?q={q}"
                     actions.append({"type": "link", "url": url, "title": f"Search {q}", "description": "Web Search"})
+
+            elif "TRANSLATE:" in line:
+                try:
+                    raw_content = line.split("TRANSLATE:")[1].strip()
+                    parts = raw_content.split("|")
+                    
+                    # Robust parsing:
+                    if len(parts) >= 4:
+                        source = parts[0]
+                        from_lang = parts[1]
+                        to_lang = parts[2]
+                        translated = "|".join(parts[3:]) # Rejoin in case text contained |
+                    elif len(parts) == 3:
+                        # Common error: source|to_lang|translated (missing from_lang)
+                        p1, p2, p3 = parts
+                        # If p2 looks like a lang code (2-3 chars)
+                        if len(p2.strip()) <= 3:
+                             source, from_lang, to_lang, translated = p1, "auto", p2, p3
+                        else:
+                             # Fallback: assume source|from|translated ?? 
+                             # Or just fail gracefully
+                             logging.warning(f"TRANSLATE: parsed 3 parts, ambiguous: {parts}")
+                             continue
+                    elif len(parts) == 2:
+                        # source|translated
+                        source, translated = parts
+                        from_lang = "auto"
+                        to_lang = "en" # Safe default?
+                    else:
+                        logging.warning(f"TRANSLATE: expected 4 parts, got {len(parts)}: {parts}")
+                        continue
+
+                    actions.append({
+                        "type": "translate",
+                        "source_text": source.strip(),
+                        "from_lang": from_lang.strip(),
+                        "to_lang": to_lang.strip(),
+                        "translated_text": translated.strip()
+                    })
+                except Exception as e:
+                    logging.error(f"Failed to parse TRANSLATE action: {e}")
 
             elif "PERSON:" in line:
                 name = line.split("PERSON:")[1].strip()
@@ -723,6 +1003,11 @@ Output exactly one word."""
                 name = line.split("PLACE:")[1].strip()
                 res = get_place_result(name, existing_results=search_results if name.lower() in query.lower() else None)
                 if res: actions.append(res)
+
+            elif "UNINSTALL:" in line:
+                app = line.split("UNINSTALL:")[1].strip()
+                logging.info(f"Action: UNINSTALL {app}")
+                actions.append({"type": "uninstall", "name": app})
 
             elif "INSTALL:" in line:
                 app = line.split("INSTALL:")[1].strip()
@@ -777,11 +1062,14 @@ Output exactly one word."""
                 except Exception as e:
                     logging.error(f"Failed to parse system_settings action: {e}")
 
-        return jsonify({"actions": actions, "action": actions[0] if actions else None})
+        chips = []
+        logging.info(f"Chips ({len(chips)}): {[c['label'] for c in chips]}")
+
+        return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
 
     except Exception as e:
         logging.error(f"Error in action_endpoint: {e}")
-        return jsonify({"actions": [], "error": str(e)})
+        return jsonify({"actions": [], "chips": [], "error": str(e)})
 
 @api_bp.route('/install_plan', methods=['POST'])
 def install_plan_endpoint():

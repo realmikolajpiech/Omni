@@ -115,4 +115,7 @@ class MathWidget(QWidget):
         return self.minimumSizeHint()
     
     def minimumSizeHint(self):
-        return self.result_label.sizeHint().expandedTo(self.web_view.sizeHint()) + self.layout().spacing() * 2
+        s = self.result_label.sizeHint().expandedTo(self.web_view.sizeHint())
+        margin = self.layout().spacing() * 2
+        from PyQt6.QtCore import QSize
+        return QSize(s.width() + margin, s.height() + margin)

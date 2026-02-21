@@ -1,11 +1,13 @@
 import os
 import threading
 import logging
+import urllib.request
 import requests
 from urllib.parse import urlparse
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu, QFileIconProvider
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu,
+                              QFileIconProvider, QSizePolicy, QPushButton)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from src.ui.styles import THEMES
@@ -438,110 +440,479 @@ class SettingsActionWidget(QWidget):
         except Exception:
             pass
 
-class AppActionWidget(LinkActionWidget):
+class AppActionWidget(QWidget):
+    app_accepted = pyqtSignal(str, QWidget)
+    
     def __init__(self, name, parent=None):
-        # We don't have a URL, so pass None or empty
-        super().__init__(f"Open {name.title()}", "", "Application", parent)
+        super().__init__(parent)
+        self.app_name = name
+        self.current_theme = "light"
         
-        # Customize icons/text for App Launcher
-        self.action_label.setText("LAUNCH")
-        self.icon_label.setText("🚀")
-        self.update_style()
-
-    def update_style(self):
-        super().update_style()
-        self.icon_label.setStyleSheet("""
-            background-color: #333333; 
-            color: #FFFFFF; 
-            font-size: 12px; 
-            border-radius: 8px;
-        """)
-        
-class InstallActionWidget(LinkActionWidget):
-    def __init__(self, name, website_url, parent=None):
-        url_for_icon = website_url if website_url else f"https://google.com/search?q={name}"
-        super().__init__(f"Install {name}", url_for_icon, "System Package Manager", parent)
-
-        self.action_label.setText("")
-        self.icon_label.setText("↓")
-
-        layout = QHBoxLayout(self.action_label)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
 
-        # 3D Keycap Styling - Refined
-        def create_key(text):
-            lbl = QLabel(text)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setProperty("class", "keycap") # For easier styling if using qss, but here we use inline
-            # We'll style them in update_style, but need references?
-            # Creating many keys... simpler to style them here and just update colors?
-            # Or make a list of keys?
-            return lbl
-            
-        self.keys = []
-        def add_key(text):
-            k = create_key(text)
-            self.keys.append(k)
-            layout.addWidget(k)
-            return k
-
-        add_key("TAB")
-
-        self.lbl_install = QLabel("INSTALL APP")
-        self.lbl_install.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        layout.addWidget(self.lbl_install)
-
-        layout.addSpacing(12)
-        add_key("↵")
-
-        self.lbl_web = QLabel("VISIT SITE")
-        self.lbl_web.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        layout.addWidget(self.lbl_web)
-        layout.addStretch()
+        self.card = QWidget()
+        self.card.setObjectName("AppActionCard")
         
+        self.card_layout = QVBoxLayout(self.card)
+        self.card_layout.setContentsMargins(18, 18, 18, 18)
+        self.card_layout.setSpacing(12)
+
+        header_layout = QHBoxLayout()
+        icon_label = QLabel("🚀")
+        icon_label.setFont(QFont("Manrope", 18))
+        icon_label.setStyleSheet("background: transparent;")
+        
+        display_name = name.title()
+        
+        self.title_label = QLabel(f"Open {display_name}")
+        self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
+        self.title_label.setStyleSheet("color: #111111; background: transparent;")
+        
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        
+        self.desc_label = QLabel(f"Do you want to open {display_name}?")
+        self.desc_label.setFont(QFont("Manrope", 11))
+        self.desc_label.setStyleSheet("color: #555555; background: transparent;")
+        self.desc_label.setWordWrap(True)
+        
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        self.btn_no = QPushButton("No, Cancel")
+        self.btn_no.setFixedSize(120, 36)
+        self.btn_no.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_no.clicked.connect(self.reject_open)
+        
+        self.btn_yes = QPushButton("Yes, Open")
+        self.btn_yes.setFixedSize(120, 36)
+        self.btn_yes.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_yes.clicked.connect(self.accept_open)
+        
+        button_layout.addWidget(self.btn_no)
+        button_layout.addWidget(self.btn_yes)
+        button_layout.addStretch()
+        
+        self.card_layout.addLayout(header_layout)
+        self.card_layout.addWidget(self.desc_label)
+        self.card_layout.addLayout(button_layout)
+        
+        layout.addWidget(self.card)
         self.update_style()
+        
+    def accept_open(self):
+        self.desc_label.setText("App launched.")
+        self.desc_label.setStyleSheet("color: #34C759; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
+        self.app_accepted.emit(self.app_name, self)
+        
+    def reject_open(self):
+        self.desc_label.setText("Cancelled.")
+        self.desc_label.setStyleSheet("color: #FF453A; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
 
     def update_style(self):
-        super().update_style()
-        
-        # Icon style override
-        self.icon_label.setStyleSheet("""
-            background-color: #333333; 
-            color: #FFFFFF; 
-            font-size: 14px; 
-            border-radius: 8px;
-        """)
-
         is_dark = self.current_theme == "dark"
         
-        text_color = "#FFFFFF" if is_dark else "#000000"
-        web_color = "#CCCCCC" if is_dark else "#999999"
-        
-        if hasattr(self, 'lbl_install'):
-            self.lbl_install.setStyleSheet(f"color: {text_color}; letter-spacing: 0.5px;")
-            self.lbl_web.setStyleSheet(f"color: {web_color}; letter-spacing: 0.5px;")
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            title_color = "#FFFFFF"
+            desc_color = "#AAAAAA"
+            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_col = "#FFFFFF"
+            btn_no_hover = "rgba(255,255,255,0.15)"
+            btn_yes_bg = "#007AFF"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#0A84FF"
+        else:
+            bg = "rgba(255, 255, 255, 0.4)"
+            border = "rgba(100, 100, 100, 0.2)"
+            title_color = "#111111"
+            desc_color = "#555555"
+            btn_no_bg = "rgba(0,0,0,0.05)"
+            btn_no_col = "#333333"
+            btn_no_hover = "rgba(0,0,0,0.1)"
+            btn_yes_bg = "#007AFF"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#0066CC"
             
-        # Update keys
-        key_bg = "#444444" if is_dark else "#FFFFFF"
-        key_text = "#FFFFFF" if is_dark else "#333333"
-        key_border = "#666666" if is_dark else "#D6D6D6"
-        key_border_bottom = "#444444" if is_dark else "#C0C0C0"
+        self.card.setStyleSheet(f"""
+            QWidget#AppActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        self.title_label.setStyleSheet(f"color: {title_color}; background: transparent;")
+        if "cancelled" not in self.desc_label.text().lower() and "launched" not in self.desc_label.text().lower():
+            self.desc_label.setStyleSheet(f"color: {desc_color}; background: transparent;")
+            
+        self.btn_no.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_no_bg};
+                color: {btn_no_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_no_hover}; }}
+        """)
         
-        if hasattr(self, 'keys'):
-            for k in self.keys:
-                k.setStyleSheet(f"""
-                    background-color: {key_bg};
-                    border: 1px solid {key_border};
-                    border-bottom: 2px solid {key_border_bottom};
-                    border-radius: 5px;
-                    color: {key_text};
-                    padding: 3px 8px;
-                    font-family: "Manrope";
-                    font-size: 10px;
-                    font-weight: 800;
-                    min-width: 24px;
-                """)
+        self.btn_yes.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_yes_bg};
+                color: {btn_yes_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: bold;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_yes_hover}; }}
+        """)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = getattr(self.parent(), 'width', lambda: 660)()
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 16)
+        return QSize(660, 120)
+        
+class InstallActionWidget(QWidget):
+    install_accepted = pyqtSignal(str, QWidget)
+    
+    def __init__(self, name, website_url, parent=None):
+        super().__init__(parent)
+        self.app_name = name
+        self.website_url = website_url
+        self.current_theme = "light"
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("InstallActionCard")
+        
+        self.card_layout = QVBoxLayout(self.card)
+        self.card_layout.setContentsMargins(18, 18, 18, 18)
+        self.card_layout.setSpacing(12)
+
+        # -- Prompt Layout --
+        self.prompt_widget = QWidget()
+        prompt_layout = QVBoxLayout(self.prompt_widget)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.setSpacing(12)
+        
+        header_layout = QHBoxLayout()
+        icon_label = QLabel("📦")
+        icon_label.setFont(QFont("Manrope", 18))
+        icon_label.setStyleSheet("background: transparent;")
+        
+        # Display name formatting
+        display_name = title_case_name = name.replace('-', ' ').title()
+        
+        self.title_label = QLabel(f"Install {display_name}")
+        self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
+        self.title_label.setStyleSheet("color: #111111; background: transparent;")
+        
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        
+        self.desc_label = QLabel(f"Do you want to install {display_name} using the system package manager?")
+        self.desc_label.setFont(QFont("Manrope", 11))
+        self.desc_label.setStyleSheet("color: #555555; background: transparent;")
+        self.desc_label.setWordWrap(True)
+        
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        self.btn_no = QPushButton("No, Cancel")
+        self.btn_no.setFixedSize(120, 36)
+        self.btn_no.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_no.clicked.connect(self.reject_install)
+        
+        self.btn_yes = QPushButton("Yes, Install")
+        self.btn_yes.setFixedSize(120, 36)
+        self.btn_yes.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_yes.clicked.connect(self.accept_install)
+        
+        button_layout.addWidget(self.btn_no)
+        button_layout.addWidget(self.btn_yes)
+        button_layout.addStretch()
+        
+        prompt_layout.addLayout(header_layout)
+        prompt_layout.addWidget(self.desc_label)
+        prompt_layout.addLayout(button_layout)
+        
+        self.card_layout.addWidget(self.prompt_widget)
+        
+        # Container for progress widget
+        self.progress_container = QVBoxLayout()
+        self.progress_container.setContentsMargins(0, 0, 0, 0)
+        self.card_layout.addLayout(self.progress_container)
+        
+        layout.addWidget(self.card)
+        self.update_style()
+        
+    def accept_install(self):
+        self.desc_label.setText("Installation started.")
+        self.desc_label.setStyleSheet("color: #34C759; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
+        self.install_accepted.emit(self.app_name, self)
+        
+    def reject_install(self):
+        self.desc_label.setText("Installation cancelled.")
+        self.desc_label.setStyleSheet("color: #FF453A; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.10)"
+            title_color = "#FFFFFF"
+            desc_color = "#AAAAAA"
+            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_col = "#FFFFFF"
+            btn_no_hover = "rgba(255,255,255,0.15)"
+            btn_yes_bg = "#007AFF"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#0A84FF"
+        else:
+            bg = "rgba(255, 255, 255, 0.4)"
+            border = "rgba(100, 100, 100, 0.2)"
+            title_color = "#111111"
+            desc_color = "#555555"
+            btn_no_bg = "rgba(0,0,0,0.05)"
+            btn_no_col = "#333333"
+            btn_no_hover = "rgba(0,0,0,0.1)"
+            btn_yes_bg = "#007AFF"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#0066CC"
+            
+        self.card.setStyleSheet(f"""
+            QWidget#InstallActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        self.title_label.setStyleSheet(f"color: {title_color}; background: transparent;")
+        if "cancelled" not in self.desc_label.text().lower():
+            self.desc_label.setStyleSheet(f"color: {desc_color}; background: transparent;")
+            
+        self.btn_no.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_no_bg};
+                color: {btn_no_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_no_hover}; }}
+        """)
+        
+        self.btn_yes.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_yes_bg};
+                color: {btn_yes_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: bold;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_yes_hover}; }}
+        """)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = getattr(self.parent(), 'width', lambda: 660)()
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 16)
+        return QSize(660, 120)
+
+
+class UninstallActionWidget(QWidget):
+    """Confirmation card asking user to confirm uninstallation of an app."""
+    uninstall_accepted = pyqtSignal(str, QWidget)
+
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        self.app_name = name
+        self.current_theme = "light"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("UninstallActionCard")
+
+        self.card_layout = QVBoxLayout(self.card)
+        self.card_layout.setContentsMargins(18, 18, 18, 18)
+        self.card_layout.setSpacing(12)
+
+        # -- Prompt Layout --
+        self.prompt_widget = QWidget()
+        prompt_layout = QVBoxLayout(self.prompt_widget)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.setSpacing(12)
+
+        header_layout = QHBoxLayout()
+        icon_label = QLabel("🗑️")
+        icon_label.setFont(QFont("Manrope", 18))
+        icon_label.setStyleSheet("background: transparent;")
+
+        display_name = name.replace('-', ' ').title()
+
+        self.title_label = QLabel(f"Uninstall {display_name}")
+        self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
+        self.title_label.setStyleSheet("color: #111111; background: transparent;")
+
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+
+        self.desc_label = QLabel(f"Do you want to uninstall {display_name}? This will remove it via the system package manager.")
+        self.desc_label.setFont(QFont("Manrope", 11))
+        self.desc_label.setStyleSheet("color: #555555; background: transparent;")
+        self.desc_label.setWordWrap(True)
+
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+
+        self.btn_no = QPushButton("No, Cancel")
+        self.btn_no.setFixedSize(120, 36)
+        self.btn_no.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_no.clicked.connect(self.reject_uninstall)
+
+        self.btn_yes = QPushButton("Yes, Uninstall")
+        self.btn_yes.setFixedSize(140, 36)
+        self.btn_yes.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_yes.clicked.connect(self.accept_uninstall)
+
+        button_layout.addWidget(self.btn_no)
+        button_layout.addWidget(self.btn_yes)
+        button_layout.addStretch()
+
+        prompt_layout.addLayout(header_layout)
+        prompt_layout.addWidget(self.desc_label)
+        prompt_layout.addLayout(button_layout)
+
+        self.card_layout.addWidget(self.prompt_widget)
+
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def accept_uninstall(self):
+        self.desc_label.setText("Uninstallation started.")
+        self.desc_label.setStyleSheet("color: #FF6B35; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
+        self.uninstall_accepted.emit(self.app_name, self)
+
+    def reject_uninstall(self):
+        self.desc_label.setText("Uninstallation cancelled.")
+        self.desc_label.setStyleSheet("color: #FF453A; background: transparent; font-weight: bold;")
+        self.btn_no.hide()
+        self.btn_yes.hide()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+
+        if is_dark:
+            bg = "rgba(255, 80, 60, 0.07)"
+            border = "rgba(255, 80, 60, 0.18)"
+            title_color = "#FFFFFF"
+            desc_color = "#AAAAAA"
+            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_col = "#FFFFFF"
+            btn_no_hover = "rgba(255,255,255,0.15)"
+            btn_yes_bg = "#FF453A"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#FF3B30"
+        else:
+            bg = "rgba(255, 80, 60, 0.04)"
+            border = "rgba(255, 80, 60, 0.15)"
+            title_color = "#111111"
+            desc_color = "#555555"
+            btn_no_bg = "rgba(0,0,0,0.05)"
+            btn_no_col = "#333333"
+            btn_no_hover = "rgba(0,0,0,0.1)"
+            btn_yes_bg = "#FF3B30"
+            btn_yes_col = "#FFFFFF"
+            btn_yes_hover = "#D32F2F"
+
+        self.card.setStyleSheet(f"""
+            QWidget#UninstallActionCard {{
+                background-color: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        self.title_label.setStyleSheet(f"color: {title_color}; background: transparent;")
+        desc_text = self.desc_label.text().lower()
+        if "cancelled" not in desc_text and "started" not in desc_text:
+            self.desc_label.setStyleSheet(f"color: {desc_color}; background: transparent;")
+
+        self.btn_no.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_no_bg};
+                color: {btn_no_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_no_hover}; }}
+        """)
+
+        self.btn_yes.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_yes_bg};
+                color: {btn_yes_col};
+                border: none;
+                border-radius: 8px;
+                font-family: 'Manrope';
+                font-weight: bold;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: {btn_yes_hover}; }}
+        """)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = getattr(self.parent(), 'width', lambda: 660)()
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 16)
+        return QSize(660, 130)
+
 
 class CalcActionWidget(QWidget):
     def __init__(self, content, equation="", parent=None):
@@ -576,10 +947,11 @@ class CalcActionWidget(QWidget):
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("""
-            background-color: transparent; 
-            color: #333333; 
-            font-size: 10px; 
-            border: none;
+            background-color: #FF8C00;
+            color: #FFFFFF; 
+            font-size: 14px; 
+            font-weight: bold;
+            border-radius: 10px;
         """)
         
         self.action_label = QLabel("CALCULATION")
@@ -613,19 +985,19 @@ class CalcActionWidget(QWidget):
         
         # Card Style
         if is_dark:
-            bg = "rgba(255, 255, 255, 0.05)"
-            border = "rgba(255, 255, 255, 0.10)"
-            icon_color = "#FFFFFF"
-            action_color = "#CCCCCC"
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255, 140, 0, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(255, 140, 0, 0.2)"
+            icon_color = "#FF8C00"
+            action_color = "#FF8C00"
         else:
-            bg = "rgba(255, 255, 255, 0.25)"
-            border = "rgba(255, 255, 255, 0.4)"
-            icon_color = "#333333"
-            action_color = "#888888"
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255, 150, 0, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(255, 150, 0, 0.2)"
+            icon_color = "#E67300"
+            action_color = "#E67300"
         
         self.card.setStyleSheet(f"""
             QWidget#ActionCard {{
-                background-color: {bg};
+                background: {bg};
                 border-radius: 16px;
                 border: 1px solid {border};
             }}
@@ -648,14 +1020,622 @@ class CalcActionWidget(QWidget):
             return self.layout().sizeHint()
         return super().sizeHint()
 
+class SearchActionWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
+    def __init__(self, query, parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.icon_downloaded.connect(self.update_icon)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Card Container
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+
+        # Top Row: Icon + Text
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+        top_row.setContentsMargins(0, 0, 0, 0)
+
+        # Search Icon (Google G)
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent;")
+
+        # Text column
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        self.title_label = QLabel(f'Search "{query}"')
+        self.title_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
+        self.title_label.setWordWrap(True)
+
+        self.desc_label = QLabel("Google Search")
+        self.desc_label.setFont(QFont("Manrope", 11))
+        
+        text_col.addWidget(self.title_label)
+        text_col.addWidget(self.desc_label)
+
+        top_row.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
+        top_row.addLayout(text_col)
+        top_row.addStretch()
+        
+        card_layout.addLayout(top_row)
+
+        # Bottom Row: Chips (Images, Maps, News, YouTube)
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(8)
+        chips_row.setContentsMargins(48, 0, 0, 0) # Indent to align with text
+        
+        self.chips = []
+        
+        def add_chip(text, suffix):
+            lbl = QLabel(text)
+            lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+            lbl.setProperty("url", f"https://www.google.com/search?q={query.replace(' ', '+')}&{suffix}")
+            lbl.mousePressEvent = lambda e, u=lbl.property("url"): QDesktopServices.openUrl(QUrl(u))
+            # Hover effects need custom class or event filter, skipping for simplicity or using stylesheet hover
+            lbl.setObjectName("SearchChip")
+            self.chips.append(lbl)
+            chips_row.addWidget(lbl)
+
+        add_chip("Images", "tbm=isch")
+        add_chip("Maps", "tbm=map") # Google Maps search via google.com? or maps.google.com
+        # Actually maps.google.com search is better
+        self.chips[-1].setProperty("url", f"https://www.google.com/maps/search/{query.replace(' ', '+')}")
+        
+        add_chip("News", "tbm=nws")
+        add_chip("Videos", "tbm=vid")
+        
+        chips_row.addStretch()
+        card_layout.addLayout(chips_row)
+
+        layout.addWidget(self.card)
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hovered = False
+
+        self.current_theme = "light"
+        self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=google.com&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
     def update_style(self):
-        super().update_style()
-        self.icon_label.setStyleSheet("""
-            background-color: #333333; 
-            color: #FFFFFF; 
-            font-size: 14px; 
-            border-radius: 8px;
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+
+        if is_dark:
+            bg   = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(80, 80, 255, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if self._hovered else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(80, 80, 255, 0.08), stop:1 rgba(255, 255, 255, 0.02))"
+            border = "rgba(80, 80, 255, 0.25)" if self._hovered else "rgba(80, 80, 255, 0.15)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            chip_bg = "rgba(80, 80, 255, 0.15)"
+            chip_col = "#E0E0FF"
+            chip_border = "rgba(80, 80, 255, 0.3)"
+        else:
+            bg   = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(50, 50, 255, 0.08), stop:1 rgba(0, 0, 0, 0.02))" if self._hovered else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(50, 50, 255, 0.04), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(50, 50, 255, 0.2)" if self._hovered else "rgba(50, 50, 255, 0.1)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            chip_bg = "rgba(50, 50, 255, 0.05)"
+            chip_col = "#2222DD"
+            chip_border = "rgba(50, 50, 255, 0.15)"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
         """)
+        
+        self.title_label.setStyleSheet(f"color: {title_color};")
+        self.desc_label.setStyleSheet(f"color: {desc_color};")
+        
+        for chip in self.chips:
+            chip.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {chip_bg};
+                    color: {chip_col};
+                    border: 1px solid {chip_border};
+                    border-radius: 12px;
+                    padding: 4px 12px;
+                    font-weight: bold;
+                }}
+                QLabel:hover {{
+                    background-color: {chip_bg.replace('0.05', '0.1').replace('0.15', '0.3')};
+                    border: 1px solid {chip_border.replace('0.15', '0.3').replace('0.3', '0.5')};
+                }}
+            """)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Check if clicked on chips is handled by chip mousePressEvent?
+            # Yes, if child widget handles it, parent won't get it usually, or it propagates?
+            # QLabel mousePressEvent consumes it?
+            # We'll see. The main card click opens general search.
+            # But if I click a chip, the chip's event handler should fire.
+            pass
+        
+        # If the click wasn't on a chip (which consumes it), then open main search
+        # But wait, `super().mousePressEvent(event)` calls QWidget's handler which does nothing.
+        # I need to know if a child handled it.
+        # Actually, if I assign mousePressEvent to the chip labels, they will capture it.
+        # But if I click the background, I want this handler to run.
+        # So I should move the main search logic here, but ensure it doesn't override chips.
+        # If I click a chip, the chip's lambda runs. Does it stop propagation?
+        # Standard PyQt event propagation: if child accepts it, parent doesn't get it.
+        # So it should be fine.
+        
+        # However, the original code had:
+        # if event.button() == Qt.MouseButton.LeftButton:
+        #    query_enc = self.query.replace(" ", "+")
+        #    QDesktopServices.openUrl(QUrl(f"https://www.google.com/search?q={query_enc}"))
+        
+        # I'll keep it but wrap in try/except or check if child is under mouse?
+        # Actually, if the child handles it, this won't be called if the child accepts the event.
+        # But QLabel doesn't accept mouse events by default unless we subclass or install event filter?
+        # I assigned `lbl.mousePressEvent = lambda ...` which overrides the method.
+        # So it should work.
+        
+        query_enc = self.query.replace(" ", "+")
+        QDesktopServices.openUrl(QUrl(f"https://www.google.com/search?q={query_enc}"))
+        
+        super().mousePressEvent(event)
+
+    def sizeHint(self):
+        return QSize(660, 100) # Increased height for chips
+
+class TranslateActionWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
+    def __init__(self, source_text, from_lang, to_lang, translated_text, parent=None):
+        super().__init__(parent)
+        self.icon_downloaded.connect(self.update_icon)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Card Container
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+        
+        # Top Row: Icon + Label + Languages
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        
+        self.icon_label = QLabel("文")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent; border: none;")
+        
+        self.action_label = QLabel("TRANSLATE")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        
+        # Language Badge
+        _from_display = "🌐" if from_lang.lower() in ("auto", "") else from_lang.upper()
+        self.lang_badge = QLabel(f"{_from_display} ➝ {to_lang.upper()}")
+        self.lang_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        self.lang_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.lang_badge)
+        
+        # Source Text
+        self.source_label = QLabel(source_text)
+        self.source_label.setFont(QFont("Manrope", 12))
+        self.source_label.setWordWrap(True)
+        
+        # Translated Text
+        self.translated_label = QLabel(translated_text)
+        self.translated_label.setFont(QFont("Instrument Serif", 32, QFont.Weight.Normal))
+        self.translated_label.setWordWrap(True)
+        self.translated_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.source_label)
+        card_layout.addWidget(self.translated_label)
+        
+        layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=translate.google.com&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
+        
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+        
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(66, 133, 244, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(66, 133, 244, 0.2)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            action_color = "#4285F4"
+            badge_bg = "rgba(66, 133, 244, 0.15)"
+            badge_color = "#8AB4F8"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(26, 115, 232, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(26, 115, 232, 0.2)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            action_color = "#1A73E8"
+            badge_bg = "rgba(26, 115, 232, 0.1)"
+            badge_color = "#1A73E8"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        
+        self.translated_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
+        self.source_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+        self.icon_label.setStyleSheet(f"color: {action_color}; font-size: 14px;")
+        self.lang_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+class CurrencyActionWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
+    def __init__(self, amount, from_unit, to_unit, converted_value, parent=None):
+        super().__init__(parent)
+        self.icon_downloaded.connect(self.update_icon)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Card Container
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+        
+        # Top Row: Icon + Label + Units
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        
+        self.icon_label = QLabel("$")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent; border: none; font-weight: bold;")
+        
+        self.action_label = QLabel("CONVERT")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        
+        # Unit Badge
+        self.unit_badge = QLabel(f"{from_unit.upper()} ➝ {to_unit.upper()}")
+        self.unit_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.unit_badge)
+        
+        # Source Amount
+        self.source_label = QLabel(f"{amount} {from_unit.upper()}")
+        self.source_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
+        self.source_label.setWordWrap(True)
+        
+        # Converted Amount
+        self.converted_label = QLabel(f"{converted_value} {to_unit.upper()}")
+        self.converted_label.setFont(QFont("Instrument Serif", 36, QFont.Weight.Normal))
+        self.converted_label.setWordWrap(True)
+        self.converted_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.source_label)
+        card_layout.addWidget(self.converted_label)
+        
+        layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=google.com/finance&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
+        
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+        
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(30, 215, 96, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(30, 215, 96, 0.2)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            action_color = "#1ED760" 
+            badge_bg = "rgba(30, 215, 96, 0.15)"
+            badge_color = "#1ED760"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(0, 180, 70, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(0, 180, 70, 0.2)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            action_color = "#00B446"
+            badge_bg = "rgba(0, 180, 70, 0.15)"
+            badge_color = "#00963C"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        
+        self.converted_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
+        self.source_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+        self.icon_label.setStyleSheet(f"color: {action_color}; font-size: 14px;")
+        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+class MapNavigationWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
+    def __init__(self, place_name, address=None, parent=None):
+        super().__init__(parent)
+        self.place_name = place_name
+        self.address = address
+        self.icon_downloaded.connect(self.update_icon)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Card Container
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+
+        # Top Row: Icon + Label
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent;")
+        
+        self.action_label = QLabel("GOOGLE MAPS")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+
+        # Place Name
+        self.name_label = QLabel(place_name)
+        self.name_label.setFont(QFont("Instrument Serif", 32, QFont.Weight.Normal))
+        self.name_label.setWordWrap(True)
+
+        # Address/Desc
+        self.desc_label = QLabel(address if address else "View on map")
+        self.desc_label.setFont(QFont("Manrope", 12))
+        self.desc_label.setWordWrap(True)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.name_label)
+        card_layout.addWidget(self.desc_label)
+
+        layout.addWidget(self.card)
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hovered = False
+
+        self.current_theme = "light"
+        self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=maps.google.com&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(234, 67, 53, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if self._hovered else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(234, 67, 53, 0.08), stop:1 rgba(255, 255, 255, 0.02))"
+            border = "rgba(234, 67, 53, 0.25)" if self._hovered else "rgba(234, 67, 53, 0.15)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            action_color = "#EA4335"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(234, 67, 53, 0.08), stop:1 rgba(0, 0, 0, 0.02))" if self._hovered else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(234, 67, 53, 0.04), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(234, 67, 53, 0.2)" if self._hovered else "rgba(234, 67, 53, 0.1)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            action_color = "#D93025"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+        
+        self.name_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
+        self.desc_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            query_enc = self.place_name.replace(" ", "+")
+            QDesktopServices.openUrl(QUrl(f"https://www.google.com/maps/search/{query_enc}"))
+        super().mousePressEvent(event)
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
 
 class FileActionWidget(QWidget):
     """File action widget with space-to-preview functionality."""
@@ -1455,5 +2435,935 @@ class TerminalActionWidget(QWidget):
             h = self.layout().heightForWidth(w)
             if h > 0:
                 return QSize(w, h + 16)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+
+# ---------------------------------------------------------------------------
+# WikiCardWidget — knowledge card powered by Wikipedia
+# ---------------------------------------------------------------------------
+
+_PAGE_TYPE_LABELS = {
+    "person": "PERSON",
+    "place":  "PLACE",
+    "topic":  "WIKIPEDIA",
+}
+
+_PAGE_TYPE_COLORS_LIGHT = {
+    "person": ("#5B4FCF", "rgba(91,79,207,0.10)", "rgba(91,79,207,0.20)"),   # purple
+    "place":  ("#2563EB", "rgba(37,99,235,0.10)", "rgba(37,99,235,0.20)"),   # blue
+    "topic":  ("#059669", "rgba(5,150,105,0.10)", "rgba(5,150,105,0.20)"),   # green
+}
+_PAGE_TYPE_COLORS_DARK = {
+    "person": ("#A78BFA", "rgba(167,139,250,0.12)", "rgba(167,139,250,0.25)"),
+    "place":  ("#60A5FA", "rgba(96,165,250,0.12)", "rgba(96,165,250,0.25)"),
+    "topic":  ("#34D399", "rgba(52,211,153,0.12)", "rgba(52,211,153,0.25)"),
+}
+
+_WIKI_ACTIONS = {
+    "person": [
+        ("youtube", "YouTube",   lambda n, _: f"https://www.youtube.com/results?search_query={n.replace(' ', '+')}"),
+        ("document", "In the News", lambda n, _: f"https://news.google.com/search?q={n.replace(' ', '+')}"),
+        ("search", "More",      lambda n, _: f"https://duckduckgo.com/?q={n.replace(' ', '+')}"),
+    ],
+    "place": [
+        ("map", "Maps",      lambda n, _: f"https://www.google.com/maps/search/{n.replace(' ', '+')}"),
+        ("camera", "Photos",    lambda n, _: f"https://www.google.com/search?tbm=isch&q={n.replace(' ', '+')}"),
+        ("calendar", "Travel",    lambda n, _: f"https://www.google.com/search?q=travel+to+{n.replace(' ', '+')}"),
+    ],
+    "topic": [
+        ("youtube", "YouTube",   lambda n, _: f"https://www.youtube.com/results?search_query={n.replace(' ', '+')}"),
+        ("search", "Search",   lambda n, _: f"https://duckduckgo.com/?q={n.replace(' ', '+')}"),
+        ("document", "More",     lambda _, u: u),
+    ],
+}
+
+
+class _WikiActionButton(QWidget):
+    """Tiny pill button inside WikiCardWidget."""
+    clicked = pyqtSignal(str)   # emits URL
+    icon_downloaded = pyqtSignal(bytes)
+
+    def __init__(self, icon_name: str, label: str, url: str, theme: str = "light", parent=None):
+        super().__init__(parent)
+        self._url = url
+        self.current_theme = theme
+        self._hovered = False
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        
+        self.icon_downloaded.connect(self._on_icon_data)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 12, 5)
+        layout.setSpacing(6)
+        
+        # Icon
+        self.icon_lbl = QLabel()
+        self.icon_lbl.setFixedSize(16, 16)
+        self.icon_lbl.setScaledContents(True)
+        self.icon_lbl.setStyleSheet("background: transparent; border: none;")
+        
+        # Label
+        self.text_lbl = QLabel(label)
+        self.text_lbl.setFont(QFont("Manrope", 11, QFont.Weight.Medium))
+        self.text_lbl.setStyleSheet("background: transparent; border: none;")
+        
+        layout.addWidget(self.icon_lbl)
+        layout.addWidget(self.text_lbl)
+        
+        self._update_style()
+        
+        # Fetch icon
+        if url:
+             domain = urlparse(url).netloc
+             # Special case for "document" or "search" if needed, but domain usually works
+             if "youtube" in icon_name: domain = "youtube.com"
+             elif "google" in domain: domain = "google.com"
+             
+             icon_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
+             threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def _on_icon_data(self, data):
+        px = QPixmap()
+        if px.loadFromData(data) and not px.isNull():
+            self.icon_lbl.setPixmap(px)
+
+    def _update_style(self):
+        dark = self.current_theme == "dark"
+        if self._hovered:
+            bg   = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.10)"
+            bdr  = "rgba(255,255,255,0.28)" if dark else "rgba(0,0,0,0.18)"
+            col  = "#FFFFFF" if dark else "#111111"
+        else:
+            bg   = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.055)"
+            bdr  = "rgba(255,255,255,0.14)" if dark else "rgba(0,0,0,0.10)"
+            col  = "#EEEEEE" if dark else "#333333"
+            
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: {bg};
+                border: 1px solid {bdr};
+                border-radius: 14px;
+            }}
+        """)
+        self.text_lbl.setStyleSheet(f"color: {col}; border: none; background: transparent;")
+        self.icon_lbl.setStyleSheet("border: none; background: transparent;")
+
+    def set_theme(self, theme: str):
+        self.current_theme = theme
+        self._update_style()
+
+    def enterEvent(self, e):
+        self._hovered = True
+        self._update_style()
+
+    def leaveEvent(self, e):
+        self._hovered = False
+        self._update_style()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self._url:
+            self.clicked.emit(self._url)
+
+
+class WikiCardWidget(QWidget):
+    """
+    Rich knowledge card — shows Wikipedia info for a person, place, or topic.
+    Layout:
+        [BADGE]
+        [thumbnail]  Title (large)
+                     Short description (gray)
+                     Extract text
+                     [↗ Read on Wikipedia]
+        — — — — — — — — — — — — — — — — — —
+        [action btn]  [action btn]  [action btn]
+    """
+    image_downloaded = pyqtSignal(object)
+
+    def __init__(self, wiki_data: dict, theme: str = "light", parent=None):
+        super().__init__(parent)
+        self.wiki_data = wiki_data
+        self.current_theme = theme
+        self._action_btns: list[_WikiActionButton] = []
+        self.image_downloaded.connect(self._on_image_downloaded)
+
+        self._build_ui()
+        self._apply_theme()
+
+        # Fetch thumbnail in background
+        thumb_url = wiki_data.get("thumbnail", "")
+        if thumb_url:
+            threading.Thread(target=self._download_image, args=(thumb_url,), daemon=True).start()
+
+    # ------------------------------------------------------------------ build
+
+    def _build_ui(self):
+        d = self.wiki_data
+        page_type = d.get("page_type", "topic")
+        title      = d.get("title", "")
+        desc       = d.get("description", "")
+        extract    = d.get("extract", "")
+        wiki_url   = d.get("url", "")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ---- card container ----
+        self.card = QWidget()
+        self.card.setObjectName("WikiCard")
+        card_v = QVBoxLayout(self.card)
+        card_v.setContentsMargins(16, 14, 16, 14)
+        card_v.setSpacing(0)
+
+        # ---- top row: badge ----
+        badge_row = QHBoxLayout()
+        badge_row.setContentsMargins(0, 0, 0, 8)
+        self.badge = QLabel(_PAGE_TYPE_LABELS.get(page_type, "WIKIPEDIA"))
+        self.badge.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        badge_row.addWidget(self.badge)
+        badge_row.addStretch()
+        card_v.addLayout(badge_row)
+
+        # ---- content row: thumbnail + text ----
+        content_row = QHBoxLayout()
+        content_row.setSpacing(16)
+        content_row.setContentsMargins(0, 0, 0, 0)
+
+        # Thumbnail
+        is_portrait = (page_type == "person")
+        thumb_w, thumb_h = (96, 130) if is_portrait else (90, 90)
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(thumb_w, thumb_h)
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setObjectName("WikiThumb")
+        # Placeholder initial letter
+        initial = title[0].upper() if title else "?"
+        self.thumb.setText(initial)
+        self.thumb.setFont(QFont("Instrument Serif", 36))
+        content_row.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Text column
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        # Title
+        self.title_lbl = QLabel(title)
+        self.title_lbl.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
+        self.title_lbl.setWordWrap(True)
+
+        # Description (short, e.g. "German theoretical physicist")
+        self.desc_lbl = QLabel(desc)
+        self.desc_lbl.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+        self.desc_lbl.setWordWrap(True)
+        if not desc:
+            self.desc_lbl.hide()
+
+        # Extract
+        self.extract_lbl = QLabel(extract)
+        self.extract_lbl.setFont(QFont("Manrope", 12, QFont.Weight.Normal))
+        self.extract_lbl.setWordWrap(True)
+        if not extract:
+            self.extract_lbl.hide()
+
+        # Source link
+        domain = urlparse(wiki_url).netloc or "en.wikipedia.org"
+        self.link_lbl = QLabel(f"↗  {domain}")
+        self.link_lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        self.link_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.link_lbl.mousePressEvent = lambda _: QDesktopServices.openUrl(QUrl(wiki_url)) if wiki_url else None
+
+        text_col.addWidget(self.title_lbl)
+        text_col.addWidget(self.desc_lbl)
+        text_col.addSpacing(4)
+        text_col.addWidget(self.extract_lbl)
+        text_col.addSpacing(6)
+        text_col.addWidget(self.link_lbl)
+        text_col.addStretch()
+
+        content_row.addLayout(text_col)
+        card_v.addLayout(content_row)
+
+        outer.addWidget(self.card)
+
+    # ------------------------------------------------------------------ theme
+
+    def set_theme(self, theme: str):
+        self.current_theme = theme
+        self._apply_theme()
+
+    def _apply_theme(self):
+        d = self.wiki_data
+        page_type = d.get("page_type", "topic")
+        dark = self.current_theme == "dark"
+
+        color_map = _PAGE_TYPE_COLORS_DARK if dark else _PAGE_TYPE_COLORS_LIGHT
+        accent, badge_bg, badge_bdr = color_map.get(page_type, color_map["topic"])
+
+        card_bg     = "rgba(255,255,255,0.06)" if dark else "rgba(255,255,255,0.28)"
+        card_border = "rgba(255,255,255,0.12)" if dark else "rgba(255,255,255,0.45)"
+        title_col   = "#FFFFFF" if dark else "#0A0A0A"
+        desc_col    = "#AAAAAA" if dark else "#666666"
+        extract_col = "#C8C8C8" if dark else "#444444"
+        link_col    = "#888888" if dark else "#999999"
+        divider_col = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.07)"
+        thumb_bg    = "#333333" if dark else "#F0F0F0"
+        thumb_bdr   = "#555555" if dark else "#DEDEDE"
+        thumb_col   = "#888888" if dark else "#BBBBBB"
+
+        self.card.setStyleSheet(f"""
+            QWidget#WikiCard {{
+                background: {card_bg};
+                border: 1px solid {card_border};
+                border-radius: 18px;
+            }}
+        """)
+        self.badge.setStyleSheet(f"""
+            color: {accent};
+            background: {badge_bg};
+            border: 1px solid {badge_bdr};
+            border-radius: 10px;
+            padding: 2px 9px;
+            letter-spacing: 0.8px;
+        """)
+        self.title_lbl.setStyleSheet(f"color: {title_col}; background: transparent;")
+        self.desc_lbl.setStyleSheet(f"color: {desc_col}; background: transparent;")
+        self.extract_lbl.setStyleSheet(f"color: {extract_col}; background: transparent; line-height: 1.5;")
+        self.link_lbl.setStyleSheet(f"color: {link_col}; background: transparent;")
+
+        # Thumb placeholder style (only when no image loaded)
+        if not self.thumb.pixmap() or self.thumb.pixmap().isNull():
+            r = self.thumb.width() // 2
+            if self.wiki_data.get("page_type") == "person":
+                r = 8
+            self.thumb.setStyleSheet(f"""
+                background: {thumb_bg};
+                color: {thumb_col};
+                border: 1px solid {thumb_bdr};
+                border-radius: {r}px;
+            """)
+
+        for btn in self._action_btns:
+            btn.set_theme(self.current_theme)
+
+    # ------------------------------------------------------------------ image
+
+    def _download_image(self, url: str):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=8, verify=False)
+            if r.status_code == 200:
+                self.image_downloaded.emit(r.content)
+        except Exception as e:
+            logging.debug(f"WikiCardWidget: image download failed: {e}")
+
+    def _on_image_downloaded(self, data: bytes):
+        try:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data) or pixmap.isNull():
+                return
+            w = self.thumb.width()
+            h = self.thumb.height()
+            rounded = QPixmap(w, h)
+            rounded.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(rounded)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                path = QPainterPath()
+                r = min(w, h) // 2 if self.wiki_data.get("page_type") != "person" else 10
+                path.addRoundedRect(0, 0, w, h, r, r)
+                painter.setClipPath(path)
+                scaled = pixmap.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(-(scaled.width() - w) // 2, -(scaled.height() - h) // 2, scaled)
+            finally:
+                painter.end()
+            self.thumb.setPixmap(rounded)
+            self.thumb.setText("")
+            self.thumb.setStyleSheet("background: transparent; border: none;")
+        except Exception as e:
+            logging.debug(f"WikiCardWidget: image render failed: {e}")
+
+    # ------------------------------------------------------------------ size
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0:
+                return QSize(w, h + 28)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+
+# ---------------------------------------------------------------------------
+# OGPreviewWidget — rich website preview card using Open Graph metadata
+# ---------------------------------------------------------------------------
+
+class OGPreviewWidget(QWidget):
+    """
+    Displays a website preview card using Open Graph metadata.
+    Layout: OG image banner (optional) | favicon + title + domain | description
+    """
+    _image_downloaded = pyqtSignal(bytes, str)   # (data, role) role: "og" | "favicon"
+
+    def __init__(self, og_data: dict, url: str, theme: str = "dark", parent=None):
+        super().__init__(parent)
+        self.current_theme = theme
+        self._og_data = og_data
+        self._url = url
+        self._image_downloaded.connect(self._on_image_data)
+
+        from urllib.parse import urlparse as _up
+        _p = _up(url)
+        self._domain = _p.netloc.replace("www.", "")
+        self._site_name = og_data.get("site_name") or self._domain.split(".")[0].title()
+
+        self._build_ui()
+        self._apply_theme()
+
+        # Kick off image downloads in background
+        og_img = og_data.get("og_image", "")
+        fav_url = og_data.get("favicon_url", "")
+        if og_img:
+            threading.Thread(target=self._dl_image, args=(og_img, "og"), daemon=True).start()
+        if fav_url:
+            threading.Thread(target=self._dl_image, args=(fav_url, "favicon"), daemon=True).start()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.card = QWidget()
+        self.card.setObjectName("OGCard")
+        outer.addWidget(self.card)
+
+        card_v = QVBoxLayout(self.card)
+        card_v.setContentsMargins(0, 0, 0, 0)
+        card_v.setSpacing(0)
+
+        # --- OG image banner (hidden until image loads) ---
+        self.og_banner = QLabel()
+        self.og_banner.setObjectName("OGBanner")
+        self.og_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.og_banner.setFixedHeight(160)
+        self.og_banner.setScaledContents(False)
+        self.og_banner.hide()
+        card_v.addWidget(self.og_banner)
+
+        # --- Header row: favicon + title + domain ---
+        header = QWidget()
+        header.setObjectName("OGHeader")
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(16, 14, 16, 10)
+        h_layout.setSpacing(10)
+
+        self.favicon_lbl = QLabel()
+        self.favicon_lbl.setFixedSize(20, 20)
+        self.favicon_lbl.setScaledContents(True)
+        self._set_placeholder_favicon()
+        h_layout.addWidget(self.favicon_lbl)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+
+        title_str = (self._og_data.get("og_title") or self._site_name or self._domain)[:80]
+        self.title_lbl = QLabel(title_str)
+        self.title_lbl.setFont(QFont("Manrope", 14, QFont.Weight.DemiBold))
+        self.title_lbl.setWordWrap(False)
+        self.title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        text_col.addWidget(self.title_lbl)
+
+        self.domain_lbl = QLabel(self._domain)
+        self.domain_lbl.setFont(QFont("Manrope", 10))
+        text_col.addWidget(self.domain_lbl)
+
+        h_layout.addLayout(text_col)
+        h_layout.addStretch()
+
+        # Small "Open ↗" button
+        self.open_btn = QLabel(f"Open {self._domain}  ↗")
+        self.open_btn.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        self.open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_btn.mousePressEvent = lambda _: QDesktopServices.openUrl(QUrl(self._url))
+        h_layout.addWidget(self.open_btn)
+
+        card_v.addWidget(header)
+
+        # --- Description ---
+        desc = (self._og_data.get("og_description") or "").strip()
+        if desc:
+            self.desc_lbl = QLabel(desc[:200] + ("…" if len(desc) > 200 else ""))
+            self.desc_lbl.setFont(QFont("Manrope", 11))
+            self.desc_lbl.setWordWrap(True)
+            self.desc_lbl.setContentsMargins(16, 0, 16, 14)
+            card_v.addWidget(self.desc_lbl)
+        else:
+            self.desc_lbl = None
+
+    # ------------------------------------------------------------------
+    def _apply_theme(self):
+        dark = self.current_theme == "dark"
+        if dark:
+            card_bg    = "rgba(255,255,255,0.05)"
+            card_bdr   = "rgba(255,255,255,0.10)"
+            title_col  = "#FFFFFF"
+            domain_col = "rgba(255,255,255,0.45)"
+            desc_col   = "rgba(255,255,255,0.70)"
+            open_col   = "rgba(255,255,255,0.55)"
+            open_hov   = "#FFFFFF"
+        else:
+            card_bg    = "rgba(0,0,0,0.04)"
+            card_bdr   = "rgba(0,0,0,0.10)"
+            title_col  = "#111111"
+            domain_col = "rgba(0,0,0,0.40)"
+            desc_col   = "rgba(0,0,0,0.65)"
+            open_col   = "rgba(0,0,0,0.45)"
+            open_hov   = "#000000"
+
+        self.card.setStyleSheet(f"""
+            QWidget#OGCard {{
+                background: {card_bg};
+                border: 1px solid {card_bdr};
+                border-radius: 16px;
+            }}
+            QWidget#OGHeader {{
+                background: transparent;
+            }}
+            QLabel#OGBanner {{
+                background: {card_bg};
+                border-radius: 16px 16px 0px 0px;
+            }}
+        """)
+        self.title_lbl.setStyleSheet(f"color: {title_col}; background: transparent;")
+        self.domain_lbl.setStyleSheet(f"color: {domain_col}; background: transparent;")
+        self.open_btn.setStyleSheet(
+            f"color: {open_col}; background: transparent; padding: 4px 8px;"
+            f" border: 1px solid {card_bdr}; border-radius: 10px;"
+        )
+        if self.desc_lbl:
+            self.desc_lbl.setStyleSheet(f"color: {desc_col}; background: transparent;")
+
+    def set_theme(self, theme: str):
+        self.current_theme = theme
+        self._apply_theme()
+
+    # ------------------------------------------------------------------
+    def _set_placeholder_favicon(self):
+        dark = self.current_theme == "dark"
+        col = "rgba(255,255,255,0.25)" if dark else "rgba(0,0,0,0.18)"
+        self.favicon_lbl.setStyleSheet(
+            f"background: {col}; border-radius: 4px; border: none;"
+        )
+
+    def _dl_image(self, url: str, role: str):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = resp.read()
+            self._image_downloaded.emit(data, role)
+        except Exception:
+            pass
+
+    def _on_image_data(self, data: bytes, role: str):
+        px = QPixmap()
+        if not px.loadFromData(data) or px.isNull():
+            return
+        if role == "favicon":
+            scaled = px.scaled(
+                20, 20,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.favicon_lbl.setPixmap(scaled)
+            self.favicon_lbl.setStyleSheet("background: transparent; border: none;")
+        elif role == "og":
+            w = self.og_banner.width() or 600
+            scaled = px.scaledToWidth(w, Qt.TransformationMode.SmoothTransformation)
+            if scaled.height() > 160:
+                scaled = scaled.copy(0, 0, w, 160)
+            self.og_banner.setPixmap(scaled)
+            self.og_banner.show()
+            self._update_list_item_size()
+
+    def _update_list_item_size(self):
+        """Force the QListWidget to recalculate item height after banner appears."""
+        p = self.parent()
+        while p:
+            from PyQt6.QtWidgets import QListWidget
+            if isinstance(p, QListWidget):
+                # Find our item and update its sizeHint
+                for i in range(p.count()):
+                    item = p.item(i)
+                    if p.itemWidget(item) is not None:
+                        iw = p.itemWidget(item)
+                        if hasattr(iw, "content_widget") and iw.content_widget is self:
+                            item.setSizeHint(self.sizeHint())
+                            break
+                break
+            p = p.parent()
+
+    def sizeHint(self):
+        h = 86
+        if self.desc_lbl:
+            h += 20 + self.desc_lbl.sizeHint().height()
+        if not self.og_banner.isHidden():
+            h += 160
+        return QSize(660, h)
+
+
+# ---------------------------------------------------------------------------
+# QuickURLWidget — instant website open card shown as soon as URL is detected
+# ---------------------------------------------------------------------------
+
+class QuickURLWidget(QWidget):
+    """
+    Shown immediately when user types a URL/domain — no network call needed.
+    Favicon loads asynchronously from Google's favicon service.
+    Clicking anywhere opens the URL.
+    """
+    _favicon_ready = pyqtSignal(bytes)
+
+    def __init__(self, url: str, domain: str, theme: str = "dark", parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.domain = domain
+        self.current_theme = theme
+        self._hovered = False
+        self._favicon_ready.connect(self._on_favicon)
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+        self._build_ui()
+        self._apply_theme()
+
+        # Favicon from Google's service — usually very fast (cached CDN)
+        fav_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
+        threading.Thread(target=self._fetch_fav, args=(fav_url,), daemon=True).start()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.card = QWidget()
+        self.card.setObjectName("QuickURLCard")
+        outer.addWidget(self.card)
+
+        row = QHBoxLayout(self.card)
+        row.setContentsMargins(18, 16, 18, 16)
+        row.setSpacing(13)
+
+        # Favicon container
+        fav_wrap = QWidget()
+        fav_wrap.setFixedSize(36, 36)
+        fav_wrap.setObjectName("FavWrap")
+        fav_layout = QHBoxLayout(fav_wrap)
+        fav_layout.setContentsMargins(0, 0, 0, 0)
+        self.favicon_lbl = QLabel(fav_wrap)
+        self.favicon_lbl.setFixedSize(22, 22)
+        self.favicon_lbl.setScaledContents(True)
+        self.favicon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fav_layout.addWidget(self.favicon_lbl, 0, Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(fav_wrap)
+
+        # Text column
+        txt = QVBoxLayout()
+        txt.setSpacing(3)
+        txt.setContentsMargins(0, 0, 0, 0)
+
+        self.title_lbl = QLabel(f"Open {self.domain}")
+        self.title_lbl.setFont(QFont("Manrope", 14, QFont.Weight.DemiBold))
+        self.title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        txt.addWidget(self.title_lbl)
+
+        self.url_lbl = QLabel(self.url)
+        self.url_lbl.setFont(QFont("Manrope", 10))
+        self.url_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        txt.addWidget(self.url_lbl)
+
+        row.addLayout(txt)
+        row.addStretch()
+
+        self.arrow_lbl = QLabel("↗")
+        self.arrow_lbl.setFont(QFont("Manrope", 16))
+        self.arrow_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        row.addWidget(self.arrow_lbl)
+
+    # ------------------------------------------------------------------
+    def _apply_theme(self):
+        dark = self.current_theme == "dark"
+        if dark:
+            card_bg  = "rgba(255,255,255,0.06)"
+            card_bdr = "rgba(255,255,255,0.13)"
+            fav_bg   = "rgba(255,255,255,0.10)"
+            title    = "#FFFFFF"
+            url_col  = "rgba(255,255,255,0.42)"
+            arrow    = "rgba(255,255,255,0.35)"
+            hover_bg = "rgba(255,255,255,0.10)"
+        else:
+            card_bg  = "rgba(0,0,0,0.04)"
+            card_bdr = "rgba(0,0,0,0.10)"
+            fav_bg   = "rgba(0,0,0,0.07)"
+            title    = "#111111"
+            url_col  = "rgba(0,0,0,0.40)"
+            arrow    = "rgba(0,0,0,0.32)"
+            hover_bg = "rgba(0,0,0,0.07)"
+
+        bg = hover_bg if self._hovered else card_bg
+        self.card.setStyleSheet(f"""
+            QWidget#QuickURLCard {{
+                background: {bg};
+                border: 1px solid {card_bdr};
+                border-radius: 16px;
+            }}
+            QWidget#FavWrap {{
+                background: {fav_bg};
+                border-radius: 10px;
+                border: none;
+            }}
+        """)
+        self.title_lbl.setStyleSheet(f"color: {title}; background: transparent;")
+        self.url_lbl.setStyleSheet(f"color: {url_col}; background: transparent;")
+        self.arrow_lbl.setStyleSheet(f"color: {arrow}; background: transparent;")
+        # Favicon inherits FavWrap bg unless pixmap is loaded
+        if not self.favicon_lbl.pixmap() or self.favicon_lbl.pixmap().isNull():
+            self.favicon_lbl.setStyleSheet(f"background: transparent; border: none;")
+
+    def set_theme(self, theme: str):
+        self.current_theme = theme
+        self._apply_theme()
+
+    # ------------------------------------------------------------------
+    def _fetch_fav(self, url: str):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = r.read()
+            self._favicon_ready.emit(data)
+        except Exception:
+            pass
+
+    def _on_favicon(self, data: bytes):
+        px = QPixmap()
+        if px.loadFromData(data) and not px.isNull():
+            scaled = px.scaled(22, 22,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            self.favicon_lbl.setPixmap(scaled)
+            self.favicon_lbl.setStyleSheet("background: transparent; border: none;")
+
+    # ------------------------------------------------------------------
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_theme()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_theme()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        # Don't open URL here — list's itemClicked → on_entered() opens it once.
+        # Opening here would duplicate with on_entered and open the link twice.
+        super().mousePressEvent(event)
+
+    def sizeHint(self):
+        return QSize(660, 74)
+
+class WeatherActionWidget(QWidget):
+    def __init__(self, location, temp, condition, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+        
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        
+        self.icon_label = QLabel("☁️")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent; border: none; font-size: 16px;")
+        
+        self.action_label = QLabel("WEATHER")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        
+        self.loc_badge = QLabel(location.upper())
+        self.loc_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        self.loc_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.loc_badge)
+        
+        self.temp_label = QLabel(temp)
+        self.temp_label.setFont(QFont("Instrument Serif", 36, QFont.Weight.Normal))
+        self.temp_label.setWordWrap(True)
+        self.temp_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        self.cond_label = QLabel(condition)
+        self.cond_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
+        self.cond_label.setWordWrap(True)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.cond_label)
+        card_layout.addWidget(self.temp_label)
+        
+        layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+        
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(56, 189, 248, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(56, 189, 248, 0.2)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            action_color = "#38BDF8" 
+            badge_bg = "rgba(56, 189, 248, 0.15)"
+            badge_color = "#38BDF8"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(14, 165, 233, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(14, 165, 233, 0.2)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            action_color = "#0EA5E9"
+            badge_bg = "rgba(14, 165, 233, 0.15)"
+            badge_color = "#0284C7"
+
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.temp_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
+        self.cond_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+        self.loc_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+class UnitActionWidget(QWidget):
+    def __init__(self, amount, from_unit, to_unit, converted_value, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(12)
+        
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+        
+        self.icon_label = QLabel("📐")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent; border: none; font-size: 16px;")
+        
+        self.action_label = QLabel("CONVERT")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        
+        self.unit_badge = QLabel(f"{from_unit.upper()} ➝ {to_unit.upper()}")
+        self.unit_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
+        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.unit_badge)
+        
+        self.source_label = QLabel(f"{amount} {from_unit.upper()}")
+        self.source_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
+        self.source_label.setWordWrap(True)
+        
+        self.converted_label = QLabel(f"{converted_value} {to_unit.upper()}")
+        self.converted_label.setFont(QFont("Instrument Serif", 36, QFont.Weight.Normal))
+        self.converted_label.setWordWrap(True)
+        self.converted_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.source_label)
+        card_layout.addWidget(self.converted_label)
+        layout.addWidget(self.card)
+        
+        self.current_theme = "light"
+        self.update_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+        
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(168, 85, 247, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(168, 85, 247, 0.2)"
+            title_color = "#FFFFFF"
+            desc_color = "rgba(255,255,255,0.7)"
+            action_color = "#A855F7" 
+            badge_bg = "rgba(168, 85, 247, 0.15)"
+            badge_color = "#C084FC"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(147, 51, 234, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(147, 51, 234, 0.2)"
+            title_color = "#050505"
+            desc_color = "rgba(0,0,0,0.6)"
+            action_color = "#9333EA"
+            badge_bg = "rgba(147, 51, 234, 0.15)"
+            badge_color = "#7E22CE"
+
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.converted_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
+        self.source_label.setStyleSheet(f"color: {desc_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
             return self.layout().sizeHint()
         return super().sizeHint()
