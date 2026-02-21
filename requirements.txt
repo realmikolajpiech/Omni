@@ -39,6 +39,7 @@ librosa
 sox
 openwakeword
 onnxruntime
+SpeechRecognition
 
 # NLP / Utils
 pytz

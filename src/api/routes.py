@@ -465,9 +465,11 @@ def action_endpoint():
         if model_manager.fast_model:
             _tr_messages = [
                 {"role": "system", "content": (
-                    f"Translate to {_target_lang}. Output exactly one line in this format:\n"
+                    f"First, THINK inside <think>...</think> tags if the user's text actually needs translation to '{_target_lang}', "
+                    f"or if it is already in '{_target_lang}', a proper noun, or a regular search query. "
+                    "If it clearly needs translation because it's in a different foreign language, output exactly:\n"
                     f"TRANSLATE:original|from_lang|{_target_lang}|translation\n"
-                    "Use ISO 639-1 two-letter language codes. No extra text."
+                    "Otherwise, output exactly: SKIP"
                 )},
                 {"role": "user", "content": query},
             ]
@@ -475,7 +477,7 @@ def action_endpoint():
                 if model_manager.fast_lock.acquire(timeout=5):
                     try:
                         _tr_out = model_manager.fast_model.create_chat_completion(
-                            messages=_tr_messages, max_tokens=80, temperature=0.0,
+                            messages=_tr_messages, max_tokens=150, temperature=0.0,
                             request_id=request_id,
                         )
                     finally:
@@ -525,49 +527,40 @@ def action_endpoint():
     system_prompt = """You are an intelligent action classifier.
 Analyze the user query and the provided search results to decide the best action.
 
-Output ONE command only:
-- TRANSLATE:source_text|from_lang|to_lang|translated_text (if query is a word/phrase in a foreign language that the user likely wants translated)
-- CURRENCY:amount|from_unit|to_unit|converted_value (if query asks for currency conversion, e.g. "22usd to pln")
-- WEATHER:location|temp|condition (if query asks for weather, use search results to find the answer)
-- UNIT:amount|from_unit|to_unit|converted_value (if query asks for unit conversion other than currency)
-- PERSON:Name (search results confirm real person/biography)
-- PLACE:Name (results confirm physical location/city/landmark or user asks for map/navigation/directions)
-- OPEN:url (results show specific official website, e.g. 'safelabs.info')
+First, THINK step-by-step inside <think>...</think> tags. Evaluate:
+1. What is the user's EXACT core intent?
+2. Are they EXPLICITLY asking for Weather, Translation, Currency, or Unit conversion? (Do not trigger these if it's just a casual message or a name).
+3. ONLY trigger a fast action if you are highly confident it's the primary intent.
+4. If it's a casual message, a greeting, or you are unsure, default to SEARCH:query.
+
+After thinking, output ONE command only on a new line:
+- TRANSLATE:source_text|from_lang|to_lang|translated_text (only if explicitly asking to translate, or typing a purely foreign phrase expecting translation)
+- CURRENCY:amount|from_unit|to_unit|converted_value (e.g. "22usd to pln")
+- WEATHER:location|temp|condition (only if explicitly asking for weather)
+- UNIT:amount|from_unit|to_unit|converted_value
+- PERSON:Name (search results strongly confirm real person/biography)
+- PLACE:Name (results confirm location/city)
+- OPEN:url (results show specific official website)
 - INSTALL:name (results show downloadable software/app)
-- UNINSTALL:name (user explicitly wants to remove/uninstall a software/app)
-- SEARCH:query (general topic or unclear)
+- UNINSTALL:name (user explicitly wants to remove software)
+- SEARCH:query (general topic, unclear, or conversational)
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode|brightness|volume|mute|night_shift|dnd|wifi|bluetooth","value":true/false or 0-100}
 
-Rules:
-1. Foreign word/phrase typed by a user in another language → TRANSLATE:source_text|from_lang|to_lang|translated_text
-   - REQUIRED: Output exactly 4 parts separated by '|'.
-   - 'from_lang' and 'to_lang' must be 2-letter codes.
-   - If you are unsure of 'from_lang', use 'auto'.
-2. Currency conversion -> CURRENCY:amount|from_unit|to_unit|converted_value
-   - Calculate or estimate the conversion based on your knowledge.
-3. Weather -> WEATHER:location|temp|condition
-   - Estimate based on search results.
-   - Example: 'weather in london' -> WEATHER:London|15°C|Partly Cloudy
-4. Unit conversion -> UNIT:amount|from_unit|to_unit|converted_value
-   - Calculate conversion based on your knowledge.
-   - Example: '10 km to miles' -> UNIT:10|km|mi|6.21
-5. Website query + Result 1 is official site → OPEN:url
-6. "who is..." → PERSON:Name
-7. "where is..." → PLACE:Name
-8. Clearly downloadable software → INSTALL:Name
-9. User asks to remove/uninstall software → UNINSTALL:Name
-10. System setting change → SYSTEM_SETTINGS JSON
-11. Otherwise → SEARCH:query
-
 Examples:
-'amor' -> TRANSLATE:amor|es|pl|miłość
-'saudade' -> TRANSLATE:saudade|pt|pl|tęsknota
-'safelabs' + [Result 1: Safe Labs Official Site...] -> OPEN:https://safelabs.info
-'zmień tryb na ciemny' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
-'zwiększ jasność' -> SYSTEM_SETTINGS:{"type":"system_settings","setting":"brightness","value":80}
-'apple' (in PL context) -> TRANSLATE:apple|en|pl|jabłko
-'gato' (in EN context) -> TRANSLATE:gato|es|en|cat
-'po niemiecku kot' -> TRANSLATE:kot|pl|de|Katze
+<think>The user said "amor", a simple foreign word. They likely want a translation.</think>
+TRANSLATE:amor|es|pl|miłość
+
+<think>User asked "co tam". This is a conversational greeting, no fast action needed.</think>
+SEARCH:co tam
+
+<think>User wants weather in London. Results say 15C and Cloudy.</think>
+WEATHER:London|15°C|Partly Cloudy
+
+<think>User wants to open safelabs. Result 1 is the official site.</think>
+OPEN:https://safelabs.info
+
+<think>User typed "zmień tryb na ciemny". This is a system setting request.</think>
+SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
 """
     
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -619,7 +612,7 @@ Examples:
 
         out = _safe_fast_completion(
             messages=messages,
-            max_tokens=128,
+            max_tokens=256,
             temperature=0.0,
             step_name="Action intent",
             reset_model=True

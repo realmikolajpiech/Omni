@@ -53,3 +53,5 @@ data/
 
 # SearXNG local instances if any
 searxng/searxng_local/
+
+.claude/

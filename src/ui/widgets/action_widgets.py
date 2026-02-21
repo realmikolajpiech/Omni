@@ -459,9 +459,22 @@ class AppActionWidget(QWidget):
         self.card_layout.setSpacing(12)
 
         header_layout = QHBoxLayout()
-        icon_label = QLabel("🚀")
-        icon_label.setFont(QFont("Manrope", 18))
-        icon_label.setStyleSheet("background: transparent;")
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background: transparent;")
+        
+        # Load app icon
+        icon = self._get_app_icon(name)
+        if not icon.isNull():
+            self.icon_label.setPixmap(icon.pixmap(32, 32))
+        else:
+            # Fallback styling if icon not found
+            self.icon_label.setText("🚀")
+            self.icon_label.setFont(QFont("Manrope", 20))
         
         display_name = name.title()
         
@@ -469,7 +482,7 @@ class AppActionWidget(QWidget):
         self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
         self.title_label.setStyleSheet("color: #111111; background: transparent;")
         
-        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.icon_label)
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         
@@ -501,6 +514,39 @@ class AppActionWidget(QWidget):
         
         layout.addWidget(self.card)
         self.update_style()
+        
+    def _get_app_icon(self, app_name):
+        from PyQt6.QtWidgets import QFileIconProvider
+        from PyQt6.QtCore import QFileInfo
+        import os
+        
+        search_paths = [
+            "/Applications",
+            "/System/Applications",
+            os.path.expanduser("~/Applications")
+        ]
+        
+        name_clean = app_name.replace('-', ' ').lower()
+        
+        provider = QFileIconProvider()
+        for base in search_paths:
+            if not os.path.exists(base): continue
+            
+            # Exact match
+            exact = os.path.join(base, f"{app_name}.app")
+            if os.path.exists(exact):
+                return provider.icon(QFileInfo(exact))
+                
+            exact_clean = os.path.join(base, f"{name_clean}.app")
+            if os.path.exists(exact_clean):
+                return provider.icon(QFileInfo(exact_clean))
+            
+            # Substring match
+            for item in os.listdir(base):
+                if item.endswith(".app") and name_clean in item.lower():
+                    return provider.icon(QFileInfo(os.path.join(base, item)))
+                    
+        return QIcon()
         
     def accept_open(self):
         self.desc_label.setText("App launched.")
@@ -591,12 +637,14 @@ class AppActionWidget(QWidget):
         
 class InstallActionWidget(QWidget):
     install_accepted = pyqtSignal(str, QWidget)
+    icon_downloaded = pyqtSignal(object)
     
     def __init__(self, name, website_url, parent=None):
         super().__init__(parent)
         self.app_name = name
         self.website_url = website_url
         self.current_theme = "light"
+        self.icon_downloaded.connect(self.update_icon)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -615,9 +663,23 @@ class InstallActionWidget(QWidget):
         prompt_layout.setSpacing(12)
         
         header_layout = QHBoxLayout()
-        icon_label = QLabel("📦")
-        icon_label.setFont(QFont("Manrope", 18))
-        icon_label.setStyleSheet("background: transparent;")
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+        
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background: transparent;")
+        
+        # Determine fallback icon depending on brew vs general app
+        # Try local first if installed, just in case
+        icon = self._get_app_icon(name)
+        if not icon.isNull():
+            self.icon_label.setPixmap(icon.pixmap(32, 32))
+        else:
+            # Fallback before download completes
+            self.icon_label.setText("📦")
+            self.icon_label.setFont(QFont("Manrope", 20))
         
         # Display name formatting
         display_name = title_case_name = name.replace('-', ' ').title()
@@ -626,7 +688,7 @@ class InstallActionWidget(QWidget):
         self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
         self.title_label.setStyleSheet("color: #111111; background: transparent;")
         
-        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.icon_label)
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         
@@ -665,6 +727,71 @@ class InstallActionWidget(QWidget):
         
         layout.addWidget(self.card)
         self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        if not self.website_url: return
+        try:
+            clean_url = self.website_url.strip().strip('<>').strip('"').strip("'")
+            if not clean_url.startswith("http") and not clean_url.startswith("//"):
+                clean_url = "https://" + clean_url
+            parsed = urlparse(clean_url)
+            domain = parsed.netloc
+            if not domain: return
+            if domain.startswith("www."): domain = domain[4:]
+            icon_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
+            threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+        except: pass
+
+    def _download_icon(self, url):
+        try:
+            # Check if this app is homebrew itself
+            if "brew.sh" in url:
+                pass # Brew icon might not look great directly from favicon
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            # Overwrite if we don't have a better high-res icon from local fs
+            if self.icon_label.text() == "📦":
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                if not pixmap.isNull():
+                    self.icon_label.setText("")
+                    self.icon_label.setPixmap(pixmap.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
+        
+    def _get_app_icon(self, app_name):
+        from PyQt6.QtWidgets import QFileIconProvider
+        from PyQt6.QtCore import QFileInfo
+        import os
+        
+        search_paths = [
+            "/Applications",
+            "/System/Applications",
+            os.path.expanduser("~/Applications")
+        ]
+        name_clean = app_name.replace('-', ' ').lower()
+        
+        provider = QFileIconProvider()
+        for base in search_paths:
+            if not os.path.exists(base): continue
+            
+            exact = os.path.join(base, f"{app_name}.app")
+            if os.path.exists(exact):
+                return provider.icon(QFileInfo(exact))
+                
+            exact_clean = os.path.join(base, f"{name_clean}.app")
+            if os.path.exists(exact_clean):
+                return provider.icon(QFileInfo(exact_clean))
+            
+            for item in os.listdir(base):
+                if item.endswith(".app") and name_clean in item.lower():
+                    return provider.icon(QFileInfo(os.path.join(base, item)))
+        return QIcon()
         
     def accept_install(self):
         self.desc_label.setText("Installation started.")
@@ -780,9 +907,20 @@ class UninstallActionWidget(QWidget):
         prompt_layout.setSpacing(12)
 
         header_layout = QHBoxLayout()
-        icon_label = QLabel("🗑️")
-        icon_label.setFont(QFont("Manrope", 18))
-        icon_label.setStyleSheet("background: transparent;")
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+        
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background: transparent;")
+        
+        icon = self._get_app_icon(name)
+        if not icon.isNull():
+            self.icon_label.setPixmap(icon.pixmap(32, 32))
+        else:
+            self.icon_label.setText("🗑️")
+            self.icon_label.setFont(QFont("Manrope", 20))
 
         display_name = name.replace('-', ' ').title()
 
@@ -790,7 +928,7 @@ class UninstallActionWidget(QWidget):
         self.title_label.setFont(QFont("Instrument Serif", 22, QFont.Weight.Normal))
         self.title_label.setStyleSheet("color: #111111; background: transparent;")
 
-        header_layout.addWidget(icon_label)
+        header_layout.addWidget(self.icon_label)
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
 
@@ -824,6 +962,35 @@ class UninstallActionWidget(QWidget):
 
         layout.addWidget(self.card)
         self.update_style()
+
+    def _get_app_icon(self, app_name):
+        from PyQt6.QtWidgets import QFileIconProvider
+        from PyQt6.QtCore import QFileInfo
+        import os
+        
+        search_paths = [
+            "/Applications",
+            "/System/Applications",
+            os.path.expanduser("~/Applications")
+        ]
+        name_clean = app_name.replace('-', ' ').lower()
+        
+        provider = QFileIconProvider()
+        for base in search_paths:
+            if not os.path.exists(base): continue
+            
+            exact = os.path.join(base, f"{app_name}.app")
+            if os.path.exists(exact):
+                return provider.icon(QFileInfo(exact))
+                
+            exact_clean = os.path.join(base, f"{name_clean}.app")
+            if os.path.exists(exact_clean):
+                return provider.icon(QFileInfo(exact_clean))
+            
+            for item in os.listdir(base):
+                if item.endswith(".app") and name_clean in item.lower():
+                    return provider.icon(QFileInfo(os.path.join(base, item)))
+        return QIcon()
 
     def accept_uninstall(self):
         self.desc_label.setText("Uninstallation started.")
@@ -2343,12 +2510,14 @@ class TerminalActionWidget(QWidget):
         h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(8)
 
-        status_dot = QLabel("●")
+        status_dot = QLabel("✓" if success else "✗")
         dot_color = "#30D158" if success else "#FF453A"
-        status_dot.setStyleSheet(f"color: {dot_color}; font-size: 10px; background: transparent;")
+        status_dot.setStyleSheet(f"color: {dot_color}; font-size: 14px; font-weight: 800; background: transparent;")
         status_dot.setFixedWidth(14)
+        status_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        label = QLabel("TERMINAL")
+        title_text = description.upper() if description else "TERMINAL ACTION"
+        label = QLabel(title_text)
         label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
         label.setStyleSheet("color: #888888; letter-spacing: 0.5px; background: transparent;")
 
@@ -2363,23 +2532,17 @@ class TerminalActionWidget(QWidget):
         self.cmd_label.setWordWrap(True)
         self.cmd_label.setStyleSheet("color: #DDDDDD; background: transparent;")
 
-        # ── Description (optional human-readable summary) ───────────────────
-        if description:
-            self.desc_label = QLabel(description)
-            self.desc_label.setFont(QFont("Manrope", 11))
-            self.desc_label.setWordWrap(True)
-            self.desc_label.setStyleSheet("color: #AAAAAA; background: transparent;")
-        else:
-            self.desc_label = None
-
         # ── Collapsible output ───────────────────────────────────────────────
         combined_out = ""
         if output:
             combined_out += output
         if error:
             combined_out += ("\n" if combined_out else "") + error
+            
+        combined_out = combined_out.strip()
 
         self.output_label = None
+        self.hint_label = None
         if combined_out:
             self.output_label = QLabel(combined_out[:2000] + ("…" if len(combined_out) > 2000 else ""))
             self.output_label.setFont(QFont("Menlo", 10))
@@ -2389,14 +2552,20 @@ class TerminalActionWidget(QWidget):
                 f"color: {out_color}; background: rgba(0,0,0,0.15); "
                 f"border-radius: 6px; padding: 6px 8px;"
             )
-            self.output_label.setVisible(True)
-            self._expanded = True
+            self.output_label.setVisible(False)
+            self._expanded = False
+            
+            self.card.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            self.hint_label = QLabel("Click to view output")
+            self.hint_label.setFont(QFont("Manrope", 9, QFont.Weight.Medium))
+            self.hint_label.setStyleSheet("color: #888888; background: transparent; font-style: italic;")
 
         card_layout.addWidget(header)
         card_layout.addWidget(self.cmd_label)
-        if self.desc_label:
-            card_layout.addWidget(self.desc_label)
-        if self.output_label:
+        
+        if combined_out:
+            card_layout.addWidget(self.hint_label)
             card_layout.addWidget(self.output_label)
 
         layout.addWidget(self.card)
@@ -2406,7 +2575,13 @@ class TerminalActionWidget(QWidget):
         if self.output_label:
             self._expanded = not self._expanded
             self.output_label.setVisible(self._expanded)
+            self.hint_label.setVisible(not self._expanded)
             self.updateGeometry()
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'updateGeometry'):
+                    parent.updateGeometry()
+                parent = parent.parent()
         super().mousePressEvent(event)
 
     def update_style(self):
@@ -2416,11 +2591,11 @@ class TerminalActionWidget(QWidget):
             border = "rgba(255,255,255,0.10)"
             cmd_color = "#E0E0E0"
         else:
-            bg = "rgba(30, 30, 30, 0.88)"
-            border = "rgba(255,255,255,0.08)"
-            cmd_color = "#E8E8E8"
+            bg = "rgba(0, 0, 0, 0.04)"
+            border = "rgba(0,0,0,0.10)"
+            cmd_color = "#333333"
         self.card.setStyleSheet(
-            f"QWidget#TerminalCard {{ background-color: {bg}; border-radius: 14px; "
+            f"QWidget#TerminalCard {{ background-color: {bg}; border-radius: 12px; "
             f"border: 1px solid {border}; }}"
         )
         self.cmd_label.setStyleSheet(f"color: {cmd_color}; background: transparent;")
@@ -3190,8 +3365,12 @@ class QuickURLWidget(QWidget):
         return QSize(660, 74)
 
 class WeatherActionWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
     def __init__(self, location, temp, condition, parent=None):
         super().__init__(parent)
+        self.icon_downloaded.connect(self.update_icon)
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -3207,10 +3386,10 @@ class WeatherActionWidget(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(8)
         
-        self.icon_label = QLabel("☁️")
+        self.icon_label = QLabel()
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_label.setStyleSheet("background-color: transparent; border: none; font-size: 16px;")
+        self.icon_label.setStyleSheet("background-color: transparent; border: none;")
         
         self.action_label = QLabel("WEATHER")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
@@ -3241,6 +3420,28 @@ class WeatherActionWidget(QWidget):
         
         self.current_theme = "light"
         self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=weather.com&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -3280,8 +3481,12 @@ class WeatherActionWidget(QWidget):
         return super().sizeHint()
 
 class UnitActionWidget(QWidget):
+    icon_downloaded = pyqtSignal(object)
+
     def __init__(self, amount, from_unit, to_unit, converted_value, parent=None):
         super().__init__(parent)
+        self.icon_downloaded.connect(self.update_icon)
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -3297,10 +3502,10 @@ class UnitActionWidget(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(8)
         
-        self.icon_label = QLabel("📐")
+        self.icon_label = QLabel()
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_label.setStyleSheet("background-color: transparent; border: none; font-size: 16px;")
+        self.icon_label.setStyleSheet("background-color: transparent; border: none;")
         
         self.action_label = QLabel("CONVERT")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
@@ -3330,6 +3535,28 @@ class UnitActionWidget(QWidget):
         
         self.current_theme = "light"
         self.update_style()
+        self.fetch_icon()
+
+    def fetch_icon(self):
+        icon_url = "https://www.google.com/s2/favicons?domain=calculator.net&sz=64"
+        threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+
+    def _download_icon(self, url):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+        except: pass
+
+    def update_icon(self, data):
+        try:
+            if not self.icon_label: return
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.icon_label.setText("")
+                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except: pass
 
     def set_theme(self, theme):
         self.current_theme = theme
