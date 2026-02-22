@@ -487,7 +487,8 @@ class CollapsibleThinkingWidget(QWidget):
         
         # Update text if needed, or just keep it static. Let's use an arrow indicator.
         arrow = "▼" if new_visibility else "▶"
-        self.header_button.setText(f"{arrow} Reasoning process")
+        current_text = getattr(self, '_header_label', "Reasoning process")
+        self.header_button.setText(f"{arrow} {current_text}")
         self.header_button.setChecked(new_visibility)
         
         if new_visibility:
@@ -506,6 +507,12 @@ class CollapsibleThinkingWidget(QWidget):
     def toggle_content(self):
         is_visible = self.content_widget.isVisible()
         self.set_collapsed(is_visible)
+
+    def set_header_label(self, text):
+        self._header_label = text
+        is_visible = self.content_widget.isVisible()
+        arrow = "▼" if is_visible else "▶"
+        self.header_button.setText(f"{arrow} {text}")
 
     def sizeHint(self):
         base_height = self.header_button.sizeHint().height()
@@ -997,10 +1004,18 @@ class AnswerWidget(QWidget):
         # Always update item size so the list allocates correct height
         self.update_item_size()
 
-    def hide_thinking_and_play_done(self):
-        """Remove thinking block from the bubble and play a short 'done' highlight."""
+    def set_thinking_header(self, text):
         if self.thinking_widget is not None:
-            self.thinking_widget.setVisible(False)
+            self.thinking_widget.set_header_label(text)
+            self.update_item_size()
+
+    def hide_thinking_and_play_done(self, action_label=None):
+        """Collapse thinking block and play a short 'done' highlight. Rename label if provided."""
+        if self.thinking_widget is not None:
+            self.set_thinking_collapsed(True)
+            if action_label:
+                self.set_thinking_header(action_label)
+            # Do NOT hide the widget. Let the user expand it to see reasoning.
         # Also ensure the placeholder is hidden (covers case when no CollapsibleThinkingWidget)
         if self.ai_bubble is not None and self.ai_bubble.bubble.thinking_placeholder is not None:
             self.ai_bubble.bubble._placeholder_shown = False

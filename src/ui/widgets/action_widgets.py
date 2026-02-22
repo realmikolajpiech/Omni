@@ -3594,3 +3594,310 @@ class UnitActionWidget(QWidget):
             if h > 0: return QSize(w, h + 35)
             return self.layout().sizeHint()
         return super().sizeHint()
+
+import string
+import random
+import io
+import qrcode
+from PyQt6.QtGui import QColor
+
+class ColorActionWidget(QWidget):
+    def __init__(self, color_hex, rgb_val, hsl_val, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(16)
+        
+        self.color_preview = QWidget()
+        self.color_preview.setFixedSize(60, 60)
+        self.color_preview.setStyleSheet(f"background-color: {color_hex}; border-radius: 8px; border: 1px solid rgba(128,128,128,0.3);")
+        
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        
+        self.action_label = QLabel("COLOR PREVIEW")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.action_label.setStyleSheet("color: #ec4899; letter-spacing: 1px;") # Pink
+        
+        self.hex_label = QLabel(color_hex.upper())
+        self.hex_label.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal))
+        self.hex_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        self.desc_label = QLabel(f"RGB: {rgb_val} • HSL: {hsl_val}")
+        self.desc_label.setFont(QFont("Manrope", 12))
+        self.desc_label.setStyleSheet("color: #888888;")
+        self.desc_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        text_col.addWidget(self.action_label)
+        text_col.addWidget(self.hex_label)
+        text_col.addWidget(self.desc_label)
+        
+        card_layout.addWidget(self.color_preview)
+        card_layout.addLayout(text_col)
+        card_layout.addStretch()
+        
+        layout.addWidget(self.card)
+        
+        self.current_theme = "dark"
+        self.set_theme(self.current_theme)
+
+    def update_content(self, data: dict):
+        color_hex = data.get('color_hex', '#000000')
+        rgb_val = data.get('rgb_val', '')
+        hsl_val = data.get('hsl_val', '')
+        self.color_preview.setStyleSheet(f"background-color: {color_hex}; border-radius: 8px; border: 1px solid rgba(128,128,128,0.3);")
+        self.hex_label.setText(color_hex.upper())
+        self.desc_label.setText(f"RGB: {rgb_val} • HSL: {hsl_val}")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        is_dark = theme == "dark"
+        bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(236, 72, 153, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if is_dark else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(236, 72, 153, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+        border = "rgba(236, 72, 153, 0.2)"
+        title_color = "#FFFFFF" if is_dark else "#050505"
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.hex_label.setStyleSheet(f"color: {title_color};")
+
+
+class TimerActionWidget(QWidget):
+    def __init__(self, duration_sec, parent=None):
+        super().__init__(parent)
+        self.duration = max(1, int(duration_sec))
+        self.remaining = self.duration
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        
+        self.action_label = QLabel("TIMER")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.action_label.setStyleSheet("color: #f97316; letter-spacing: 1px;")
+        
+        self.time_label = QLabel(self._format_time(self.remaining))
+        self.time_label.setFont(QFont("Instrument Serif", 48, QFont.Weight.Normal))
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.btn = QPushButton("Pause")
+        self.btn.setFixedSize(120, 36)
+        self.btn.clicked.connect(self._toggle)
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn)
+        btn_row.addStretch()
+        
+        card_layout.addWidget(self.action_label)
+        card_layout.addWidget(self.time_label)
+        card_layout.addLayout(btn_row)
+        layout.addWidget(self.card)
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(1000)
+        
+        self.current_theme = "dark"
+        self.set_theme(self.current_theme)
+
+    def _format_time(self, s):
+        m = s // 60
+        sec = s % 60
+        return f"{m:02d}:{sec:02d}"
+
+    def _tick(self):
+        if self.remaining > 0:
+            self.remaining -= 1
+            self.time_label.setText(self._format_time(self.remaining))
+            if self.remaining == 0:
+                self.timer.stop()
+                self.time_label.setStyleSheet("color: #ef4444;")
+                self.btn.setText("Reset")
+
+    def _toggle(self):
+        if self.remaining == 0:
+            self.remaining = self.duration
+            self.time_label.setStyleSheet(f"color: {'#FFFFFF' if self.current_theme=='dark' else '#000000'};")
+            self.time_label.setText(self._format_time(self.remaining))
+            self.btn.setText("Pause")
+            self.timer.start(1000)
+        elif self.timer.isActive():
+            self.timer.stop()
+            self.btn.setText("Resume")
+        else:
+            self.timer.start(1000)
+            self.btn.setText("Pause")
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        is_dark = theme == "dark"
+        bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(249, 115, 22, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if is_dark else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(249, 115, 22, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+        border = "rgba(249, 115, 22, 0.2)"
+        title_color = "#FFFFFF" if is_dark else "#050505"
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        if self.remaining > 0:
+            self.time_label.setStyleSheet(f"color: {title_color};")
+        
+        btn_bg = "rgba(255,255,255,0.1)" if is_dark else "rgba(0,0,0,0.05)"
+        btn_hover = "rgba(255,255,255,0.2)" if is_dark else "rgba(0,0,0,0.1)"
+        self.btn.setStyleSheet(f"""
+            QPushButton {{ background: {btn_bg}; border: 1px solid {border}; border-radius: 18px; color: {title_color}; font-family: 'Manrope'; font-size: 14px; }}
+            QPushButton:hover {{ background: {btn_hover}; }}
+        """)
+
+class PasswordActionWidget(QWidget):
+    def __init__(self, length=16, pwd=None, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        
+        self.action_label = QLabel("PASSWORD GENERATOR")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.action_label.setStyleSheet("color: #10b981; letter-spacing: 1px;")
+        
+        self.pwd = pwd or self._generate(length)
+        self.pwd_label = QLabel(self.pwd)
+        self.pwd_label.setFont(QFont("Courier", 24, QFont.Weight.Bold))
+        self.pwd_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pwd_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        self.btn = QPushButton("Copy")
+        self.btn.setFixedSize(120, 36)
+        self.btn.clicked.connect(self._copy)
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn)
+        btn_row.addStretch()
+        
+        card_layout.addWidget(self.action_label)
+        card_layout.addSpacing(10)
+        card_layout.addWidget(self.pwd_label)
+        card_layout.addSpacing(10)
+        card_layout.addLayout(btn_row)
+        layout.addWidget(self.card)
+        
+        self.set_theme("dark")
+
+    def _generate(self, length):
+        chars = string.ascii_letters + string.digits + "!@#$%^&*"
+        return "".join(random.SystemRandom().choice(chars) for _ in range(length))
+
+    def _copy(self):
+        QGuiApplication.clipboard().setText(self.pwd)
+        self.btn.setText("Copied!")
+        QTimer.singleShot(2000, lambda: self.btn.setText("Copy"))
+
+    def set_theme(self, theme):
+        is_dark = theme == "dark"
+        bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(16, 185, 129, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if is_dark else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(16, 185, 129, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+        border = "rgba(16, 185, 129, 0.2)"
+        title_color = "#FFFFFF" if is_dark else "#050505"
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.pwd_label.setStyleSheet(f"color: {title_color};")
+        
+        btn_bg = "rgba(255,255,255,0.1)" if is_dark else "rgba(0,0,0,0.05)"
+        btn_hover = "rgba(255,255,255,0.2)" if is_dark else "rgba(0,0,0,0.1)"
+        self.btn.setStyleSheet(f"""
+            QPushButton {{ background: {btn_bg}; border: 1px solid {border}; border-radius: 18px; color: {title_color}; font-family: 'Manrope'; font-size: 14px; }}
+            QPushButton:hover {{ background: {btn_hover}; }}
+        """)
+
+class QRActionWidget(QWidget):
+    def __init__(self, data_str, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(16)
+        
+        self.qr_label = QLabel()
+        self.qr_label.setFixedSize(80, 80)
+        self.qr_label.setScaledContents(True)
+        self.qr_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.data_str = data_str
+        self._generate_qr(data_str)
+        self.qr_label.mousePressEvent = self._on_qr_clicked
+        
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        
+        self.action_label = QLabel("QR CODE")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.action_label.setStyleSheet("color: #3b82f6; letter-spacing: 1px;") # Blue
+        
+        self.data_label = QLabel(data_str)
+        self.data_label.setFont(QFont("Manrope", 12))
+        self.data_label.setWordWrap(True)
+        self.data_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        text_col.addWidget(self.action_label)
+        text_col.addWidget(self.data_label)
+        text_col.addStretch()
+        
+        card_layout.addWidget(self.qr_label)
+        card_layout.addLayout(text_col)
+        card_layout.addStretch()
+        layout.addWidget(self.card)
+        self.set_theme("dark")
+
+    def _generate_qr(self, data_str):
+        qr = qrcode.QRCode(box_size=4, border=1)
+        qr.add_data(data_str)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        px = QPixmap()
+        px.loadFromData(buf.getvalue())
+        self.qr_label.setPixmap(px)
+
+    def _on_qr_clicked(self, event):
+        from PyQt6.QtWidgets import QDialog
+        diag = QDialog(self)
+        diag.setWindowTitle("QR Code")
+        diag.setFixedSize(400, 400)
+        diag.setStyleSheet("background-color: white; border-radius: 12px;")
+        l = QVBoxLayout(diag)
+        lbl = QLabel()
+        lbl.setScaledContents(True)
+        lbl.setFixedSize(360, 360)
+        
+        qr = qrcode.QRCode(box_size=10, border=2)
+        qr.add_data(self.data_str)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        px = QPixmap()
+        px.loadFromData(buf.getvalue())
+        lbl.setPixmap(px)
+        
+        l.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+        diag.exec()
+
+    def set_theme(self, theme):
+        is_dark = theme == "dark"
+        bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(59, 130, 246, 0.12), stop:1 rgba(255, 255, 255, 0.04))" if is_dark else "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(59, 130, 246, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+        border = "rgba(59, 130, 246, 0.2)"
+        title_color = "#FFFFFF" if is_dark else "#050505"
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.data_label.setStyleSheet(f"color: {title_color};")
+

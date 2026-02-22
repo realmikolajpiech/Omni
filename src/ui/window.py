@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget,WikiCardWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget,WikiCardWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -1489,18 +1489,6 @@ class OmniWindow(QWidget):
             _iu_data = {"type": "quick_url", "url": _iu_url, "domain": _iu_domain}
             new_items_data.append((f"quick_url:{_iu_url}", _iu_data, _create_quick_url))
 
-        # 0.5. Wikipedia Knowledge Card — appears before action cards
-        if self.wiki_data:
-            wiki_key = f"wiki:{self.wiki_data.get('title', '')}"
-            wiki_data_snap = self.wiki_data
-            current_theme_snap = getattr(self, 'current_theme', 'light')
-
-            def create_wiki_widget(wd=wiki_data_snap, theme=current_theme_snap):
-                return WikiCardWidget(wd, theme=theme)
-
-            wiki_item_data = {"type": "wiki_card", **wiki_data_snap}
-            new_items_data.append((wiki_key, wiki_item_data, create_wiki_widget))
-
         # 0.6. OG Website Preview — for link-type actions (shown when wiki not available)
         if self.og_data and not self.wiki_data:
             og_url = self.og_data.get("source_url", "")
@@ -1514,7 +1502,7 @@ class OmniWindow(QWidget):
             og_item_data = {"type": "og_preview", "url": og_url}
             new_items_data.append((og_key, og_item_data, create_og_widget))
 
-        # 1. External Actions (from LLM/Fast Search)
+        # 1. External Actions (from LLM/Fast Search) — always before Wikipedia
         for act in self.external_actions:
             key = self.get_item_key(act)
             if not key: continue
@@ -1565,9 +1553,35 @@ class OmniWindow(QWidget):
                     return UnitActionWidget(a.get('amount', '0'), a.get('from_unit', ''), a.get('to_unit', ''), a.get('converted_value', ''))
                 elif a.get('type') == 'translate':
                     return TranslateActionWidget(a.get('source_text', ''), a.get('from_lang', ''), a.get('to_lang', ''), a.get('translated_text', ''))
+                elif a.get('type') == 'color_preview':
+                    return ColorActionWidget(a.get('color_hex', ''), a.get('rgb_val', ''), a.get('hsl_val', ''))
+                elif a.get('type') == 'timer':
+                    return TimerActionWidget(a.get('duration', 0))
+                elif a.get('type') == 'password':
+                    return PasswordActionWidget(a.get('length', 16), a.get('pwd', None))
+                elif a.get('type') == 'qrcode':
+                    return QRActionWidget(a.get('data', ''))
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
+
+        # 1.5. Wikipedia Knowledge Card — shown AFTER action cards.
+        #       Suppressed entirely when a compute-type action is present (unit, calc,
+        #       currency, translate, weather, color, timer, password, qrcode) because wiki is irrelevant noise then.
+        _COMPUTE_TYPES = ('unit', 'calc', 'currency', 'translate', 'weather', 'color_preview', 'timer', 'password', 'qrcode')
+        _has_compute_action = any(
+            a.get('type') in _COMPUTE_TYPES for a in self.external_actions
+        )
+        if self.wiki_data and not _has_compute_action:
+            wiki_key = f"wiki:{self.wiki_data.get('title', '')}"
+            wiki_data_snap = self.wiki_data
+            current_theme_snap = getattr(self, 'current_theme', 'light')
+
+            def create_wiki_widget(wd=wiki_data_snap, theme=current_theme_snap):
+                return WikiCardWidget(wd, theme=theme)
+
+            wiki_item_data = {"type": "wiki_card", **wiki_data_snap}
+            new_items_data.append((wiki_key, wiki_item_data, create_wiki_widget))
 
         # 2. Local Apps (Fast)
         query_lower = query.lower()
@@ -1683,6 +1697,10 @@ class OmniWindow(QWidget):
         if data.get('type') == 'weather': return f"weather:{data.get('location')}"
         if data.get('type') == 'unit': return f"unit:{data.get('amount')}_{data.get('from_unit')}"
         if data.get('type') == 'translate': return f"translate:{data.get('source_text')}_{data.get('to_lang')}"
+        if data.get('type') == 'color_preview': return 'color_preview'
+        if data.get('type') == 'timer': return f"timer:{data.get('duration')}"
+        if data.get('type') == 'password': return f"password:{data.get('length')}"
+        if data.get('type') == 'qrcode': return f"qrcode:{data.get('data')}"
         if data.get('type') == 'install': return f"install:{data.get('name')}"
         if data.get('type') == 'uninstall': return f"uninstall:{data.get('name')}"
         # Fallback for others
@@ -1727,6 +1745,8 @@ class OmniWindow(QWidget):
                         if key == "ask_omni":
                             real_widget.set_text(f"Ask Omni: {data['query']}")
                         # Apps usually don't change text
+                    elif hasattr(real_widget, 'update_content'):
+                        real_widget.update_content(data)
                 
                 # Update data just in case
                 current_item.setData(Qt.ItemDataRole.UserRole, data)
@@ -1892,7 +1912,7 @@ class OmniWindow(QWidget):
         # Sort external actions to prioritize interactive cards
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode'): return 0
             if t == 'link':
                 from urllib.parse import urlparse as _urlp
                 _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
@@ -2534,6 +2554,17 @@ class OmniWindow(QWidget):
                 answer_item.setSizeHint(answer_widget.sizeHint())
                 self.adjust_window_height(animate=False)
 
+        actions = data.get("actions", [])
+        if actions and answer_widget:
+            for act in actions:
+                if isinstance(act, dict) and act.get("type") == "terminal_command" and act.get("description"):
+                    action_label = str(act.get("description")).strip().capitalize()
+                    answer_widget.set_thinking_header(action_label)
+                    answer_widget.set_thinking_collapsed(True)
+                    if answer_item is not None:
+                        answer_item.setSizeHint(answer_widget.sizeHint())
+                    break
+
         self.list_widget.update()
         if hasattr(self, "adjust_window_height"):
             self.adjust_window_height(animate=False)
@@ -2589,8 +2620,17 @@ class OmniWindow(QWidget):
 
             widget.set_answer(answer)
 
-            # Remove thinking from bubble and play "done" highlight
-            QTimer.singleShot(80, lambda w=widget: w.hide_thinking_and_play_done() if hasattr(w, 'hide_thinking_and_play_done') else None)
+            # Determine if we should rename the Reasoning process label to an action name
+            action_label = None
+            if actions:
+                for act in actions:
+                    if isinstance(act, dict) and act.get('type') == 'terminal_command' and act.get('description'):
+                        # Capitalize first letter simply for nicer UI
+                        action_label = str(act.get('description')).strip().capitalize()
+                        break
+
+            # Collapse thinking from bubble and play "done" highlight (optionally rename label)
+            QTimer.singleShot(80, lambda w=widget, lbl=action_label: w.hide_thinking_and_play_done(lbl) if hasattr(w, 'hide_thinking_and_play_done') else None)
 
             # Find list item for this widget
             item = None
@@ -2653,6 +2693,22 @@ class OmniWindow(QWidget):
                             insert_pos += 1
                         elif act.get('type') == 'translate':
                             w = TranslateActionWidget(act.get('source_text', ''), act.get('from_lang', ''), act.get('to_lang', ''), act.get('translated_text', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'color_preview':
+                            w = ColorActionWidget(act.get('color_hex', ''), act.get('rgb_val', ''), act.get('hsl_val', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'timer':
+                            w = TimerActionWidget(act.get('duration', 0))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'password':
+                            w = PasswordActionWidget(act.get('length', 16), act.get('pwd', None))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'qrcode':
+                            w = QRActionWidget(act.get('data', ''))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'system_settings':
@@ -2890,6 +2946,17 @@ class OmniWindow(QWidget):
 
             w = AnswerWidget(answer, query_text=saved_query, thinking_text=thinking, chat_mode=False)
             add_item(w, "answer")
+            
+            # Determine if we should rename the Reasoning process label to an action name
+            action_label = None
+            if actions:
+                for act in actions:
+                    if isinstance(act, dict) and act.get('type') == 'terminal_command' and act.get('description'):
+                        action_label = str(act.get('description')).strip().capitalize()
+                        break
+            if action_label:
+                w.set_thinking_header(action_label)
+            w.set_thinking_collapsed(True)
         
         # Add Actions
         for act in actions:
@@ -2930,6 +2997,18 @@ class OmniWindow(QWidget):
                     add_item(w, act, anim="pop")
                 elif act.get('type') == 'unit':
                     w = UnitActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                    add_item(w, act, anim="pop")
+                elif act.get('type') == 'color_preview':
+                    w = ColorActionWidget(act.get('color_hex', ''), act.get('rgb_val', ''), act.get('hsl_val', ''))
+                    add_item(w, act, anim="pop")
+                elif act.get('type') == 'timer':
+                    w = TimerActionWidget(act.get('duration', 0))
+                    add_item(w, act, anim="pop")
+                elif act.get('type') == 'password':
+                    w = PasswordActionWidget(act.get('length', 16), act.get('pwd', None))
+                    add_item(w, act, anim="pop")
+                elif act.get('type') == 'qrcode':
+                    w = QRActionWidget(act.get('data', ''))
                     add_item(w, act, anim="pop")
                 elif act.get('type') == 'status':
                     w = StandardItemWidget(act['description'], icon_name="dialog-information")

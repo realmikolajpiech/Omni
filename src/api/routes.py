@@ -367,17 +367,6 @@ def action_endpoint():
         act = {"type": "install", "name": app}
         return jsonify({"actions": [act], "chips": []})
 
-    # Uninstall
-    uninstall_match = re.search(
-        r"^(?:uninstall|remove|delete|odinstaluj|usuń|usun|skasuj|wykasuj|odinstalowywać)\s+(.+)$",
-        query, re.IGNORECASE
-    )
-    if uninstall_match:
-        app = uninstall_match.group(1).strip()
-        logging.info(f"Regex Uninstall: {app}")
-        act = {"type": "uninstall", "name": app}
-        return jsonify({"actions": [act], "chips": []})
-
     # 1.7.5 Implicit Calculation
     # Check for simple math expressions like "12*3", "100/4", "5+5", "10-2"
     # We want to avoid matching dates or phone numbers if possible, but strict math is usually fine.
@@ -393,10 +382,12 @@ def action_endpoint():
                  try:
                      res = perform_calculation(query)
                      if "Error" not in res:
-                         val = res.split("Result: ")[1].strip() if "Result: " in res else res
+                         val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
+                         latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+                         latex_eq = latex_match.group(1) if latex_match else f"{query} = {val}"
                          logging.info(f"Implicit Calc: {query} -> {val}")
                          # Return immediately to avoid search
-                         calc_act = {"type": "calc", "content": val, "equation": query}
+                         calc_act = {"type": "calc", "content": val, "equation": latex_eq}
                          return jsonify({"actions": [calc_act], "chips": []})
                  except: pass
 
@@ -405,9 +396,11 @@ def action_endpoint():
     if calc_match:
         expr = calc_match.group(1).strip()
         res = perform_calculation(expr)
-        val = res.split("Result: ")[1].strip() if "Result: " in res else res
+        val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
+        latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+        latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
         logging.info(f"Regex Calc: {expr} -> {val}")
-        calc_act2 = {"type": "calc", "content": val, "equation": expr}
+        calc_act2 = {"type": "calc", "content": val, "equation": latex_eq}
         return jsonify({"actions": [calc_act2], "chips": []})
 
     # Open URL
@@ -419,6 +412,47 @@ def action_endpoint():
         title = url.replace("https://", "").replace("www.", "").split('/')[0]
         link_act = {"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}
         return jsonify({"actions": [link_act], "chips": []})
+
+    # New Fast Actions (Color, Timer, Password, QR)
+    # 1. Color Preview
+    color_match = re.match(r"^(#([a-fA-F0-9]{3}|[a-fA-F0-9]{6}))|rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", query.strip(), re.IGNORECASE)
+    if color_match:
+        from PyQt6.QtGui import QColor
+        if color_match.group(1): # HEX
+            c = QColor(color_match.group(1))
+        else: # RGB
+            c = QColor(int(color_match.group(3)), int(color_match.group(4)), int(color_match.group(5)))
+        
+        hex_val = c.name().upper()
+        rgb_val = f"{c.red()}, {c.green()}, {c.blue()}"
+        hsl_val = f"{c.hslHue()}, {c.hslSaturation()}, {c.lightness()}"
+        act = {"type": "color_preview", "color_hex": hex_val, "rgb_val": rgb_val, "hsl_val": hsl_val}
+        return jsonify({"actions": [act], "chips": []})
+
+    # 2. Timer
+    timer_match = re.match(r"^(?:set\s+)?timer(?:\s+for)?\s+(\d+(?:\.\d+)?)\s*(s|sec|seconds|m|min|minutes|h|hr|hours)$", query.strip(), re.IGNORECASE)
+    if timer_match:
+        val = float(timer_match.group(1))
+        unit = timer_match.group(2).lower()
+        if unit in ['s', 'sec', 'seconds']: duration = val
+        elif unit in ['m', 'min', 'minutes']: duration = val * 60
+        else: duration = val * 3600
+        act = {"type": "timer", "duration": int(duration)}
+        return jsonify({"actions": [act], "chips": []})
+
+    # 3. Password
+    pwd_match = re.match(r"^(?:generate\s+)?(?:password|haslo|hasło)(?:\s+(\d+))?(?:\s*chars?)?$", query.strip(), re.IGNORECASE)
+    if pwd_match:
+        l = int(pwd_match.group(1)) if pwd_match.group(1) else 16
+        act = {"type": "password", "length": min(128, max(4, l))}
+        return jsonify({"actions": [act], "chips": []})
+
+    # 4. QR Code
+    qr_match = re.match(r"^qr(?:code)?:\s*(.+)$", query.strip(), re.IGNORECASE)
+    if qr_match:
+        data = qr_match.group(1).strip()
+        act = {"type": "qrcode", "data": data}
+        return jsonify({"actions": [act], "chips": []})
 
     # 1.75 Currency Conversion Fast Path (regex → live rate, no LLM needed)
     _CURRENCY_RE = re.compile(
@@ -544,6 +578,10 @@ After thinking, output ONE command only on a new line:
 - INSTALL:name (results show downloadable software/app)
 - UNINSTALL:name (user explicitly wants to remove software)
 - SEARCH:query (general topic, unclear, or conversational)
+- COLOR:hex|rgb|hsl (e.g. COLOR:#FF0000|255,0,0|0,100,50)
+- TIMER:duration_in_seconds (e.g. TIMER:300 for 5 minutes)
+- PASSWORD:length (e.g. PASSWORD:16)
+- QRCODE:data (e.g. QRCODE:https://google.com)
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode|brightness|volume|mute|night_shift|dnd|wifi|bluetooth","value":true/false or 0-100}
 
 Examples:
@@ -650,7 +688,8 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
         has_command = any(cmd in result_text for cmd in [
             "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
             "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
-            "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:"
+            "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
+            "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:"
         ])
         if not has_command:
             logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
@@ -735,6 +774,35 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
                         })
                 except Exception as e:
                     logging.error(f"Failed to parse UNIT action: {e}")
+
+            if "COLOR:" in line:
+                try:
+                    parts = line.split("COLOR:")[1].strip().split("|")
+                    actions.append({
+                        "type": "color_preview",
+                        "color_hex": parts[0].strip() if len(parts) > 0 else "#FFFFFF",
+                        "rgb_val": parts[1].strip() if len(parts) > 1 else "",
+                        "hsl_val": parts[2].strip() if len(parts) > 2 else ""
+                    })
+                except Exception as e: pass
+
+            if "TIMER:" in line:
+                try:
+                    val = line.split("TIMER:")[1].strip()
+                    actions.append({"type": "timer", "duration": int(val)})
+                except Exception as e: pass
+
+            if "PASSWORD:" in line:
+                try:
+                    val = line.split("PASSWORD:")[1].strip()
+                    actions.append({"type": "password", "length": int(val)})
+                except Exception as e: pass
+
+            if "QRCODE:" in line:
+                try:
+                    val = line.split("QRCODE:")[1].strip()
+                    actions.append({"type": "qrcode", "data": val})
+                except Exception as e: pass
 
             if "FA:" in line:
                 fact = line.split("FA:")[1].strip()

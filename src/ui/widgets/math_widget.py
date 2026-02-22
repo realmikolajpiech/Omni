@@ -11,8 +11,8 @@ class MathWidget(QWidget):
     
     def __init__(self, result="", equation="", parent=None):
         super().__init__(parent)
-        self.result = result
-        self.equation = equation
+        self.result = str(result)
+        self.equation = str(equation)
         self.current_theme = "light"
         
         layout = QVBoxLayout(self)
@@ -20,7 +20,7 @@ class MathWidget(QWidget):
         layout.setSpacing(4)
         
         # Result label
-        self.result_label = QLabel(result)
+        self.result_label = QLabel(self.result)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.result_label.setFont(self.font())
         
@@ -37,12 +37,12 @@ class MathWidget(QWidget):
     
     def set_result(self, result):
         """Set the calculation result."""
-        self.result = result
-        self.result_label.setText(result)
+        self.result = str(result)
+        self.result_label.setText(self.result)
     
     def set_equation(self, equation):
         """Set the LaTeX equation."""
-        self.equation = equation
+        self.equation = str(equation)
         self.update_math_display()
     
     def update_math_display(self):

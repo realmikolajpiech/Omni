@@ -535,6 +535,12 @@ Available settings and values:
   wifi         → true / false
   bluetooth    → true / false
 
+**Fast Actions** (display visual cards instead of full text)
+{{"type": "timer", "duration": 300}} (duration in seconds)
+{{"type": "color_preview", "color_hex": "#FF00FF", "rgb_val": "255,0,255", "hsl_val": "300,100,50"}}
+{{"type": "password", "length": 16}}
+{{"type": "qrcode", "data": "https://..."}}
+
 **Terminal command** — use for ANY shell/system task that's not in the built-in settings list
 {{"type": "terminal_command", "command": "defaults write com.apple.dock autohide -bool false && killall Dock", "description": "Disable Dock autohide"}}
 → CRITICAL: NEVER tell Mikołaj to open Terminal, paste commands, or run anything manually.
@@ -736,12 +742,14 @@ Available settings and values:
                 # ── Terminal feedback loop (streaming) ──────────────────────
                 terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
                 if terminal_actions:
-                    desc_list = [a.get('description', '') for a in terminal_actions if a.get('description')]
-                    checking_msg = desc_list[0] if desc_list else "Wykonywanie komendy..."
-                    temp_thinking = thinking_content + f"\n\n⚙️ {checking_msg}" if thinking_content else f"⚙️ {checking_msg}"
-                    yield ("partial", {"thinking": temp_thinking, "answer": answer})
+                    # Pass actions to partial so the UI can rename and collapse the reasoning process
+                    yield ("partial", {"thinking": thinking_content, "answer": answer, "actions": terminal_actions})
                     
                     cmd_outputs = _run_terminal_commands(terminal_actions)
+                    
+                    # Yield final for the FIRST pass! This closes the first bubble and renders the terminal cards.
+                    yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
+                    
                     if cmd_outputs:
                         tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
                         logging.info(f"[terminal] streaming second pass ({len(cmd_outputs)} cmd(s))")
@@ -777,13 +785,15 @@ Available settings and values:
                             ans_clean2, _, _ = extract_actions(ans2_so_far) if ans2_so_far else ("", [], "")
                             
                             if ct2 or ans_clean2:
-                                yield ("partial", {"thinking": thinking_content + ct2, "answer": ans_clean2})
+                                # We only yield the second pass thinking!
+                                yield ("partial", {"thinking": ct2, "answer": ans_clean2, "actions": []})
+                        
                         it2, answer_text2 = _split_thinking_and_answer(accumulated_text2)
                         answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (accumulated_text2, [], "")
-                        if answer2:
-                            answer = answer2
-                        non_terminal = [a for a in actions if a.get('type') != 'terminal_command']
-                        actions = terminal_actions + non_terminal + actions2
+                        non_terminal2 = [a for a in actions2 if a.get('type') != 'terminal_command']
+                        # Yield final for the SECOND pass! (This will close the second bubble)
+                        yield ("final", {"answer": answer2, "actions": non_terminal2, "thinking": external_thinking2 + it2})
+                        return # Important: early return so we don't yield final again below!
                 # ───────────────────────────────────────────────────────────
 
                 yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
