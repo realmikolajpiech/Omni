@@ -717,8 +717,9 @@ class OmniWindow(QWidget):
         
         self.is_history_mode = False
         self.follow_up_widget.set_active(False)
-        self.frame.set_minimal_mode(True) # Minimal mode for search
-        
+        self.frame.set_minimal_mode(True)
+        self.input_field.setPlaceholderText("Search or ask...")
+
         self.input_field.blockSignals(True)
         if clear:
             self.input_field.clear()
@@ -752,8 +753,15 @@ class OmniWindow(QWidget):
                 # Maybe flash the logo or UI to acknowledge?
                 self.logo_label.boost_speed()
             else:
-                # Manual toggle (hotkey/tray) -> Close
-                self.animate_close()
+                # Manual toggle (hotkey/tray)
+                if self.is_history_mode and not self.isActiveWindow():
+                    # Conversation window is open but not focused — bring it to front
+                    # (like Spotlight: one press to focus, another to close)
+                    self.raise_()
+                    self.activateWindow()
+                    self.input_field.setFocus()
+                else:
+                    self.animate_close()
         else:
             # Window was hidden — show it again
             if source == "voice" and len(self.chat_history) > 0:
@@ -761,6 +769,8 @@ class OmniWindow(QWidget):
                 logging.info("Reopening with existing chat (voice follow-up)")
                 self.show()
                 self.center()
+                if self.is_history_mode:
+                    self._restore_history_ui()
                 self.animate_entry()
                 self.input_field.setFocus()
                 self.send_udp_command("SET_MODE:LISTENING")
@@ -775,6 +785,8 @@ class OmniWindow(QWidget):
                 # DO NOT clear the session so that previous chat remains!
                 self.show()
                 self.center()
+                if self.is_history_mode:
+                    self._restore_history_ui()
                 self.animate_entry()
                 self.input_field.setFocus()
                 if source == "voice":
@@ -783,6 +795,15 @@ class OmniWindow(QWidget):
                 else:
                     self.send_udp_command("SET_MODE:PAUSED")
                     self.mic_widget.set_active(False)
+
+    def _restore_history_ui(self):
+        """Restore the chat/history UI after the window is reshown (was resized to 84px on close)."""
+        self.follow_up_widget.set_active(True)
+        self.frame.set_minimal_mode(False)
+        self.input_field.setPlaceholderText("Ask a follow-up...")
+        # Rebuild list so items are visible, then let adjust_window_height size the window
+        # before animate_entry fires (so the entry animation starts at the correct height).
+        self._rebuild_history_list()
 
     def send_udp_command(self, command):
         try:
@@ -803,20 +824,20 @@ class OmniWindow(QWidget):
             self.send_udp_command("SET_MODE:LISTENING")
             self.mic_widget.set_active(True)
 
+    def _idle_placeholder(self):
+        """Return the correct placeholder for the current mode."""
+        return "Ask a follow-up..." if self.is_history_mode else "Search or ask..."
+
     def handle_voice_status(self, status):
         if status == "LISTENING":
             self.mic_widget.set_active(True)
             self.input_field.setPlaceholderText("Listening...")
         elif status == "PAUSED":
             self.mic_widget.set_active(False)
-            self.input_field.setPlaceholderText("Search or ask...")
-            # If we were expecting a voice query but it was just paused without query, maybe reset?
-            # But handle_ipc_query will come later if query was found.
+            self.input_field.setPlaceholderText(self._idle_placeholder())
         elif status == "IDLE":
-            # Should happen when window is hidden, but if it happens while visible,
-            # it means we are waiting for wake word.
             self.mic_widget.set_active(False)
-            self.input_field.setPlaceholderText("Search or ask...")
+            self.input_field.setPlaceholderText(self._idle_placeholder())
 
     def handle_partial_text(self, text):
         # Update input field with partial text without triggering search
@@ -976,7 +997,12 @@ class OmniWindow(QWidget):
         # Called when window loses focus
         # On macOS, clicking outside the window (e.g. on desktop) triggers this.
         # We want to close the window, but ensure we switch back to IDLE mode.
-        
+
+        # In conversation/follow-up mode keep the window alive so the user can
+        # read, copy, and interact with responses. The shortcut still closes it.
+        if self.is_history_mode:
+            return
+
         # Prevent closing if Mic is active (User is speaking)
         if self.mic_widget.active:
             logging.info("Window deactivated but Mic is active - keeping window open.")
@@ -1091,47 +1117,15 @@ class OmniWindow(QWidget):
         if self.is_history_mode: return
         self.is_history_mode = True
         self.follow_up_widget.set_active(True)
-        self.frame.set_minimal_mode(False) # Colorful mode for chat
-        
+        self.frame.set_minimal_mode(False)
+        self.input_field.setPlaceholderText("Ask a follow-up...")
         self._rebuild_history_list()
 
     def _rebuild_history_list(self):
         self.list_widget.clear()
         first = True
         
-        # Iterate backwards to get Newest first
-        for i in range(len(self.chat_history) - 1, -1, -1):
-            msg = self.chat_history[i]
-            if msg.get('role') == 'assistant':
-                content = msg.get('content', '')
-                user_query = ""
-                if i > 0 and self.chat_history[i-1].get('role') == 'user':
-                    user_query = self.chat_history[i-1].get('content', '')
-                
-                # Add Separator BEFORE adding the item (since we are building top-down with add_list_item)
-                # Wait, add_list_item appends.
-                # If we iterate backwards:
-                # 1. Newest Answer (first loop)
-                # 2. Separator
-                # 3. Older Answer
-                # This matches "Separator between followup answer and old answer"
-                
-                if not first:
-                     self.add_list_item(SeparatorWidget(), "separator", animation="instant")
-
-                w = AnswerWidget(content, query_text=user_query)
-                w.set_query_visible(True)
-                self.add_list_item(w, "history_ai", animation="instant")
-                
-                first = False
-        
-        self.adjust_window_height()
-
-    def _rebuild_history_list(self):
-        self.list_widget.clear()
-        first = True
-        
-        # Iterate backwards to get Newest first
+        # Iterate backwards to get Newest first (newest at top of list)
         for i in range(len(self.chat_history) - 1, -1, -1):
             msg = self.chat_history[i]
             if msg.get('role') == 'assistant':
@@ -1143,7 +1137,9 @@ class OmniWindow(QWidget):
                 if not first:
                     self.add_list_item(SeparatorWidget(), "separator", animation="instant")
                 
-                w = AnswerWidget(content, query_text=user_query)
+                # chat_mode=True is required so the user bubble (_BubbleWidget) is
+                # created and set_query_visible(True) can actually show the message.
+                w = AnswerWidget(content, query_text=user_query, chat_mode=True)
                 w.set_query_visible(True)
                 self.add_list_item(w, "history_ai", animation="instant")
                 first = False
@@ -1159,6 +1155,12 @@ class OmniWindow(QWidget):
         
         # Always switch back to IDLE (Wake Word) mode when closing
         self.send_udp_command("SET_MODE:IDLE")
+
+        # Instantly reset the gradient border so it doesn't flash on next open
+        self.frame.mode_anim.stop()
+        self.frame.timer.stop()
+        self.frame.minimal_mode = True
+        self.frame._mode_progress = 0.0
         
         # Stop geometry animation if running
         if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:

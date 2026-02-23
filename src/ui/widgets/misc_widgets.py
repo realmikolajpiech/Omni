@@ -373,23 +373,37 @@ class CollapsibleThinkingWidget(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(4)
         self.current_theme = "light"
-        
-        # Track if this is the first time we're setting thinking (for auto-expand on first update)
         self._first_thinking_set = True
+        self._header_label = "Reasoning"
 
-        # Header button - minimal, text-only design
-        self.header_button = QPushButton("Reasoning process")
+        # Header: compact pill-style button, left-aligned via HBox + stretch
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(0)
+
+        self.header_button = QPushButton("🧠  Reasoning")
         self.header_button.setCheckable(True)
         self.header_button.setChecked(False)
         self.header_button.clicked.connect(self.toggle_content)
         self.header_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.layout.addWidget(self.header_button)
+        header_row.addWidget(self.header_button)
+        header_row.addStretch()
+        self.layout.addLayout(header_row)
 
-        # Content area
+        # Content: left accent bar  +  italic text
         self.content_widget = QWidget()
-        content_layout = QVBoxLayout(self.content_widget)
-        content_layout.setContentsMargins(0, 4, 0, 8)
-        content_layout.setSpacing(0)
+        content_outer = QHBoxLayout(self.content_widget)
+        content_outer.setContentsMargins(2, 6, 0, 6)
+        content_outer.setSpacing(0)
+
+        self.left_bar = QFrame()
+        self.left_bar.setFixedWidth(2)
+        content_outer.addWidget(self.left_bar)
+
+        text_container = QWidget()
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(10, 0, 0, 0)
+        text_layout.setSpacing(0)
 
         self.thinking_text = UnscrollableTextEdit()
         self.thinking_text.setReadOnly(True)
@@ -399,49 +413,57 @@ class CollapsibleThinkingWidget(QWidget):
         self.thinking_text.setPlainText(thinking_text)
 
         font = QFont("Manrope", 12, QFont.Weight.Normal)
+        font.setItalic(True)
         self.thinking_text.setFont(font)
-        self.thinking_text.document().setTextWidth(580)
+        self.thinking_text.document().setTextWidth(560)
         self.thinking_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
-        content_layout.addWidget(self.thinking_text)
+        text_layout.addWidget(self.thinking_text)
+        content_outer.addWidget(text_container)
         self.layout.addWidget(self.content_widget)
 
-        # Initially hide content (collapsed)
         self.content_widget.setVisible(False)
-        self.header_button.setText("▶ Reasoning process")
-        
         self.update_style()
 
     def update_style(self):
-        t = THEMES.get(self.current_theme, THEMES["light"])
-        
-        # Use a distinct gray for thinking process to differentiate from main content
         if self.current_theme == "dark":
-            thinking_color = "#888888"
-            hover_color = "#AAAAAA"
+            badge_bg        = "rgba(160, 130, 255, 0.10)"
+            badge_border    = "rgba(160, 130, 255, 0.22)"
+            badge_color     = "rgba(210, 190, 255, 0.80)"
+            badge_hover_bg  = "rgba(160, 130, 255, 0.18)"
+            thinking_color  = "rgba(255, 255, 255, 0.42)"
+            bar_color       = "rgba(160, 130, 255, 0.40)"
         else:
-            thinking_color = "#666666"
-            hover_color = "#333333"
+            badge_bg        = "rgba(100, 80, 200, 0.07)"
+            badge_border    = "rgba(100, 80, 200, 0.18)"
+            badge_color     = "rgba(80, 60, 185, 0.85)"
+            badge_hover_bg  = "rgba(100, 80, 200, 0.13)"
+            thinking_color  = "rgba(0, 0, 0, 0.42)"
+            bar_color       = "rgba(100, 80, 200, 0.35)"
 
         self.header_button.setStyleSheet(f"""
             QPushButton {{
-                background: transparent;
-                border: none;
-                padding: 2px 0px;
+                background: {badge_bg};
+                border: 1px solid {badge_border};
+                border-radius: 10px;
+                padding: 3px 10px 3px 9px;
                 text-align: left;
                 font-family: Manrope;
-                font-size: 12px;
-                font-weight: 500;
-                color: {thinking_color};
+                font-size: 11px;
+                font-weight: 600;
+                color: {badge_color};
             }}
             QPushButton:hover {{
-                color: {hover_color};
+                background: {badge_hover_bg};
             }}
             QPushButton:checked {{
-                color: {hover_color};
+                background: {badge_hover_bg};
             }}
         """)
-        self.thinking_text.setStyleSheet(f"QTextEdit {{ background: transparent; color: {thinking_color}; padding: 0px; margin: 0px; line-height: 1.4; }}")
+        self.thinking_text.setStyleSheet(
+            f"QTextEdit {{ background: transparent; color: {thinking_color}; padding: 0px; margin: 0px; }}"
+        )
+        self.left_bar.setStyleSheet(f"QFrame {{ background-color: {bar_color}; border: none; }}")
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -449,26 +471,22 @@ class CollapsibleThinkingWidget(QWidget):
 
     def set_thinking_text(self, text):
         """Update the thinking text and ensure the widget is visible."""
-        # Mark that we've set thinking at least once
         was_first = self._first_thinking_set
         self._first_thinking_set = False
-        
+
         self.thinking_text.setPlainText(text)
-        self.thinking_text.document().setTextWidth(580)
-        
-        # Force height update
+        self.thinking_text.document().setTextWidth(560)
+
         doc_height = self.thinking_text.document().size().height()
         self.thinking_text.setFixedHeight(int(doc_height + 24))
-        
-        # Ensure widget and button stay enabled and visible
+
         self.setVisible(True)
         self.setEnabled(True)
         self.header_button.setEnabled(True)
-        
-        # Auto-expand only on the very first thinking update (when user hasn't made a choice yet)
+
         if was_first and text.strip():
             self.set_collapsed(False)
-        
+
         self.size_changed.emit()
         self.updateGeometry()
         parent = self.parent()
@@ -478,24 +496,24 @@ class CollapsibleThinkingWidget(QWidget):
             parent = parent.parent()
 
     def set_collapsed(self, collapsed):
-        """Collapse (True) or expand (False) the thinking content. Widget stays visible either way."""
-        self.setVisible(True)  # Make sure the widget itself is visible
-        
-        # Set the content visibility and button text based on collapsed state
+        """Collapse (True) or expand (False) the thinking content."""
+        self.setVisible(True)
+
         new_visibility = not collapsed
         self.content_widget.setVisible(new_visibility)
-        
-        # Update text if needed, or just keep it static. Let's use an arrow indicator.
-        arrow = "▼" if new_visibility else "▶"
-        current_text = getattr(self, '_header_label', "Reasoning process")
-        self.header_button.setText(f"{arrow} {current_text}")
-        self.header_button.setChecked(new_visibility)
-        
+
+        label = getattr(self, '_header_label', "Reasoning")
         if new_visibility:
-            self.thinking_text.document().setTextWidth(580)
+            self.header_button.setText(f"🧠  {label}  ▾")
+        else:
+            self.header_button.setText(f"🧠  {label}")
+        self.header_button.setChecked(new_visibility)
+
+        if new_visibility:
+            self.thinking_text.document().setTextWidth(560)
             doc_height = self.thinking_text.document().size().height()
             self.thinking_text.setFixedHeight(int(doc_height + 24))
-            
+
         self.size_changed.emit()
         self.updateGeometry()
         parent = self.parent()
@@ -511,17 +529,17 @@ class CollapsibleThinkingWidget(QWidget):
     def set_header_label(self, text):
         self._header_label = text
         is_visible = self.content_widget.isVisible()
-        arrow = "▼" if is_visible else "▶"
-        self.header_button.setText(f"{arrow} {text}")
+        if is_visible:
+            self.header_button.setText(f"🧠  {text}  ▾")
+        else:
+            self.header_button.setText(f"🧠  {text}")
 
     def sizeHint(self):
-        base_height = self.header_button.sizeHint().height()
+        base_height = self.header_button.sizeHint().height() + 8
         if self.content_widget.isVisible():
-            # Recalculate text width every time for accurate height
-            self.thinking_text.document().setTextWidth(580)
+            self.thinking_text.document().setTextWidth(560)
             content_height = self.thinking_text.document().size().height()
-            # Add small padding for breathing room
-            return QSize(660, int(base_height + content_height + 40))
+            return QSize(660, int(base_height + content_height + 32))
         return QSize(660, base_height)
 
 
@@ -551,7 +569,7 @@ def _username():
 class _BubbleWidget(QWidget):
     """A single rounded chat bubble (user or assistant)."""
 
-    BUBBLE_RADIUS = 18
+    BUBBLE_RADIUS = 20
     MAX_BUBBLE_WIDTH_FRACTION = 0.78  # bubble uses at most 78% of available width
 
     def __init__(self, text, sender="user", is_markdown=False, parent=None):
@@ -563,11 +581,11 @@ class _BubbleWidget(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(3)
+        outer.setSpacing(2)
 
-        # Name label above bubble
+        # Name label above bubble — subtle, small caps feel
         self.name_label = QLabel(_username() if sender == "user" else "Omni")
-        self.name_label.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+        self.name_label.setFont(QFont("Manrope", 10, QFont.Weight.DemiBold))
         if sender == "user":
             self.name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         else:
@@ -602,9 +620,11 @@ class _BubbleWidget(QWidget):
             self.bubble.play_done_animation()
 
     def update_style(self):
-        t = THEMES.get(self.current_theme, THEMES["light"])
-        name_color = t["text_secondary"]
-        self.name_label.setStyleSheet(f"color: {name_color}; background: transparent;")
+        if self.current_theme == "dark":
+            name_color = "rgba(255,255,255,0.30)"
+        else:
+            name_color = "rgba(0,0,0,0.30)"
+        self.name_label.setStyleSheet(f"color: {name_color}; background: transparent; letter-spacing: 0.3px;")
         self.bubble.set_theme(self.current_theme)
 
     def set_theme(self, theme):
@@ -623,9 +643,9 @@ class _BubbleWidget(QWidget):
 class _BubbleInner(QWidget):
     """Draws the rounded rect background and hosts the text inside."""
 
-    PADDING_H = 18
-    PADDING_V = 14
-    RADIUS = 18
+    PADDING_H = 16
+    PADDING_V = 11
+    RADIUS = 20
     MAX_FRACTION = 0.78
 
     def __init__(self, sender, is_markdown, parent=None):
@@ -634,6 +654,7 @@ class _BubbleInner(QWidget):
         self.is_markdown = is_markdown
         self.current_theme = "light"
         self._bg = QColor("#000000")
+        self._border_color = QColor(0, 0, 0, 0)
         self._extra_top_widgets = []
         self._highlight_opacity = 0.0
         self._placeholder_shown = False  # set True below when placeholder is created
@@ -700,21 +721,26 @@ class _BubbleInner(QWidget):
         t = THEMES.get(theme, THEMES["light"])
         if self.sender == "user":
             if theme == "dark":
-                self._bg = QColor(255, 255, 255, 30)
+                # Frosted pill — distinct, slightly brighter than window
+                self._bg = QColor(255, 255, 255, 40)
+                self._border_color = QColor(255, 255, 255, 28)
                 text_color = t["text_primary"]
             else:
-                self._bg = QColor(0, 0, 0, 22)
+                self._bg = QColor(0, 0, 0, 30)
+                self._border_color = QColor(0, 0, 0, 18)
                 text_color = t["text_primary"]
         else:
-            # AI bubble: subtle visible background so it reads as a proper chat bubble
+            # AI bubble: very subtle card — lighter than user so hierarchy is clear
             if theme == "dark":
-                self._bg = QColor(255, 255, 255, 18)
+                self._bg = QColor(255, 255, 255, 10)
+                self._border_color = QColor(255, 255, 255, 12)
             else:
-                self._bg = QColor(0, 0, 0, 13)
+                self._bg = QColor(0, 0, 0, 7)
+                self._border_color = QColor(0, 0, 0, 10)
             text_color = t["text_primary"]
 
         if self.edit is not None:
-            self.edit.setStyleSheet(f"background: transparent; color: {text_color};")
+            self.edit.setStyleSheet(f"background: transparent; color: {text_color}; line-height: 1.5;")
         elif self.label is not None:
             self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
         if self.thinking_placeholder is not None:
@@ -761,6 +787,12 @@ class _BubbleInner(QWidget):
             p.setBrush(QBrush(self._bg))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawRoundedRect(self.rect(), self.RADIUS, self.RADIUS)
+        # Subtle border on top of fill
+        if self._border_color.alpha() > 0:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            border_rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            p.setPen(QPen(QBrush(self._border_color), 1.0))
+            p.drawRoundedRect(border_rect, self.RADIUS - 0.5, self.RADIUS - 0.5)
         if self._highlight_opacity > 0:
             highlight = QColor(255, 255, 255, int(80 * self._highlight_opacity))
             p.setBrush(QBrush(highlight))
@@ -842,17 +874,16 @@ class _BubbleInner(QWidget):
             text = self.label.text()
             fm = QFontMetrics(self.label.font())
             if text:
-                # Add a few pixels for overhangs to prevent trailing cutoff
-                single_line_w = fm.horizontalAdvance(text) + 8
+                # Keep buffer minimal — text is right-aligned so any extra becomes
+                # phantom left-padding, making the pill look uneven.
+                single_line_w = fm.horizontalAdvance(text) + 2
                 natural_inner_w = min(single_line_w, inner_w)
                 # Compute height at this natural width (may wrap for very long text)
                 from PyQt6.QtCore import Qt as _Qt
                 rect = fm.boundingRect(0, 0, natural_inner_w, 100000,
                                        _Qt.TextFlag.TextWordWrap, text)
                 
-                # If wrapped, boundingRect might be narrower than natural_inner_w
-                # We use the wider bounding width to wrap smoothly
-                use_inner_w = min(natural_inner_w, rect.width() + 8)
+                use_inner_w = min(natural_inner_w, rect.width() + 2)
                 h = rect.height()
             else:
                 use_inner_w = 60
@@ -881,8 +912,8 @@ class AnswerWidget(QWidget):
     def __init__(self, text, query_text=None, thinking_text=None, chat_mode=False, parent=None):
         super().__init__(parent)
         self.outer_layout = QVBoxLayout(self)
-        self.outer_layout.setContentsMargins(16, 6, 16, 6)
-        self.outer_layout.setSpacing(8)
+        self.outer_layout.setContentsMargins(16, 8, 16, 8)
+        self.outer_layout.setSpacing(10)
         self.current_theme = "light"
         self.chat_mode = chat_mode
         self._query_text = query_text or ""

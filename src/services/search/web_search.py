@@ -4,7 +4,7 @@ import concurrent.futures
 
 import httpx
 
-from src.core.config import SEARXNG_URL, SERPER_MAIN_API_KEY, SERPER_FAST_API_KEY
+from src.core.config import SERPER_MAIN_API_KEY, SERPER_FAST_API_KEY
 from src.services.system.location import get_system_location, get_ip_location, get_search_locale
 
 # ---------------------------------------------------------------------------
@@ -21,8 +21,6 @@ _serper_fast_client = httpx.Client(
     timeout=2.0,
     http2=True,
 ) if SERPER_FAST_API_KEY else None
-
-_local_client = httpx.Client(timeout=2.0)
 
 # ---------------------------------------------------------------------------
 # Result cache -- avoids duplicate API calls for the same query
@@ -170,39 +168,11 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
 
 
 # ---------------------------------------------------------------------------
-# SearXNG search (fallback -- local, free, slower)
-# ---------------------------------------------------------------------------
-def _searxng_search(query: str, categories: str = 'general', timeout: float = 2.0) -> list:
-    loc = get_search_locale()
-    params = {
-        'q': query,
-        'format': 'json',
-        'categories': categories,
-        'language': loc,
-        'safesearch': 0,
-    }
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    }
-    try:
-        r = _local_client.get(SEARXNG_URL, params=params, headers=headers, timeout=timeout)
-        if r.status_code == 200:
-            return r.json().get('results', [])
-        logging.error(f"SearXNG status {r.status_code} for: '{query}'")
-    except httpx.TimeoutException:
-        logging.error(f"SearXNG timeout for: '{query}'")
-    except Exception as e:
-        logging.error(f"SearXNG error: {e}")
-    return []
-
-
-# ---------------------------------------------------------------------------
-# Unified search_api -- Serper primary, SearXNG fallback, with cache
+# Unified search_api -- Serper only, with cache
 # ---------------------------------------------------------------------------
 def search_api(query: str, categories: str = 'general', fast: bool = False) -> list:
     """
-    Performs a web search. Tries Serper.dev first (fast, cached), falls back
-    to local SearXNG if Serper key is missing or request fails.
+    Performs a web search via Serper.dev (fast Google results).
     """
     cached = _get_cached(query, categories)
     if cached is not None:
@@ -212,21 +182,14 @@ def search_api(query: str, categories: str = 'general', fast: bool = False) -> l
     t0 = time.time()
     results = []
 
-    # Primary: Serper.dev (fast key for action classifier, main key for LLM tools)
     if (fast and SERPER_FAST_API_KEY) or (not fast and SERPER_MAIN_API_KEY):
         results = _serper_search(query, categories, fast=fast)
-        if results:
-            dt = time.time() - t0
-            logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
-            _set_cached(query, categories, results)
-            return results
-        logging.warning(f"Serper returned 0 results for '{query}', falling back to SearXNG")
+        dt = time.time() - t0
+        logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
 
-    # Fallback: local SearXNG
-    timeout = 2.0 if fast else 4.0
-    results = _searxng_search(query, categories, timeout=timeout)
-    dt = time.time() - t0
-    logging.info(f"SearXNG: {len(results)} results for '{query}' in {dt:.3f}s")
+    if not results:
+        logging.warning(f"Serper returned 0 results for '{query}'")
+
     _set_cached(query, categories, results)
     return results
 

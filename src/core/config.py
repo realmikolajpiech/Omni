@@ -173,9 +173,7 @@ FIND_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/find_package"
 PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"
 VERIFY_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/verify_package"
 
-SEARXNG_URL = "http://127.0.0.1:8080/search"
-
-# Search API (Serper.dev -- fast Google results, SearXNG as fallback)
+# Search API (Serper.dev -- fast Google results)
 SERPER_MAIN_API_KEY = os.environ.get("SERPER_MAIN_API_KEY", "")  # used by main LLM tool calls
 SERPER_FAST_API_KEY = os.environ.get("SERPER_FAST_API_KEY", "")  # used by fast action classifier
 
