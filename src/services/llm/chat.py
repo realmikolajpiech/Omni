@@ -9,6 +9,7 @@ from flask import jsonify
 
 from src.services.llm import model_manager
 from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_lock, main_lock, abort_fast_event
+from src.services.llm.tools import TOOL_SCHEMAS, execute_tool
 from src.services.search.web_search import perform_web_search
 from src.services.search.local_search import perform_file_search, should_search_files
 from src.services.search.image_search import perform_image_search_with_fallback, should_search_images
@@ -16,6 +17,162 @@ from src.services.memory.memvid_store import get_user_memory, remember_fact, rem
 from src.services.system.location import get_ip_location
 from src.services.system.app_launcher import get_app_cache, find_and_launch_app
 from src.core.grid_locator import localize_target_from_b64
+
+# ── Tool call display helpers ─────────────────────────────────────────────────
+
+_TOOL_META = {
+    "search_web":    {"icon": "🌐", "label": "Web search"},
+    "search_files":  {"icon": "📂", "label": "File search"},
+    "calculate":     {"icon": "🧮", "label": "Calculate"},
+    "search_images": {"icon": "🖼️", "label": "Image search"},
+}
+
+
+def _tool_invocation_line(tool_name: str, args: dict) -> str:
+    """Return a one-liner header for a tool call, e.g. '🌐 Web search  "query..."'."""
+    meta = _TOOL_META.get(tool_name, {"icon": "⚙", "label": tool_name})
+    icon, label = meta["icon"], meta["label"]
+
+    if tool_name in ("search_web", "search_files", "search_images"):
+        q = args.get("query", "")
+        if len(q) > 72:
+            q = q[:69] + "…"
+        arg_part = f'"{q}"'
+    elif tool_name == "calculate":
+        expr = args.get("expression", "")
+        if len(expr) > 72:
+            expr = expr[:69] + "…"
+        arg_part = expr
+    else:
+        arg_part = "  ".join(f"{k}: {v!r}" for k, v in args.items())
+
+    return f"{icon}  {label}  {arg_part}"
+
+
+def _tool_result_summary(tool_name: str, result: str) -> str:
+    """One-line summary of what the tool returned."""
+    if tool_name == "calculate":
+        if "Result: " in result:
+            val = result.split("Result: ")[1].split("\n")[0].strip()
+            return f"= {val}"
+        return result.strip()[:60]
+
+    if tool_name == "search_web":
+        n = result.count("Title:")
+        if n > 0:
+            return f"{n} result{'s' if n != 1 else ''} found"
+        if "No results" in result or not result.strip():
+            return "no results"
+
+    if tool_name == "search_files":
+        if "No relevant files" in result or "No local files" in result:
+            return "nothing found"
+        n = result.count("--- File:")
+        if n > 0:
+            return f"{n} file{'s' if n != 1 else ''} found"
+
+    if tool_name == "search_images":
+        if "No" in result and ("found" in result or "images" in result):
+            return "nothing found"
+
+    kb = len(result) / 1000
+    return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
+
+
+def _parse_web_results(result: str) -> list:
+    """
+    Parse the structured search context string into a list of
+    {"title": str, "url": str, "description": str} dicts.
+    """
+    entries = []
+    current: dict = {}
+    for line in result.splitlines():
+        line = line.strip()
+        if line.startswith("Title: "):
+            if current:
+                entries.append(current)
+            current = {"title": line[7:].strip(), "url": "", "description": ""}
+        elif line.startswith("URL: ") and current:
+            current["url"] = line[5:].strip()
+        elif line.startswith("Description: ") and current:
+            current["description"] = line[13:].strip()
+    if current:
+        entries.append(current)
+    return entries
+
+
+def _parse_file_results(result: str) -> list:
+    """Return list of file paths from a perform_file_search result string."""
+    paths = []
+    for line in result.splitlines():
+        line = line.strip()
+        if line.startswith("--- File:"):
+            path = line[len("--- File:"):].split("(")[0].strip()
+            if path:
+                paths.append(path)
+    return paths
+
+
+def _format_tool_detail(tool_name: str, result: str) -> str:
+    """
+    Return a multi-line detail block (indented) shown when the thinking is expanded.
+    Empty string means no extra detail needed (e.g. calculate).
+    """
+    if tool_name == "search_web":
+        entries = _parse_web_results(result)
+        if not entries:
+            return ""
+        lines = []
+        for i, e in enumerate(entries[:5], 1):
+            title = e["title"][:70] if e["title"] else "—"
+            url = e["url"][:80] if e["url"] else ""
+            lines.append(f"   {i}. {title}")
+            if url:
+                lines.append(f"      {url}")
+        return "\n".join(lines)
+
+    if tool_name == "search_files":
+        paths = _parse_file_results(result)
+        if not paths:
+            return ""
+        return "\n".join(f"   {i}. {p}" for i, p in enumerate(paths[:5], 1))
+
+    return ""
+
+
+def _render_tool_blocks(records: list, in_progress_header: str = "") -> str:
+    """
+    Render a list of completed tool-call records plus an optional in-progress entry.
+
+    Each record: {"header": str, "summary": str, "detail": str}
+    in_progress_header: header string for the tool currently running (empty = none)
+    """
+    lines = []
+    for rec in records:
+        lines.append(rec["header"] + "  ✓")
+        lines.append(f"   └─ {rec['summary']}")
+        detail = rec.get("detail", "")
+        if detail:
+            lines.append(detail)
+        lines.append("")          # blank line between entries
+    if in_progress_header:
+        lines.append(in_progress_header)
+        lines.append("   └─ running…")
+    return "\n".join(lines).rstrip()
+
+
+def _build_thinking(model_reasoning: str, tool_records: list, inline_thinking: str = "") -> str:
+    """Combine tool blocks + model reasoning into a single thinking string, no duplication."""
+    parts = []
+    if tool_records:
+        parts.append(_render_tool_blocks(tool_records))
+    combined_reasoning = (model_reasoning + inline_thinking).strip()
+    if combined_reasoning:
+        parts.append(combined_reasoning)
+    return "\n\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def perform_calculation(expression):
     try:
@@ -341,20 +498,10 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
         logging.info("[SCREENSHOT] Client has 5 seconds to capture and return the screenshot")
         return {"special_action": "screenshot_required"}
 
-    context_text = ""
-    source_type = "None"
-    
-    # Initialize thinking_content early to avoid UnboundLocalError
+    # Initialize early to avoid UnboundLocalError
     thinking_content = ""
     answer = ""
     actions = []
-
-    if any(x in query for x in ["+", "*", "/", "sqrt"]) and any(c.isdigit() for c in query):
-         source_type = "Calculator"
-         context_text = f"--- Calculation Result ---\n{perform_calculation(query)}\n"
-    elif should_search_files(query):
-         source_type = "Local Files"
-         context_text = f"--- Local File Context ---\n{perform_file_search(query)}\n"
 
     # HARDCODED: App Launcher (Deterministic Bypass)
     app_match = re.search(r"^(?:open|run|launch|start)\s+(.+)$", query.strip(), re.IGNORECASE)
@@ -384,10 +531,6 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
                     }]
                 }
 
-    # Determine Context Source handling
-    source_type = "None"
-    context_text = ""
-    
     # Background: Fact Extraction
     auto_actions = []
     
@@ -448,30 +591,8 @@ Output:"""
 
     except Exception as e: logging.error(f"Extraction Error: {e}")
 
-    # PRIORITIES:
-    
-    # PRIORITY 0: SCREENSHOT (Highest)
     if screenshot_b64:
-        source_type = "User Screen"
-        logging.info("Processing with Screenshot Context")
-    
-    # PRIORITY 1: Web Search
-    elif should_search(query):
-        source_type = "Internet"
-        context_text = f"--- Web Search Results ---\n{perform_web_search(query)}\n"
-
-    # PRIORITY 2: Images
-    elif should_search_images(query):
-         source_type = "Local Images"
-         context_text = f"--- Local Image Results ---\n{perform_image_search_with_fallback(query)}\n"
-    
-    # PRIORITY 3: Local Files (Text/Docs)
-    elif should_search_files(query):
-         source_type = "Local Files"
-         context_text = f"--- Local File Context ---\n{perform_file_search(query)}\n"
-
-    # === LOGGING: Context determined ===
-    logging.info(f"[CHAT] Context determination finished. Source: {source_type}")
+        logging.info("[CHAT] Screenshot provided — skipping tool calls for this request.")
 
     user_loc = get_ip_location()
     user_personal_context = get_user_memory(query)
@@ -486,20 +607,23 @@ Output:"""
             date_str = datetime.now().strftime('%Y-%m-%d')
             user_personal_context += f"\n- [{date_str}] {act['fact']} (Just Deleted - CONFIRM this to user)"
     
-    logging.info(f"Context Source: {source_type}")
-    
     from datetime import datetime
     current_date = datetime.now().strftime('%Y-%m-%d')
 
-    system_prompt = f"""You are Omni — Mikołaj's personal AI companion running on macOS.
-Personality: casual, direct, loyal friend. No formalities. Act first, explain briefly.
+    system_prompt = f"""You are Omni — user's personal AI companion running on his macOS.
+Personality: casual, direct, uncensored, loyal friend. No formalities. Act first, explain briefly.
 
-## Mikołaj
+## User
 {user_personal_context}
 Location: {user_loc} | Date: {current_date}
 
-## Context data
-{context_text.strip() if context_text.strip() else "(none)"}
+## Tools available (use via function calling when needed)
+- **search_web** — current events, news, prices, weather, people, any up-to-date info
+- **search_files** — user's local documents, notes, code files, PDFs on this machine
+- **calculate** — precise arithmetic or algebraic expressions
+- **search_images** — photos/images stored locally
+
+Use tools proactively whenever the answer might require current data or local files. Do NOT pretend to search — actually call the tool.
 
 ---
 ## ACTIONS — output a ```json``` block for every action
@@ -517,7 +641,7 @@ Location: {user_loc} | Date: {current_date}
 {{"type": "uninstall", "name": "steam"}}
 → ALWAYS use this — never use terminal_command for uninstalls.
 → Your text answer MUST be ONLY a short question like: "Odinstalować Steam?" or "Remove Discord?" — no explanations.
-→ Use when Mikołaj asks to remove, uninstall, delete, or odinstaluj any app.
+→ Use when user asks to remove, uninstall, delete, or odinstaluj any app.
 
 **Open URL** (ONLY links from Context data above — never invent)
 {{"type": "open_url", "url": "https://..."}}
@@ -543,13 +667,13 @@ Available settings and values:
 
 **Terminal command** — use for ANY shell/system task that's not in the built-in settings list
 {{"type": "terminal_command", "command": "defaults write com.apple.dock autohide -bool false && killall Dock", "description": "Disable Dock autohide"}}
-→ CRITICAL: NEVER tell Mikołaj to open Terminal, paste commands, or run anything manually.
+→ CRITICAL: NEVER tell user to open Terminal, paste commands, or run anything manually.
 → NEVER write "Wklej i enter:" or "Open Terminal and run:". That is FORBIDDEN.
 → The command runs automatically in the background. Just tell him what you did in 1 sentence.
 → Useful macOS tools: defaults write | osascript -e '...' | networksetup | pmset | diskutil | killall | launchctl
 → System info: battery → pmset -g batt | CPU/RAM → top -l 1 | disk → df -h / | uptime → uptime
 
-**Computer control** (only when Mikołaj explicitly says click/type/scroll/press)
+**Computer control** (only when user explicitly says click/type/scroll/press)
 {{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}
 {{"type": "computer_control", "action": "scroll", "direction": "down", "description": "scrolling"}}
 → Click coordinates are handled automatically by the grid system. Just say "Clicking X."
@@ -557,12 +681,12 @@ Available settings and values:
 
 ---
 ## Rules
-- Screenshot provided → you're seeing Mikołaj's screen right now. Don't ask to navigate anywhere.
+- Screenshot provided → you're seeing user's screen right now. Don't ask to navigate anywhere.
 - Never invent URLs. Only use links from Context data.
 - "Describe screen" / "What do you see?" → text answer only, no computer_control action.
 - For any command: just DO it. Never ask "would you like me to…?" — act immediately.
-- NEVER instruct Mikołaj to open Terminal or manually run commands. Always use terminal_command action.
-- If Mikołaj shares a new fact about himself, acknowledge it naturally.
+- NEVER instruct user to open Terminal or manually run commands. Always use terminal_command action.
+- If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
 """
     
@@ -655,176 +779,290 @@ Available settings and values:
     else:
         messages.append({"role": "user", "content": query})
 
+    # Tools are disabled for screenshot queries (model sees the screen directly)
+    active_tools = None if screenshot_b64 else TOOL_SCHEMAS
+
     try:
         abort_fast_event.clear()
         with main_lock:
-            # === LOGGING: Main Lock Acquired ===
             logging.info("[CHAT] Main lock acquired. Starting generation...")
-            
-            if hasattr(model_manager.llm, 'reset'): model_manager.llm.reset()
 
             if stream:
-                # Real streaming mode - get tokens as they're generated
-                streamer = model_manager.llm.create_chat_completion(
-                    messages=messages,
-                    max_tokens=1536,
-                    temperature=0.6,
-                    stream=True,
-                )
+                # ── Streaming with tool-calling loop ────────────────────────
+                # IMPORTANT: keep model_reasoning (only LLM tokens) separate from
+                # tool_records (structured tool log) to avoid double-rendering.
+                max_tool_iters = 5
+                tool_iter = 0
+                model_reasoning = ""   # Accumulated LLM reasoning_content tokens (all iterations)
+                tool_records: list = []  # Completed tool-call entries for display
 
-                # Yield tokens as they arrive
-                accumulated_text = ""
-                external_thinking = ""
-                for chunk in streamer:
-                    # Check abortion
-                    if model_manager.abort_fast_event.is_set():
-                        logging.info("Chat Request Aborted during streaming.")
-                        break
+                while tool_iter < max_tool_iters:
+                    tool_iter += 1
+                    if hasattr(model_manager.llm, 'reset'):
+                        model_manager.llm.reset()
 
-                    # Handle both raw strings and ChatCompletionChunk objects
-                    if hasattr(chunk, 'choices') and chunk.choices:
-                        delta = chunk.choices[0].delta
-                        
-                        # Handle content
-                        if hasattr(delta, 'content') and delta.content:
-                            token = delta.content
+                    streamer = model_manager.llm.create_chat_completion(
+                        messages=messages,
+                        max_tokens=1536,
+                        temperature=0.6,
+                        stream=True,
+                        tools=active_tools,
+                    )
+
+                    accumulated_text = ""
+                    iter_reasoning = ""   # reasoning tokens from THIS iteration only
+                    accumulated_tc: dict = {}  # index → tool call dict
+
+                    for chunk in streamer:
+                        if model_manager.abort_fast_event.is_set():
+                            logging.info("Chat Request Aborted during streaming.")
+                            return
+
+                        if hasattr(chunk, 'choices') and chunk.choices:
+                            delta = chunk.choices[0].delta
+
+                            # Accumulate streaming tool call deltas
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                for tc_delta in delta.tool_calls:
+                                    idx = tc_delta.index
+                                    if idx not in accumulated_tc:
+                                        accumulated_tc[idx] = {
+                                            "id": "",
+                                            "type": "function",
+                                            "function": {"name": "", "arguments": ""},
+                                        }
+                                    if tc_delta.id:
+                                        accumulated_tc[idx]["id"] = tc_delta.id
+                                    if tc_delta.function:
+                                        if tc_delta.function.name:
+                                            accumulated_tc[idx]["function"]["name"] += tc_delta.function.name
+                                        if tc_delta.function.arguments:
+                                            accumulated_tc[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+                            token = (delta.content or "") if hasattr(delta, 'content') else ""
+                            reasoning_token = ""
+                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                reasoning_token = delta.reasoning_content
+                            elif hasattr(delta, 'model_extra') and delta.model_extra and 'reasoning_content' in delta.model_extra:
+                                reasoning_token = delta.model_extra['reasoning_content']
+                            if reasoning_token:
+                                iter_reasoning += reasoning_token
                         else:
                             token = ""
-                            
-                        # Handle reasoning_content (DeepSeek/Qwen style)
-                        reasoning_token = ""
-                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                            reasoning_token = delta.reasoning_content
-                        elif hasattr(delta, 'model_extra') and delta.model_extra and 'reasoning_content' in delta.model_extra:
-                            reasoning_token = delta.model_extra['reasoning_content']
-                            
-                        if reasoning_token:
-                            external_thinking += reasoning_token
-                            
-                    else:
-                        # Fallback for simple string streaming or dictionary
-                        token = str(chunk) if chunk else ""
-                        reasoning_token = ""
-                        if isinstance(chunk, dict):
-                            delta_dict = chunk.get('choices', [{}])[0].get('delta', {})
-                            token = delta_dict.get('content', '')
-                            reasoning_token = delta_dict.get('reasoning_content', '')
-                            if reasoning_token:
-                                external_thinking += reasoning_token
+                            reasoning_token = ""
+                            if isinstance(chunk, dict):
+                                delta_dict = chunk.get('choices', [{}])[0].get('delta', {})
+                                token = delta_dict.get('content', '')
+                                reasoning_token = delta_dict.get('reasoning_content', '')
+                                if reasoning_token:
+                                    iter_reasoning += reasoning_token
 
-                    accumulated_text += token
-                    # Log streaming chunks so logs show raw response (last 100 chars per chunk)
-                    if accumulated_text:
-                        tail = accumulated_text[-100:] if len(accumulated_text) > 100 else accumulated_text
-                        # logging.info(f"[STREAM] raw chunk: ...{tail!r}")
-                        
-                    # Split into thinking (collapsible, gray) and answer (main text) for UI
-                    inline_thinking, answer_so_far = _split_thinking_and_answer(accumulated_text)
-                    
-                    # Strip actions from streamed answer to prevent flashing JSON and TTS reading it
-                    ans_clean, _, _ = extract_actions(answer_so_far) if answer_so_far else ("", [], "")
-                    
-                    # Combine external (field) and inline (tag) thinking
-                    combined_thinking = external_thinking + inline_thinking
-                    
-                    # Yield partial whenever we have thinking or answer
-                    if combined_thinking or ans_clean:
-                        yield ("partial", {"thinking": combined_thinking, "answer": ans_clean})
+                        accumulated_text += token
 
-                # Final processing: use the split result and then extract actions from answer only
-                inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
-                thinking_content = external_thinking + inline_thinking
-                
-                # Now extract actions/JSON from the answer text only (not from thinking)
-                answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
-                logging.info(f"[STREAM] final raw length={len(accumulated_text)}, thinking length={len(thinking_content)}, answer length={len(answer)}, actions count={len(actions)}")
+                        # Yield partial — combine tool log + all model reasoning so far
+                        if token or reasoning_token:
+                            inline_thinking, answer_so_far = _split_thinking_and_answer(accumulated_text)
+                            ans_clean, _, _ = extract_actions(answer_so_far) if answer_so_far else ("", [], "")
+                            combined_thinking = _build_thinking(
+                                model_reasoning + iter_reasoning, tool_records, inline_thinking
+                            )
+                            if combined_thinking or ans_clean:
+                                yield ("partial", {"thinking": combined_thinking, "answer": ans_clean})
 
-                # ── Terminal feedback loop (streaming) ──────────────────────
-                terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
-                if terminal_actions:
-                    # Pass actions to partial so the UI can rename and collapse the reasoning process
-                    yield ("partial", {"thinking": thinking_content, "answer": answer, "actions": terminal_actions})
-                    
-                    cmd_outputs = _run_terminal_commands(terminal_actions)
-                    
-                    # Yield final for the FIRST pass! This closes the first bubble and renders the terminal cards.
-                    yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
-                    
-                    if cmd_outputs:
-                        tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
-                        logging.info(f"[terminal] streaming second pass ({len(cmd_outputs)} cmd(s))")
-                        messages.append({"role": "assistant", "content": accumulated_text})
-                        messages.append({"role": "user", "content": tool_feedback})
-                        if hasattr(model_manager.llm, 'reset'):
-                            model_manager.llm.reset()
-                        streamer2 = model_manager.llm.create_chat_completion(
-                            messages=messages, max_tokens=1024, temperature=0.6, stream=True
-                        )
-                        accumulated_text2 = ""
-                        external_thinking2 = ""
-                        for chunk2 in streamer2:
-                            if model_manager.abort_fast_event.is_set():
-                                break
-                            if hasattr(chunk2, 'choices') and chunk2.choices:
-                                delta2 = chunk2.choices[0].delta
-                                token2 = (delta2.content or "") if hasattr(delta2, 'content') else ""
-                                rt2 = ""
-                                if hasattr(delta2, 'reasoning_content') and delta2.reasoning_content:
-                                    rt2 = delta2.reasoning_content
-                                elif hasattr(delta2, 'model_extra') and delta2.model_extra:
-                                    rt2 = delta2.model_extra.get('reasoning_content', '')
-                            else:
-                                delta2_dict = (chunk2 or {}).get('choices', [{}])[0].get('delta', {}) if isinstance(chunk2, dict) else {}
-                                token2 = delta2_dict.get('content', '')
-                                rt2 = delta2_dict.get('reasoning_content', '')
-                            if rt2:
-                                external_thinking2 += rt2
-                            accumulated_text2 += token2
-                            it2, ans2_so_far = _split_thinking_and_answer(accumulated_text2)
-                            ct2 = external_thinking2 + it2
-                            ans_clean2, _, _ = extract_actions(ans2_so_far) if ans2_so_far else ("", [], "")
-                            
-                            if ct2 or ans_clean2:
-                                # We only yield the second pass thinking!
-                                yield ("partial", {"thinking": ct2, "answer": ans_clean2, "actions": []})
-                        
-                        it2, answer_text2 = _split_thinking_and_answer(accumulated_text2)
-                        answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (accumulated_text2, [], "")
-                        non_terminal2 = [a for a in actions2 if a.get('type') != 'terminal_command']
-                        # Yield final for the SECOND pass! (This will close the second bubble)
-                        yield ("final", {"answer": answer2, "actions": non_terminal2, "thinking": external_thinking2 + it2})
-                        return # Important: early return so we don't yield final again below!
-                # ───────────────────────────────────────────────────────────
+                    # Persist this iteration's reasoning tokens
+                    model_reasoning += iter_reasoning
 
-                yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
+                    # ── After the stream: did the model request tool calls? ──
+                    if accumulated_tc:
+                        tool_calls = [accumulated_tc[i] for i in sorted(accumulated_tc)]
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": accumulated_text or None,
+                            "tool_calls": tool_calls,
+                        })
+
+                        # Execute each tool and show real-time progress
+                        for tc in tool_calls:
+                            tool_name = tc["function"]["name"]
+                            try:
+                                args = json.loads(tc["function"]["arguments"])
+                            except Exception:
+                                args = {}
+
+                            header = _tool_invocation_line(tool_name, args)
+                            n_total = len(tool_records) + len(tool_calls)
+                            th_label = f"Using {n_total} tool{'s' if n_total != 1 else ''}…"
+
+                            # "running…" state — show immediately
+                            # Render completed records + the new in-progress entry
+                            in_prog_display = _render_tool_blocks(tool_records, in_progress_header=header)
+                            thinking_running = (
+                                (model_reasoning.strip() + "\n\n" + in_prog_display).strip()
+                                if model_reasoning.strip() else in_prog_display
+                            )
+                            yield ("partial", {
+                                "thinking": thinking_running,
+                                "answer": "",
+                                "thinking_header": th_label,
+                            })
+
+                            result = execute_tool(tool_name, args)
+                            logging.info(f"[tool:{tool_name}] result length={len(result)}")
+
+                            summary = _tool_result_summary(tool_name, result)
+                            detail = _format_tool_detail(tool_name, result)
+                            tool_records.append({"header": header, "summary": summary, "detail": detail})
+
+                            # "done" state update
+                            n_done = len(tool_records)
+                            th_label = f"Used {n_done} tool{'s' if n_done != 1 else ''}"
+                            yield ("partial", {
+                                "thinking": _build_thinking(model_reasoning, tool_records),
+                                "answer": "",
+                                "thinking_header": th_label,
+                            })
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result,
+                            })
+
+                        continue  # Next iteration with tool results in messages
+
+                    # ── No tool calls: this is the final response ────────────
+                    inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
+                    # model_reasoning already includes all iterations; inline_thinking from <think> tags
+                    thinking_content = _build_thinking(model_reasoning, tool_records, inline_thinking)
+                    answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
+                    if auto_actions:
+                        actions.extend(auto_actions)
+                    _postprocess_actions(actions, answer)
+                    logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(answer)}, actions={len(actions)}")
+
+                    # ── Terminal feedback loop (streaming) ───────────────────
+                    terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
+                    if terminal_actions:
+                        yield ("partial", {"thinking": thinking_content, "answer": answer, "actions": terminal_actions})
+                        cmd_outputs = _run_terminal_commands(terminal_actions)
+                        yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
+
+                        if cmd_outputs:
+                            tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
+                            logging.info(f"[terminal] streaming second pass ({len(cmd_outputs)} cmd(s))")
+                            messages.append({"role": "assistant", "content": accumulated_text})
+                            messages.append({"role": "user", "content": tool_feedback})
+                            if hasattr(model_manager.llm, 'reset'):
+                                model_manager.llm.reset()
+                            streamer2 = model_manager.llm.create_chat_completion(
+                                messages=messages, max_tokens=1024, temperature=0.6, stream=True
+                            )
+                            accumulated_text2 = ""
+                            external_thinking2 = ""
+                            for chunk2 in streamer2:
+                                if model_manager.abort_fast_event.is_set():
+                                    break
+                                if hasattr(chunk2, 'choices') and chunk2.choices:
+                                    delta2 = chunk2.choices[0].delta
+                                    token2 = (delta2.content or "") if hasattr(delta2, 'content') else ""
+                                    rt2 = ""
+                                    if hasattr(delta2, 'reasoning_content') and delta2.reasoning_content:
+                                        rt2 = delta2.reasoning_content
+                                    elif hasattr(delta2, 'model_extra') and delta2.model_extra:
+                                        rt2 = delta2.model_extra.get('reasoning_content', '')
+                                else:
+                                    delta2_dict = (chunk2 or {}).get('choices', [{}])[0].get('delta', {}) if isinstance(chunk2, dict) else {}
+                                    token2 = delta2_dict.get('content', '')
+                                    rt2 = delta2_dict.get('reasoning_content', '')
+                                if rt2:
+                                    external_thinking2 += rt2
+                                accumulated_text2 += token2
+                                it2, ans2_so_far = _split_thinking_and_answer(accumulated_text2)
+                                ct2 = external_thinking2 + it2
+                                ans_clean2, _, _ = extract_actions(ans2_so_far) if ans2_so_far else ("", [], "")
+                                if ct2 or ans_clean2:
+                                    yield ("partial", {"thinking": ct2, "answer": ans_clean2, "actions": []})
+                            it2, answer_text2 = _split_thinking_and_answer(accumulated_text2)
+                            answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (accumulated_text2, [], "")
+                            non_terminal2 = [a for a in actions2 if a.get('type') != 'terminal_command']
+                            yield ("final", {"answer": answer2, "actions": non_terminal2, "thinking": external_thinking2 + it2})
+                        return
+
+                    final_header = f"Used {len(tool_records)} tool{'s' if len(tool_records) != 1 else ''}" if tool_records else None
+                    yield ("final", {
+                        "answer": answer,
+                        "actions": actions,
+                        "thinking": thinking_content,
+                        **({"thinking_header": final_header} if final_header else {}),
+                    })
+                    return
+
+                # Max tool iterations reached
+                logging.warning("[tool] Max tool iterations reached in streaming mode")
+                yield ("final", {"answer": "I got stuck calling tools. Please try again.", "actions": [], "thinking": accumulated_tool_thinking})
+
             else:
-                # Non-streaming mode (original behavior)
-                output = model_manager.llm.create_chat_completion(
-                    messages=messages,
-                    max_tokens=1536,
-                    temperature=0.6,
-                )
-                msg = output['choices'][0]['message']
-                full_text = msg['content'].strip()
-                
-                # Extract reasoning_content if present
-                external_thinking = msg.get('reasoning_content', '') or ""
-                if not isinstance(external_thinking, str): external_thinking = ""
-                
-                if full_text.startswith(':'): full_text = full_text[1:].strip()
+                # ── Non-streaming with tool-calling loop ─────────────────────
+                max_tool_iters = 5
+                full_text = ""
+                external_thinking = ""
+
+                for tool_iter in range(max_tool_iters):
+                    if hasattr(model_manager.llm, 'reset'):
+                        model_manager.llm.reset()
+
+                    output = model_manager.llm.create_chat_completion(
+                        messages=messages,
+                        max_tokens=1536,
+                        temperature=0.6,
+                        tools=active_tools,
+                    )
+                    msg = output['choices'][0]['message']
+                    full_text = (msg.get('content') or "").strip()
+                    external_thinking = msg.get('reasoning_content', '') or ""
+                    if not isinstance(external_thinking, str):
+                        external_thinking = ""
+                    tool_calls = msg.get('tool_calls', [])
+
+                    if not tool_calls:
+                        break  # Final answer — no more tool calls
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": full_text or None,
+                        "tool_calls": tool_calls,
+                    })
+                    for tc in tool_calls:
+                        tool_name = tc["function"]["name"]
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                        except Exception:
+                            args = {}
+                        result = execute_tool(tool_name, args)
+                        logging.info(f"[tool:{tool_name}] result length={len(result)}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result,
+                        })
+
+                if full_text.startswith(':'):
+                    full_text = full_text[1:].strip()
                 logging.info(f"RAW LLM OUTPUT:\n{full_text}")
 
-                # Use the same splitting logic for consistency
                 inline_thinking, answer_text = _split_thinking_and_answer(full_text)
                 thinking_content = external_thinking + inline_thinking
-                
-                # Extract actions from answer only (not from thinking)
                 answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
 
                 if not thinking_content and not answer:
                     answer = full_text
 
-                # ── Terminal feedback loop ──────────────────────────────────
+                if auto_actions:
+                    actions.extend(auto_actions)
+                _postprocess_actions(actions, answer)
+
+                # ── Terminal feedback loop ────────────────────────────────────
                 terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
                 if terminal_actions:
                     cmd_outputs = _run_terminal_commands(terminal_actions)
@@ -839,7 +1077,7 @@ Available settings and values:
                             messages=messages, max_tokens=1024, temperature=0.6
                         )
                         msg2 = out2['choices'][0]['message']
-                        full_text2 = msg2['content'].strip()
+                        full_text2 = (msg2.get('content') or "").strip()
                         if full_text2.startswith(':'):
                             full_text2 = full_text2[1:].strip()
                         _, answer_text2 = _split_thinking_and_answer(full_text2)
@@ -848,95 +1086,75 @@ Available settings and values:
                             answer = answer2
                         non_terminal = [a for a in actions if a.get('type') != 'terminal_command']
                         actions = terminal_actions + non_terminal + actions2
-                # ───────────────────────────────────────────────────────────
 
                 return {"answer": answer, "actions": actions, "thinking": thinking_content}
 
-        # VALIDATION: Filter out hallucinated computer_control actions
-        valid_actions = []
-        for act in actions:
-            if isinstance(act, dict) and act.get('type') == 'computer_control':
-                cmd = act.get('action')
-                if not cmd or cmd == 'computer_control':
-                    desc = act.get('description')
-                    if desc and (not answer or len(answer) < 5):
-                            answer = desc
-                    continue 
-            valid_actions.append(act)
-        actions = valid_actions
-
-    except Exception as e: 
-        logging.error(f"Error in ask_llm: {e}")
+    except Exception as e:
+        logging.error(f"Error in process_chat_request: {e}", exc_info=True)
         answer = f"Error: {e}"
         actions = []
-        # Ensure thinking_content is defined even in error case
         if 'thinking_content' not in locals():
             thinking_content = ""
 
-    if auto_actions: actions.extend(auto_actions)
+    return {"answer": answer, "actions": actions, "thinking": thinking_content}
 
-    # Convert internal memory actions to UI-visible Status cards
+
+def _postprocess_actions(actions: list, answer: str):
+    """Execute side-effectful actions in-place (open_url, open_app, system_settings, memory)."""
     for act in actions:
-        if not isinstance(act, dict): continue
+        if not isinstance(act, dict):
+            continue
+
         if act.get('type') in ['remember', 'forget']:
             act['type'] = 'status'
             act['status'] = 'success'
             act['content'] = act.get('description') or act.get('fact') or "Memory Updated"
 
-    # PROCESS LOCAL APP LAUNCHES and OPEN_URL
-    for act in actions:
-        if not isinstance(act, dict): continue
-        
         if act.get('type') == 'link' and any(x in answer.lower() for x in ["opening", "playing", "launching", "here is the video", "here is the trailer"]):
-             url = act.get('url', '')
-             if any(dom in url for dom in ["youtube.com", "youtu.be", "spotify.com", "vimeo.com"]):
-                 act['type'] = 'open_url'
+            url = act.get('url', '')
+            if any(dom in url for dom in ["youtube.com", "youtu.be", "spotify.com", "vimeo.com"]):
+                act['type'] = 'open_url'
 
         if act.get('type') == 'open_url':
-             url = act.get('url', '')
-             if url:
-                 logging.info(f"Opening URL: {url}")
-                 try:
-                     import subprocess
-                     # Check platform
-                     if sys.platform.startswith("win"):
+            url = act.get('url', '')
+            if url:
+                logging.info(f"Opening URL: {url}")
+                try:
+                    import subprocess as _sp
+                    import sys as _sys
+                    if _sys.platform.startswith("win"):
                         os.startfile(url)
-                     else:
-                        subprocess.Popen(["xdg-open", url], start_new_session=True)
-                     
-                     act['type'] = 'status'
-                     act['status'] = 'success'
-                     act['content'] = f"Opened {url}"
-                 except Exception as e:
-                     act['type'] = 'status'
-                     act['status'] = 'error'
-                     act['content'] = f"Failed to open URL: {e}"
+                    else:
+                        _sp.Popen(["xdg-open", url], start_new_session=True)
+                    act['type'] = 'status'
+                    act['status'] = 'success'
+                    act['content'] = f"Opened {url}"
+                except Exception as e:
+                    act['type'] = 'status'
+                    act['status'] = 'error'
+                    act['content'] = f"Failed to open URL: {e}"
 
         if act.get('type') == 'open_app':
-             app_name = act.get('name', '')
-             if app_name:
-                 success, msg = find_and_launch_app(app_name)
-                 if success:
-                     act['type'] = 'status'
-                     act['status'] = 'success'
-                     act['content'] = f"Launched {msg}"
-                 else:
-                     act['type'] = 'status'
-                     act['status'] = 'error'
-                     act['content'] = msg
+            app_name = act.get('name', '')
+            if app_name:
+                success, msg = find_and_launch_app(app_name)
+                if success:
+                    act['type'] = 'status'
+                    act['status'] = 'success'
+                    act['content'] = f"Launched {msg}"
+                else:
+                    act['type'] = 'status'
+                    act['status'] = 'error'
+                    act['content'] = msg
 
         if act.get('type') == 'system_settings':
-             try:
-                 from src.services.system.macos_settings import SETTING_META, execute_setting
-                 setting_name = act.get("setting", "")
-                 meta = SETTING_META.get(setting_name, {})
-                 act.update(meta)
-                 if "label" not in act:
-                     act["label"] = setting_name.replace("_", " ").title()
-                 execute_setting(act)
-             except Exception as e:
-                 logging.error(f"Failed to execute system settings: {e}")
-
-        # terminal_command actions are now executed inside the LLM feedback loop above.
-
-    return {"answer": answer, "actions": actions, "thinking": thinking_content}
+            try:
+                from src.services.system.macos_settings import SETTING_META, execute_setting
+                setting_name = act.get("setting", "")
+                meta = SETTING_META.get(setting_name, {})
+                act.update(meta)
+                if "label" not in act:
+                    act["label"] = setting_name.replace("_", " ").title()
+                execute_setting(act)
+            except Exception as e:
+                logging.error(f"Failed to execute system settings: {e}")

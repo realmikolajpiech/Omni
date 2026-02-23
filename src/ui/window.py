@@ -920,7 +920,9 @@ class OmniWindow(QWidget):
                 list_h += item.sizeHint().height() + 6 # Add margin-bottom from CSS
             
             base_h = 84 
-            extra_padding = 12 # 24px padding + 1px divider + 3px safety
+            # Account for QListWidget vertical padding (12px top + 12px bottom)
+            # plus a tiny safety buffer to avoid "just barely" showing a scrollbar.
+            extra_padding = 28
             
             # Dynamic height calculation to prevent going behind taskbar
             screen = QGuiApplication.screenAt(self.pos()) or QApplication.primaryScreen()
@@ -2554,6 +2556,13 @@ class OmniWindow(QWidget):
                 answer_item.setSizeHint(answer_widget.sizeHint())
                 self.adjust_window_height(animate=False)
 
+        # Update collapsible header label (from tool calls or terminal commands)
+        thinking_header = data.get("thinking_header", "")
+        if thinking_header and answer_widget:
+            answer_widget.set_thinking_header(thinking_header)
+            if answer_item is not None:
+                answer_item.setSizeHint(answer_widget.sizeHint())
+
         actions = data.get("actions", [])
         if actions and answer_widget:
             for act in actions:
@@ -2620,12 +2629,12 @@ class OmniWindow(QWidget):
 
             widget.set_answer(answer)
 
-            # Determine if we should rename the Reasoning process label to an action name
-            action_label = None
-            if actions:
+            # Determine label for the collapsed thinking block
+            # Priority: thinking_header from backend > terminal_command description > None
+            action_label = data.get("thinking_header") or None
+            if not action_label and actions:
                 for act in actions:
                     if isinstance(act, dict) and act.get('type') == 'terminal_command' and act.get('description'):
-                        # Capitalize first letter simply for nicer UI
                         action_label = str(act.get('description')).strip().capitalize()
                         break
 

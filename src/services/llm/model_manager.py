@@ -197,7 +197,7 @@ class XAIMainWrapper:
     def reset(self):
         pass
 
-    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, **kwargs):
+    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, tools=None, **kwargs):
         messages = _convert_file_urls_to_base64(messages)
         messages = _messages_for_cache(messages)
 
@@ -205,6 +205,9 @@ class XAIMainWrapper:
 
         # Filter unsupported kwargs for xAI / generic OpenAI-compatible APIs
         extra = {k: v for k, v in kwargs.items() if k not in ("chat_template_kwargs",)}
+
+        if tools:
+            extra["tools"] = tools
 
         if stream:
             return self.client.chat.completions.create(
@@ -228,12 +231,26 @@ class XAIMainWrapper:
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
 
+        # Extract tool calls if present
+        tool_calls = []
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_calls.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                })
+
         return {
             "choices": [{
                 "message": {
                     "role": "assistant",
                     "content": content,
                     "reasoning_content": reasoning,
+                    "tool_calls": tool_calls,
                 }
             }]
         }
