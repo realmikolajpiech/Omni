@@ -25,6 +25,9 @@ _TOOL_META = {
     "search_files":  {"icon": "📂", "label": "File search"},
     "calculate":     {"icon": "🧮", "label": "Calculate"},
     "search_images": {"icon": "🖼️", "label": "Image search"},
+    "memory_recall": {"icon": "🧠", "label": "Memory recall"},
+    "memory_save":   {"icon": "🧠", "label": "Remember"},
+    "memory_delete": {"icon": "🧠", "label": "Forget"},
 }
 
 
@@ -33,7 +36,7 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
     meta = _TOOL_META.get(tool_name, {"icon": "⚙", "label": tool_name})
     icon, label = meta["icon"], meta["label"]
 
-    if tool_name in ("search_web", "search_files", "search_images"):
+    if tool_name in ("search_web", "search_files", "search_images", "memory_recall", "memory_delete"):
         q = args.get("query", "")
         if len(q) > 72:
             q = q[:69] + "…"
@@ -43,6 +46,11 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
         if len(expr) > 72:
             expr = expr[:69] + "…"
         arg_part = expr
+    elif tool_name == "memory_save":
+        fact = args.get("fact", "")
+        if len(fact) > 72:
+            fact = fact[:69] + "…"
+        arg_part = f'"{fact}"'
     else:
         arg_part = "  ".join(f"{k}: {v!r}" for k, v in args.items())
 
@@ -74,6 +82,19 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
     if tool_name == "search_images":
         if "No" in result and ("found" in result or "images" in result):
             return "nothing found"
+
+    if tool_name == "memory_recall":
+        if "No memories" in result or "No specific" in result or "No personal" in result:
+            return "nothing found"
+        lines = [l.strip() for l in result.strip().splitlines() if l.strip()]
+        n = len(lines)
+        return f"{n} memor{'y' if n == 1 else 'ies'} recalled"
+
+    if tool_name == "memory_save":
+        return "saved" if result.startswith("Saved:") else "failed to save"
+
+    if tool_name == "memory_delete":
+        return "deleted" if result.startswith("Deleted") else "not found"
 
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
@@ -622,8 +643,17 @@ Location: {user_loc} | Date: {current_date}
 - **search_files** — user's local documents, notes, code files, PDFs on this machine
 - **calculate** — precise arithmetic or algebraic expressions
 - **search_images** — photos/images stored locally
+- **memory_recall** — retrieve facts/preferences/details you've remembered about this user from past conversations
+- **memory_save** — permanently store a new fact or preference about this user for future conversations
+- **memory_delete** — forget/remove a memory when user asks you to or when info is outdated
 
-Use tools proactively whenever the answer might require current data or local files. Do NOT pretend to search — actually call the tool.
+Memory usage rules:
+- Call **memory_recall** proactively when the answer might depend on something the user told you before.
+- Call **memory_save** when the user shares something personal or important that should persist.
+- Call **memory_delete** when the user says "forget that", "that's wrong", or info is confirmed outdated.
+- Never tell the user you "can't remember" without first calling memory_recall.
+
+Use tools proactively. Do NOT pretend to search or recall — actually call the tool.
 
 ---
 ## ACTIONS — output a ```json``` block for every action
