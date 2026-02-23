@@ -4,17 +4,23 @@ import concurrent.futures
 
 import httpx
 
-from src.core.config import SEARXNG_URL, SERPER_API_KEY
+from src.core.config import SEARXNG_URL, SERPER_MAIN_API_KEY, SERPER_FAST_API_KEY
 from src.services.system.location import get_system_location, get_ip_location, get_search_locale
 
 # ---------------------------------------------------------------------------
 # Persistent HTTP clients (connection reuse, HTTP/2 for Serper)
 # ---------------------------------------------------------------------------
-_serper_client = httpx.Client(
+_serper_main_client = httpx.Client(
+    base_url="https://google.serper.dev",
+    timeout=4.0,
+    http2=True,
+) if SERPER_MAIN_API_KEY else None
+
+_serper_fast_client = httpx.Client(
     base_url="https://google.serper.dev",
     timeout=2.0,
     http2=True,
-) if SERPER_API_KEY else None
+) if SERPER_FAST_API_KEY else None
 
 _local_client = httpx.Client(timeout=2.0)
 
@@ -95,21 +101,27 @@ _SERPER_TYPE_MAP = {
     'map': '/places',
 }
 
-def _serper_search(query: str, categories: str = 'general', count: int = 5) -> list:
+def _serper_search(query: str, categories: str = 'general', count: int = 5, fast: bool = False) -> list:
     """
     Hit Serper.dev and normalize results to the same shape as SearXNG
     (dicts with 'title', 'url', 'content' keys).
+    Uses SERPER_FAST_API_KEY when fast=True, SERPER_MAIN_API_KEY otherwise.
     """
-    if not _serper_client:
+    if fast:
+        client, api_key = _serper_fast_client, SERPER_FAST_API_KEY
+    else:
+        client, api_key = _serper_main_client, SERPER_MAIN_API_KEY
+
+    if not client:
         return []
 
     endpoint = _SERPER_TYPE_MAP.get(categories, '/search')
     loc = get_search_locale()
 
     try:
-        r = _serper_client.post(
+        r = client.post(
             endpoint,
-            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
             json={"q": query, "num": count, "gl": loc[:2] if loc else "us"},
         )
         r.raise_for_status()
@@ -200,12 +212,12 @@ def search_api(query: str, categories: str = 'general', fast: bool = False) -> l
     t0 = time.time()
     results = []
 
-    # Primary: Serper.dev
-    if SERPER_API_KEY:
-        results = _serper_search(query, categories)
+    # Primary: Serper.dev (fast key for action classifier, main key for LLM tools)
+    if (fast and SERPER_FAST_API_KEY) or (not fast and SERPER_MAIN_API_KEY):
+        results = _serper_search(query, categories, fast=fast)
         if results:
             dt = time.time() - t0
-            logging.info(f"Serper: {len(results)} results for '{query}' in {dt:.3f}s")
+            logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
             _set_cached(query, categories, results)
             return results
         logging.warning(f"Serper returned 0 results for '{query}', falling back to SearXNG")

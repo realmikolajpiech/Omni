@@ -31,7 +31,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_files",
             "description": (
-                "Semantically search Mikołaj's local files and documents stored on the "
+                "Semantically search user's local files and documents stored on the "
                 "computer. Use when asked about personal notes, journals, code files, "
                 "PDFs, spreadsheets, or any content that might be saved locally."
             ),
@@ -72,7 +72,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_images",
             "description": (
-                "Search Mikołaj's local image library by visual description or content. "
+                "Search user's local image library by visual description or content. "
                 "Use when asked about photos or images stored on the computer."
             ),
             "parameters": {
