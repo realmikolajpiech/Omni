@@ -1,3 +1,4 @@
+import os
 import time
 import json
 import logging
@@ -1235,6 +1236,86 @@ def pick_package_endpoint():
 @api_bp.route('/verify_package', methods=['POST'])
 def verify_package_endpoint():
     return jsonify({"verified": True})
+
+
+@api_bp.route('/classify_files', methods=['POST'])
+def classify_files_endpoint():
+    """Batch-classify files for content indexing using the fast model.
+
+    Accepts: {"files": [{"filename": "foo.json", "path": "/a/b/c/foo.json"}, ...]}
+    Returns: {"decisions": [1, 0, 1, ...]}  — 1 = index, 0 = skip
+
+    Used by the indexer (Phase 2) to decide which files are worth semantic
+    content embedding.  Routing through the brain reuses the already-
+    authenticated Groq client instead of making raw HTTP calls.
+    """
+    model_manager.ensure_fast_model()
+    if model_manager.fast_model is None:
+        return jsonify({"error": "Fast model not available"}), 503
+
+    data = request.get_json(silent=True) or {}
+    files = data.get("files", [])
+    if not files:
+        return jsonify({"decisions": []})
+
+    lines = []
+    for i, f in enumerate(files):
+        full_path = f.get("path", "")
+        filename = f.get("filename", "")
+        parts = [p for p in full_path.split(os.sep) if p]
+        context = "/".join(parts[-3:-1]) if len(parts) >= 3 else "/".join(parts[:-1])
+        lines.append(f"{i}: {filename}  (in: {context}/)")
+
+    prompt = (
+        "You are a strict filter for a personal desktop file search index.\n"
+        "Decide which files are worth embedding for semantic search — i.e. a user could "
+        "reasonably search for this file by describing its content.\n\n"
+        "DEFAULT TO 0 (skip). Only output 1 if the file clearly contains unique, "
+        "human-authored content a user would search for.\n\n"
+        "Always output 0 for:\n"
+        "- package.json / package files (npm/pip metadata, not user content)\n"
+        "- Any CSS / stylesheet files\n"
+        "- HTML entry-point shells (index.html, _document.tsx used as SPA roots)\n"
+        "- robots.txt, manifest.json, .env, sitemap.xml\n"
+        "- Auto-generated or boilerplate config (nodemon, babel, eslint, tailwind, etc.)\n"
+        "- Test files (*test*, *spec*, *__tests__*)\n"
+        "- Files in public/, static/, dist/, or build/ directories\n"
+        "- Short utility/helper files under 20 meaningful lines\n\n"
+        "Output 1 for:\n"
+        "- README, docs, notes, .txt, .rtf, .docx (actual writing)\n"
+        "- Core application source code with real logic (server.js, main.py, App.tsx, etc.)\n"
+        "- Data files with real user-created content (not configs or generated output)\n"
+        "- Scripts the user wrote (.sh, .py with actual logic)\n\n"
+        "Reply with ONLY a JSON array of 0s and 1s, one per file, in order. "
+        "No explanation.\n\n"
+        "Files:\n" + "\n".join(lines)
+    )
+
+    try:
+        result = model_manager.fast_model.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=len(files) * 4 + 20,
+            temperature=0.0,
+        )
+        if result is None:
+            return jsonify({"error": "Fast model returned no response"}), 503
+
+        raw = result["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+
+        decisions = json.loads(raw)
+        # Clamp to valid 0/1 and pad/trim to match input length
+        decisions = [int(bool(d)) for d in decisions]
+        while len(decisions) < len(files):
+            decisions.append(1)  # fail-open: include if response is short
+        decisions = decisions[:len(files)]
+
+        return jsonify({"decisions": decisions})
+
+    except Exception as e:
+        logging.warning(f"/classify_files error: {e}")
+        return jsonify({"decisions": [1] * len(files)})  # fail-open
 
 
 @api_bp.route('/embed', methods=['POST'])

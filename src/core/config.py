@@ -74,6 +74,8 @@ IGNORE_DIRS = {
     "Parallels", ".Spotlight-V100", ".fseventsd",
     # CMake build output (auto-generated, zero user value)
     "cmake-build-debug", "cmake-build-release", "CMakeFiles", ".cmake",
+    # HuggingFace / model caches (model weights, tokenizer blobs — zero user value)
+    "hf_cache", "hub", "blobs", "snapshots",
 }
 
 # File extensions that are purely internal / developer noise
@@ -103,7 +105,7 @@ CONTENT_SKIP_FILENAMES = {
     "eslint.config.js", ".eslintrc.js", ".eslintrc.json",
     "postcss.config.js", "postcss.config.cjs",
     "babel.config.js", "babel.config.json", ".babelrc",
-    "metro.config.js", "jest.config.js", "jest.config.ts",
+    "metro.config.js", "jest.config.js", "jest.config.ts", "jest.setup.js",
     "webpack.config.js", "vite.config.js", "vite.config.ts",
     "tailwind.config.js", "tailwind.config.ts",
     ".prettierrc", ".prettierrc.json", ".prettierrc.js",
@@ -112,6 +114,19 @@ CONTENT_SKIP_FILENAMES = {
     "gradlew", "gradlew.bat",
     "Podfile", "Podfile.properties.json",
     "Contents.json",  # Xcode asset catalog metadata (repeated in every .xcassets dir)
+    # Expo / React Native project config (boilerplate, no user content)
+    "app.json", "eas.json", "nodemon.json",
+    # Deployment / cloud config (boilerplate)
+    "vercel.json", "firebase.json", "components.json",
+    # Credential / secrets files (sensitive + not useful for search)
+    "credentials.json", "google-services.json", "firebaseConfig.js",
+    # ML model metadata (generated, zero user value)
+    "tokenizer_config.json", "special_tokens_map.json",
+    "config_sentence_transformers.json", "sentence_bert_config.json",
+    "modules.json",
+    # Standard web boilerplate (no meaningful content to search)
+    "manifest.json", "robots.txt", "sitemap.xml",
+    "index.css", "App.css", "global.css", "globals.css", "reset.css",
 }
 
 # Directory names that trigger content-skip for any file found inside them.
@@ -129,9 +144,18 @@ CONTENT_SKIP_DIRS = {
     "assets",
 }
 
+# File extensions whose content is never worth semantic indexing.
+# These are style sheets, compiled outputs, or schema files — not human-readable search targets.
+CONTENT_SKIP_EXTENSIONS = {
+    ".css", ".scss", ".sass", ".less",  # stylesheets
+    ".ini", ".cfg",                     # low-signal config formats
+}
+
 # Filename suffix patterns for content-skip (for variable-name files that can't be matched exactly).
 CONTENT_SKIP_SUFFIXES = {
     "-Bridging-Header.h",  # Xcode Swift/ObjC bridge stubs (AppName-Bridging-Header.h)
+    ".test.js", ".spec.js", ".test.ts", ".spec.ts",  # test files
+    ".min.js", ".min.css",  # minified (already in BLOCKED_EXTENSIONS but belt-and-suspenders)
 }
 
 # Ensure directories exist

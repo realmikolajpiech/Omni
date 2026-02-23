@@ -16,13 +16,19 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(o
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from src.core.config import DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS, INDEX_DONE_MARKER, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS, CONTENT_SKIP_SUFFIXES
+from src.core.config import (
+    DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS,
+    INDEX_DONE_MARKER, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS,
+    CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS,
+)
 from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TABLE_NAME = "files"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
+CLASSIFY_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/classify_files"
+LLM_FILTER_BATCH_SIZE = 32
 
 
 def _wait_for_brain(timeout: int = 60) -> bool:
@@ -70,6 +76,59 @@ def _eta(start: float, done: int, total: int) -> str:
     if s < 60:
         return f"~{s}s"
     return f"~{s // 60}m {s % 60}s"
+
+
+def _llm_filter_content(candidates: list) -> set:
+    """Batch-classify candidate files via the brain's /classify_files endpoint.
+
+    Routing through the brain reuses the already-authenticated Groq fast-model
+    client.  Only filename + 2-level path context is sent — no file content,
+    so the calls are cheap and fast.
+
+    Returns a set of full_paths that should be skipped.
+    Fails open: a failed batch leaves those files included.
+    """
+    skip_paths: set = set()
+    total_batches = (len(candidates) + LLM_FILTER_BATCH_SIZE - 1) // LLM_FILTER_BATCH_SIZE
+
+    for batch_idx in range(total_batches):
+        batch = candidates[batch_idx * LLM_FILTER_BATCH_SIZE:(batch_idx + 1) * LLM_FILTER_BATCH_SIZE]
+
+        files_payload = [
+            {"filename": filename, "path": full_path}
+            for full_path, filename in batch
+        ]
+        payload = json.dumps({"files": files_payload}).encode("utf-8")
+
+        try:
+            req = urllib.request.Request(
+                CLASSIFY_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+
+            decisions = result.get("decisions", [])
+            skipped = 0
+            for i, (full_path, _) in enumerate(batch):
+                if i < len(decisions) and int(decisions[i]) == 0:
+                    skip_paths.add(full_path)
+                    skipped += 1
+
+            logging.info(
+                f"  [llm-filter] batch {batch_idx + 1}/{total_batches}: "
+                f"{skipped}/{len(batch)} files filtered out"
+            )
+
+        except Exception as e:
+            logging.warning(
+                f"  [llm-filter] batch {batch_idx + 1}/{total_batches} failed ({e}) "
+                f"— including all {len(batch)} files as fallback"
+            )
+
+    return skip_paths
 
 
 def _collect_files(base_dir):
@@ -284,12 +343,37 @@ def main():
     total_text_count = len(text_files)
     next_sample_at = 50
 
+    # LLM-based smart filter: batch-classify files that pass static rules.
+    # Only filenames + 2-level path context are sent — no file contents, minimal cost.
+    llm_skip_paths: set = set()
+    def _static_skip(full_path, filename):
+        _, ext = os.path.splitext(filename)
+        return (
+            filename in CONTENT_SKIP_FILENAMES
+            or set(full_path.split(os.sep)) & CONTENT_SKIP_DIRS
+            or any(filename.endswith(s) for s in CONTENT_SKIP_SUFFIXES)
+            or ext.lower() in CONTENT_SKIP_EXTENSIONS
+        )
+
+    llm_candidates = [
+        (full_path, filename) for full_path, filename in text_files
+        if not _static_skip(full_path, filename)
+    ]
+    if llm_candidates:
+        logging.info(
+            f"  [llm-filter] Classifying {len(llm_candidates)} candidate files "
+            f"with fast model ({(len(llm_candidates) + LLM_FILTER_BATCH_SIZE - 1) // LLM_FILTER_BATCH_SIZE} batches)..."
+        )
+        filter_start = time.time()
+        llm_skip_paths = _llm_filter_content(llm_candidates)
+        logging.info(
+            f"  [llm-filter] Done in {_elapsed(filter_start)}: "
+            f"{len(llm_skip_paths)}/{len(llm_candidates)} additional files filtered out"
+        )
+
     skipped_content = 0
     for full_path, filename in text_files:
-        path_parts = set(full_path.split(os.sep))
-        if (filename in CONTENT_SKIP_FILENAMES
-                or path_parts & CONTENT_SKIP_DIRS
-                or any(filename.endswith(s) for s in CONTENT_SKIP_SUFFIXES)):
+        if _static_skip(full_path, filename) or full_path in llm_skip_paths:
             skipped_content += 1
             continue
 
