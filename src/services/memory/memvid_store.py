@@ -47,8 +47,9 @@ Task:
 2. Resolve them by trusting NEGATIVE assertions or EXPLICIT UPDATES over older positive ones.
 3. If a fact says "FACT DELETED: X", it means X is FALSE and REMOVED. Do NOT include X in the output.
 4. Remove duplicates.
-5. Output specific, singular, consistent facts.
-6. NO conversational text. Output ONLY the facts.
+5. REMOVE metadata artifacts like "title: Untitled", "title: ...", or "tags: ...". If a fact is ONLY metadata, remove it.
+6. Output specific, singular, consistent facts.
+7. NO conversational text. Output ONLY the facts.
 
 Facts:
 {facts_text}
@@ -146,6 +147,12 @@ def get_user_memory(query=None):
                 if text:
                     # Memvid snippets sometimes look like "The user's name is... \ntitle: ... \ntags: ..."
                     clean_text = text.split('\ntitle:')[0].split('\ntext:')[0].strip()
+                    # Extra cleanup for inline title: artifacts
+                    if " title: Untitled" in clean_text:
+                        clean_text = clean_text.replace(" title: Untitled", "").strip()
+                    if clean_text.endswith(" title:"):
+                        clean_text = clean_text[:-7].strip()
+                        
                     facts.append(f"{date_str}{clean_text}")
             elif isinstance(h, str):
                 facts.append(h)

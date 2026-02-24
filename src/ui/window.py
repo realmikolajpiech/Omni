@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget,WikiCardWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -32,7 +32,6 @@ from src.ui.workers.screenshot_worker import ScreenshotWorker
 from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker, UninstallOrchestrator
 from src.ui.workers.file_search_worker import FileSearchWorker
 from src.ui.workers.tts_worker import TTSWorker
-from src.ui.workers.wiki_worker import WikiWorker
 from src.ui.workers.og_worker import OGWorker
 
 # ---------------------------------------------------------------------------
@@ -330,7 +329,6 @@ class OmniWindow(QWidget):
         self.external_actions = []
         self.external_search_results = []
         self.local_file_results = []
-        self.wiki_data = None      # Wikipedia knowledge card data
         self.og_data = None        # Open Graph website preview data
         self.instant_url = None    # (url, domain) when query is a URL/domain — shown instantly
 
@@ -338,6 +336,11 @@ class OmniWindow(QWidget):
         self.debounce_timer.setSingleShot(True)
         self.debounce_timer.setInterval(300)  # FAST: Reduced from 650ms to 300ms
         self.debounce_timer.timeout.connect(self.trigger_async_searches)
+
+        self.local_search_timer = QTimer()
+        self.local_search_timer.setSingleShot(True)
+        self.local_search_timer.setInterval(50) # 50ms debounce for local search to prevent UI lag on fast typing
+        self.local_search_timer.timeout.connect(self.perform_local_search)
 
         # Start IPC Listener
         start_ipc_listener(self)
@@ -796,33 +799,24 @@ class OmniWindow(QWidget):
                     self.follow_up_widget.set_active(True)
                     self.frame.set_minimal_mode(False)
             else:
-                if self._closed_by_deactivation:
-                    # Closed by clicking outside — always start fresh
-                    self.chat_history = []
-                    self.is_history_mode = False
-                    self.follow_up_widget.set_active(False)
-                    self.frame.set_minimal_mode(True)
-                    self.input_field.setPlaceholderText("Search or ask...")
-                    self.input_field.clear()
-                    self.list_widget.clear()
                 # else: shortcut close — existing list/input preserved, just need height restore
                 # Mark animating early so changeEvent can't fire a spurious close during processEvents
                 self.is_entry_animating = True
                 self.setWindowOpacity(0.0)
                 self.show()
                 self.center()
-                if not self._closed_by_deactivation:
-                    # Expand the window to fit whatever is in the list (collapsed to 84px on close).
-                    # For history mode, _restore_history_ui also rebuilds the list from chat_history.
-                    if self.is_history_mode:
-                        self._restore_history_ui()
-                    else:
-                        # Restore active border if AI is still running (e.g. thinking on first query)
-                        ai_active = hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning()
-                        if ai_active:
-                            self.frame.set_minimal_mode(False)
-                            self.logo_label.boost_speed()
-                        self.adjust_window_height(animate=False)
+                
+                # Expand the window to fit whatever is in the list (collapsed to 84px on close).
+                # For history mode, _restore_history_ui also rebuilds the list from chat_history.
+                if self.is_history_mode:
+                    self._restore_history_ui()
+                else:
+                    # Restore active border if AI is still running (e.g. thinking on first query)
+                    ai_active = hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning()
+                    if ai_active:
+                        self.frame.set_minimal_mode(False)
+                        self.logo_label.boost_speed()
+                    self.adjust_window_height(animate=False, force=True)
                 self.animate_entry()
                 self.input_field.setFocus()
                 if source == "voice":
@@ -852,7 +846,7 @@ class OmniWindow(QWidget):
             self._streaming_answer_widget = None
             # Re-add the thinking indicator so the user sees activity while waiting.
             self.add_list_item(ThinkingWidget(), "thinking", animation="instant")
-            self.adjust_window_height(animate=False)
+            self.adjust_window_height(animate=False, force=True)
             self.logo_label.boost_speed()
         # Re-assert input focus after list rebuild — list widget may have grabbed it transiently
         self.input_field.setFocus()
@@ -975,10 +969,10 @@ class OmniWindow(QWidget):
         self.activateWindow()
         self.raise_()
 
-    def adjust_window_height(self, animate=True):
+    def adjust_window_height(self, animate=True, force=False):
         # if self.is_settings_mode: return
 
-        if hasattr(self, 'is_entry_animating') and self.is_entry_animating:
+        if not force and hasattr(self, 'is_entry_animating') and self.is_entry_animating:
             # Don't interrupt entry animation
             return
         
@@ -1163,6 +1157,17 @@ class OmniWindow(QWidget):
                     self.animate_close()
                 return True
             elif event.key() == Qt.Key.Key_Tab:
+                # Check for Place card interaction (Tab -> Open Website)
+                current_item = self.list_widget.currentItem()
+                if current_item:
+                    data = current_item.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(data, dict) and data.get('type') == 'place':
+                        url = data.get('url')
+                        if url:
+                            QDesktopServices.openUrl(QUrl(url))
+                            self.animate_close()
+                            return True
+
                 if self.is_history_mode:
                     self.reset_to_search_mode(clear=False)
                 else:
@@ -1220,7 +1225,7 @@ class OmniWindow(QWidget):
                 _item.setSizeHint(_w.sizeHint())
         # Use animate=False so geometry is set immediately. animate_entry() runs after
         # and uses self.geometry() as its target — it must see the full height, not 84px.
-        self.adjust_window_height(animate=False)
+        self.adjust_window_height(animate=False, force=True)
 
     def on_tts_finished(self):
         self.is_tts_playing = False
@@ -1531,7 +1536,6 @@ class OmniWindow(QWidget):
             self.external_actions = []
             self.external_search_results = []
             self.local_file_results = []
-            self.wiki_data = None
             self.og_data = None
             self.instant_url = None
             self.refresh_list("", animate=True)
@@ -1543,7 +1547,6 @@ class OmniWindow(QWidget):
         self.external_search_results = []
         self.local_file_results = []
         self.fast_chips = []
-        self.wiki_data = None
         self.og_data = None
 
         # Detect URL/domain instantly — no debounce, no API call needed
@@ -1560,7 +1563,8 @@ class OmniWindow(QWidget):
                 self.og_worker.start()
         
         self.frame.set_minimal_mode(True)
-        self.refresh_list(text, animate=True)
+        # self.refresh_list(text, animate=True)
+        self.local_search_timer.start() # Debounce local search slightly
         self.debounce_timer.start()
 
     def refresh_list(self, query, animate=True):
@@ -1569,7 +1573,6 @@ class OmniWindow(QWidget):
             self.external_actions = []
             self.external_search_results = []
             self.local_file_results = []
-            self.wiki_data = None
             self.og_data = None
             self.instant_url = None
             self.adjust_window_height(animate)
@@ -1580,7 +1583,7 @@ class OmniWindow(QWidget):
 
         # -1. Quick URL card — shown instantly when user types a domain/URL.
         #     Replaced by OGPreviewWidget once OG data arrives (different key → smooth swap).
-        if self.instant_url and not self.og_data and not self.wiki_data:
+        if self.instant_url and not self.og_data:
             _iu_url, _iu_domain = self.instant_url
             _iu_theme = getattr(self, "current_theme", "dark")
 
@@ -1591,7 +1594,7 @@ class OmniWindow(QWidget):
             new_items_data.append((f"quick_url:{_iu_url}", _iu_data, _create_quick_url))
 
         # 0.6. OG Website Preview — for link-type actions (shown when wiki not available)
-        if self.og_data and not self.wiki_data:
+        if self.og_data:
             og_url = self.og_data.get("source_url", "")
             og_key = f"og:{og_url}"
             og_snap = self.og_data
@@ -1640,8 +1643,20 @@ class OmniWindow(QWidget):
                 elif a.get('type') == 'person':
                     return PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
                 elif a.get('type') == 'place':
-                    # Use MapNavigationWidget for all places for consistent "Google Maps" style
-                    return MapNavigationWidget(a['name'], a.get('address'))
+                    # Use PlaceActionWidget for rich place cards (images + map)
+                    return PlaceActionWidget(
+                        a['name'], 
+                        a.get('address'), 
+                        a.get('image'), 
+                        a.get('url'), 
+                        a.get('latitude'), 
+                        a.get('longitude'),
+                        rating=a.get('rating'),
+                        rating_count=a.get('rating_count'),
+                        category=a.get('category'),
+                        phone=a.get('phone'),
+                        hours=a.get('hours')
+                    )
                 elif a.get('type') == 'status':
                     return StandardItemWidget(a['description'], icon_name="dialog-information")
                 elif a.get('type') == 'calc':
@@ -1665,24 +1680,6 @@ class OmniWindow(QWidget):
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
-
-        # 1.5. Wikipedia Knowledge Card — shown AFTER action cards.
-        #       Suppressed entirely when a compute-type action is present (unit, calc,
-        #       currency, translate, weather, color, timer, password, qrcode) because wiki is irrelevant noise then.
-        _COMPUTE_TYPES = ('unit', 'calc', 'currency', 'translate', 'weather', 'color_preview', 'timer', 'password', 'qrcode')
-        _has_compute_action = any(
-            a.get('type') in _COMPUTE_TYPES for a in self.external_actions
-        )
-        if self.wiki_data and not _has_compute_action:
-            wiki_key = f"wiki:{self.wiki_data.get('title', '')}"
-            wiki_data_snap = self.wiki_data
-            current_theme_snap = getattr(self, 'current_theme', 'light')
-
-            def create_wiki_widget(wd=wiki_data_snap, theme=current_theme_snap):
-                return WikiCardWidget(wd, theme=theme)
-
-            wiki_item_data = {"type": "wiki_card", **wiki_data_snap}
-            new_items_data.append((wiki_key, wiki_item_data, create_wiki_widget))
 
         # 2. Local Apps (Fast)
         query_lower = query.lower()
@@ -1784,7 +1781,6 @@ class OmniWindow(QWidget):
 
     def get_item_key(self, data):
         if not isinstance(data, dict): return None
-        if data.get('type') == 'wiki_card': return f"wiki:{data.get('title', '')}"
         if data.get('type') == 'og_preview': return f"og:{data.get('url', '')}"
         if data.get('type') == 'quick_url': return f"quick_url:{data.get('url', '')}"
         if data.get('type') == 'ask_omni': return 'ask_omni'
@@ -1965,6 +1961,11 @@ class OmniWindow(QWidget):
             
             setattr(self, attr_name, None)
 
+    def perform_local_search(self):
+        """Debounced local search to prevent UI freezing while typing."""
+        text = self.input_field.text()
+        self.refresh_list(text, animate=True)
+
     def trigger_async_searches(self):
         query = self.input_field.text().strip()
         if not query or self.is_history_mode: return
@@ -1984,13 +1985,6 @@ class OmniWindow(QWidget):
         self.action_worker = ActionWorker(query)
         self.action_worker.action_found.connect(self.on_action_found)
         self.action_worker.start()
-
-        # Start Wikipedia Worker (parallel, fast ~200-400ms)
-        self.cleanup_worker('wiki_worker')
-        self.wiki_worker = WikiWorker(query)
-        self.wiki_worker.wiki_result.connect(self.on_wiki_result)
-        self.wiki_worker.no_result.connect(lambda _: None)  # Ignore no-result silently
-        self.wiki_worker.start()
 
         # Start File Search Worker - OPTIMIZED FOR SPEED
         self.cleanup_worker('file_search_worker')
@@ -2044,14 +2038,6 @@ class OmniWindow(QWidget):
             return
         if self.ai_worker and self.ai_worker.isRunning(): return
         self.og_data = og_data
-        self.refresh_list(query, animate=False)
-
-    def on_wiki_result(self, wiki_data: dict, query: str):
-        """Handle Wikipedia result — show a knowledge card."""
-        if self.input_field.text().strip() != query:
-            return
-        if self.ai_worker and self.ai_worker.isRunning(): return
-        self.wiki_data = wiki_data
         self.refresh_list(query, animate=False)
 
     def on_file_search_results(self, results, query):
@@ -2123,10 +2109,22 @@ class OmniWindow(QWidget):
             elif data.get('type') == 'link':
                 QDesktopServices.openUrl(QUrl(data['url']))
                 self.animate_close()
-            elif data.get('type') in ('person', 'place'):
+            elif data.get('type') == 'person':
                 url = data.get('url')
                 if url:
                     QDesktopServices.openUrl(QUrl(url))
+                self.animate_close()
+            elif data.get('type') == 'place':
+                # Open directions on Enter
+                lat = data.get('latitude')
+                lon = data.get('longitude')
+                name = data.get('name', '')
+                if lat and lon:
+                    url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}"
+                else:
+                    query = name.replace(" ", "+")
+                    url = f"https://www.google.com/maps/dir/?api=1&destination={query}"
+                QDesktopServices.openUrl(QUrl(url))
                 self.animate_close()
             elif data.get('type') == 'install':
                 # Installation is now handled interactively by the InstallActionWidget's yes/no buttons.

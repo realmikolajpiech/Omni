@@ -41,6 +41,9 @@ def perform_image_search(query):
     if not db_conn: return ""
     
     try:
+        if "images" not in db_conn.table_names():
+            return ""
+
         tbl = db_conn.open_table("images")
         # Encode query with CLIP (text)
         vector = model_manager.vision_model.encode(query).tolist()
@@ -109,14 +112,15 @@ def perform_image_search_with_fallback(query):
                         logging.info(f"Performing Keyword Search for '{v}'...")
                         try:
                             # Re-open table here as 'tbl' is not in scope
-                            img_tbl = model_manager.db_conn.open_table("images")
-                            matches = img_tbl.search().where(f"filename LIKE '%{v}%'").limit(5).to_pandas()
-                            
-                            for _, row in matches.iterrows():
-                                # Avoid duplicates if multiple parts match same file
-                                entry = f"Found Image (By Name): {row['filename']}\nPath: {row['path']}"
-                                if entry not in res_kw:
-                                    kw_results.append(entry)
+                            if "images" in model_manager.db_conn.table_names():
+                                img_tbl = model_manager.db_conn.open_table("images")
+                                matches = img_tbl.search().where(f"filename LIKE '%{v}%'").limit(5).to_pandas()
+                                
+                                for _, row in matches.iterrows():
+                                    # Avoid duplicates if multiple parts match same file
+                                    entry = f"Found Image (By Name): {row['filename']}\nPath: {row['path']}"
+                                    if entry not in res_kw:
+                                        kw_results.append(entry)
                         except Exception as e:
                              logging.error(f"Keyword search inner loop failed: {e}")
                      

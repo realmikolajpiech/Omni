@@ -163,7 +163,15 @@ def main():
 
     db = lancedb.connect(DB_PATH)
     try:
-        table = db.open_table(TABLE_NAME)
+        if TABLE_NAME not in db.table_names():
+            logger.warning(f"Table '{TABLE_NAME}' not found. Creating empty table.")
+            # We can't easily create it with correct schema without vector size knowledge
+            # But to prevent crash, we just wait or exit gracefully
+            logger.error("Watcher cannot start without 'files' table. Run indexer first.")
+            sys.exit(1)
+        else:
+            table = db.open_table(TABLE_NAME)
+
         img_table = (
             db.create_table("images", schema=None, mode="overwrite")
             if "images" not in db.table_names()

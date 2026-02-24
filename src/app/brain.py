@@ -32,10 +32,9 @@ if __name__ == "__main__":
     logging.info(f"Starting Brain Service on {BRAIN_HOST}:{BRAIN_PORT}")
 
     # Preload models in background with error handling
-    # DISABLED for now to prevent 500 error on startup if models are missing
-    # import threading
-    # model_thread = threading.Thread(target=load_models_background, daemon=True)
-    # model_thread.start()
+    import threading
+    model_thread = threading.Thread(target=load_models_background, daemon=True)
+    model_thread.start()
 
     try:
         # Increase timeout and disable threading to prevent race conditions during model load

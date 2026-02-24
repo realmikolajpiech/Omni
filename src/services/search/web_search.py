@@ -22,6 +22,11 @@ _serper_fast_client = httpx.Client(
     http2=True,
 ) if SERPER_FAST_API_KEY else None
 
+_local_client = httpx.Client(
+    timeout=3.0,
+    follow_redirects=True
+)
+
 # ---------------------------------------------------------------------------
 # Result cache -- avoids duplicate API calls for the same query
 # ---------------------------------------------------------------------------
@@ -96,7 +101,7 @@ _SERPER_TYPE_MAP = {
     'images': '/images',
     'videos': '/videos',
     'news': '/news',
-    'map': '/places',
+    'map': '/maps', # Changed from /places to /maps for richer data (thumbnail, rating, etc.)
 }
 
 def _serper_search(query: str, categories: str = 'general', count: int = 5, fast: bool = False) -> list:
@@ -116,11 +121,18 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
     endpoint = _SERPER_TYPE_MAP.get(categories, '/search')
     loc = get_search_locale()
 
+    payload = {
+        "q": query,
+        "num": count,
+        "gl": loc[:2] if loc else "us",
+        "hl": loc[:2] if loc else "en"  # Use host language based on locale
+    }
+
     try:
         r = client.post(
             endpoint,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": count, "gl": loc[:2] if loc else "us"},
+            json=payload,
         )
         r.raise_for_status()
         data = r.json()
@@ -139,6 +151,12 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
                 'content': p.get('address', ''),
                 'latitude': p.get('latitude'),
                 'longitude': p.get('longitude'),
+                'rating': p.get('rating'),
+                'ratingCount': p.get('ratingCount'),
+                'thumbnail': p.get('thumbnailUrl'),
+                'category': p.get('category') or p.get('type'),
+                'phoneNumber': p.get('phoneNumber'),
+                'openingHours': p.get('openingHours')
             })
     elif categories == 'images':
         for img in data.get('images', [])[:count]:
@@ -379,23 +397,10 @@ def get_navigation_result(query, fast=False, existing_results=None):
 # Person / Place results
 # ---------------------------------------------------------------------------
 def get_person_result(name, existing_results=None):
-    try:
-        wiki_name = name.strip().replace(" ", "_")
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_name}"
-        r = _local_client.get(url, headers={"User-Agent": "OmniOS/1.0"}, timeout=1.5)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get('type') == 'standard':
-                logging.info(f"Wikipedia found person: {data.get('title')}")
-                return {
-                    "type": "person",
-                    "name": data.get('title', name),
-                    "description": data.get('extract', '').strip()[:300],
-                    "url": data.get('content_urls', {}).get('desktop', {}).get('page', ''),
-                    "image": data.get('thumbnail', {}).get('source')
-                }
-    except Exception as e:
-        logging.warning(f"Wiki Person Error: {e}")
+    # REMOVED: Direct Wikipedia API call. 
+    # Reason: It was overriding better search results/LLM descriptions with raw Wiki summaries, 
+    # often causing 403 errors or returning generic info.
+    # We now rely purely on search results + LLM synthesis (handled in routes.py).
 
     try:
         results = []
@@ -431,13 +436,10 @@ def get_person_result(name, existing_results=None):
             }
 
             if img_results:
-                try:
-                    img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
-                    if img_url:
-                        result['image'] = img_url
-                        logging.info(f"Found image for {name_clean}: {img_url[:80]}")
-                except:
-                    pass
+                img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
+                if img_url:
+                    result['image'] = img_url
+                    logging.info(f"Found image for {name_clean}: {img_url[:80]}")
 
             return result
     except Exception as e:
@@ -448,13 +450,40 @@ def get_person_result(name, existing_results=None):
 
 def get_place_result(query, existing_results=None):
     try:
+        results = []
         if existing_results:
+            # Filter existing results for place-like content if possible, 
+            # but usually 'map' category is better for coordinates.
+            # If we have existing results, they are likely 'general'.
+            # We might want to re-search with 'map' to get lat/lon if missing.
             results = existing_results
-        else:
-            results = search_api(query, categories='map')
+        
+        # If no results or existing results don't look like places (no address/lat/lon),
+        # force a map search.
+        has_geo = any(r.get('latitude') for r in results)
+        if not results or not has_geo:
+             map_results = search_api(query, categories='map')
+             if map_results:
+                 results = map_results
 
         if results:
             best = results[0]
+            # Try to find one with coordinates if the first doesn't have them
+            for r in results:
+                if r.get('latitude') and r.get('longitude'):
+                    best = r
+                    break
+            
+            # Use thumbnail from map result if available, otherwise try image search
+            image_url = best.get('thumbnail')
+            if not image_url:
+                try:
+                    # Quick image search
+                    img_results = search_api(query, categories='images')
+                    if img_results:
+                         image_url = img_results[0].get('img_src') or img_results[0].get('thumbnail')
+                except: pass
+
             return {
                 "type": "place",
                 "name": best.get('title', query),
@@ -462,8 +491,13 @@ def get_place_result(query, existing_results=None):
                 "latitude": best.get('latitude'),
                 "longitude": best.get('longitude'),
                 "url": best.get('url'),
-                "image": None
+                "rating": best.get('rating'),
+                "rating_count": best.get('ratingCount'),
+                "image": image_url,
+                "category": best.get('category'),
+                "phone": best.get('phoneNumber'),
+                "hours": best.get('openingHours')
             }
-    except:
-        pass
+    except Exception as e:
+        logging.error(f"Place search error: {e}")
     return None

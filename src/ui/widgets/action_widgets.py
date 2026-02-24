@@ -2471,13 +2471,165 @@ class PersonActionWidget(QWidget):
         return super().sizeHint()
 
 class PlaceActionWidget(PersonActionWidget):
-    def __init__(self, name, description, image_url, url, lat, lon, parent=None):
+    def __init__(self, name, description, image_url, url, lat, lon, rating=None, rating_count=None, category=None, phone=None, hours=None, parent=None):
         super().__init__(name, description, image_url, url, parent)
+        self.lat = lat
+        self.lon = lon
+        self.rating = rating
+        self.rating_count = rating_count
+        self.category = category
+        self.phone = phone
+        self.hours = hours
+        
+        # ---------------------------------------------------------
+        # COMPACT LAYOUT ADJUSTMENTS
+        # ---------------------------------------------------------
+        # Access the card widget and its layout
+        card_layout = self.card.layout()
+        if card_layout:
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            card_layout.setSpacing(16)
+
+        # Adjust Avatar Size for compactness
+        self.avatar.setFixedSize(80, 100)
+        self.avatar.setStyleSheet("background-color: #F0F0F0; border-radius: 6px; border: 1px solid #E0E0E0;")
+        
         if not image_url and lat and lon:
-            # Styled map fetch
-            self.image_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=14&size=220x300&markers={lat},{lon},red-pushpin"
+            # Styled map fetch with smaller size
+            self.image_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=14&size=160x200&markers={lat},{lon},red-pushpin"
             threading.Thread(target=self._download_image, daemon=True).start()
-        self.avatar.setStyleSheet("background-color: #F0F0F0; border-radius: 8px; border: 1px solid #E0E0E0;")
+
+        # Update description with category/address
+        full_desc = ""
+        if category: full_desc += f"{category} • "
+        full_desc += description or ""
+        self.desc_label.setText(full_desc.strip(" • "))
+        
+        # Adjust Fonts for compactness
+        self.name_label.setStyleSheet("color: #111111;")
+        self.name_label.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal)) 
+        
+        self.desc_label.setStyleSheet("color: #555555; line-height: 1.4;")
+        self.desc_label.setFont(QFont("Manrope", 12, QFont.Weight.Normal)) 
+
+        # Enhance layout with extra info
+        try:
+            # Access info_layout (2nd item in card layout)
+            info_layout = self.card.layout().itemAt(1).layout()
+            
+            # Reduce spacing in info_layout
+            info_layout.setSpacing(4)
+            
+            # ---------------------------------------------------------
+            # KEY HINTS (Enter / Tab)
+            # ---------------------------------------------------------
+            hints_layout = QHBoxLayout()
+            hints_layout.setSpacing(12)
+            hints_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            hints_layout.setContentsMargins(0, 0, 0, 4) 
+            
+            def create_key_badge(text):
+                lbl = QLabel(text)
+                lbl.setStyleSheet("""
+                    background-color: rgba(0, 0, 0, 0.08);
+                    color: #555555;
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+                    font-size: 10px;
+                    font-weight: bold;
+                    border: 1px solid rgba(0, 0, 0, 0.1);
+                """)
+                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                return lbl
+            
+            def create_action_label(text):
+                lbl = QLabel(text)
+                lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+                lbl.setStyleSheet("color: #888888;")
+                return lbl
+
+            # Enter -> Open directions
+            hints_layout.addWidget(create_key_badge("⏎ Return"))
+            hints_layout.addWidget(create_action_label("Open directions"))
+            
+            # Tab -> Open website
+            if url:
+                hints_layout.addWidget(create_key_badge("⇥ Tab"))
+                hints_layout.addWidget(create_action_label("Open website"))
+            
+            # Insert at the very top of info_layout (index 0)
+            info_layout.insertLayout(0, hints_layout)
+
+            # Rating Row
+            if rating:
+                rating_row = QHBoxLayout()
+                rating_row.setSpacing(4)
+                rating_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                
+                star_label = QLabel("★")
+                star_label.setStyleSheet("color: #F5C518; font-size: 12px;")
+                rating_text = f"{rating}"
+                if rating_count: rating_text += f" ({rating_count})"
+                val_label = QLabel(rating_text)
+                val_label.setFont(QFont("Manrope", 11, QFont.Weight.Bold))
+                val_label.setStyleSheet("color: #444444;")
+                
+                rating_row.addWidget(star_label)
+                rating_row.addWidget(val_label)
+                # Insert after name/desc (hints=0, name=1, desc=2) -> 3
+                info_layout.insertLayout(3, rating_row)
+
+            # Details (Phone / Hours)
+            details_text = []
+            if phone: details_text.append(f"📞 {phone}")
+            
+            # Check if open now
+            if hours:
+                import datetime
+                today_map = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
+                today_idx = datetime.datetime.now().weekday()
+                today_name = today_map[today_idx]
+                today_hours = hours.get(today_name, "")
+                if today_hours:
+                    if "Zamknięte" in today_hours:
+                        details_text.append(f"🔴 Closed ({today_hours})")
+                    else:
+                        details_text.append(f"🟢 Open ({today_hours})")
+
+            if details_text:
+                details_label = QLabel("  ".join(details_text))
+                details_label.setFont(QFont("Manrope", 11))
+                details_label.setStyleSheet("color: #666666; margin-top: 2px;")
+                info_layout.insertWidget(4, details_label)
+
+            # Full Opening Hours
+            if hours and isinstance(hours, dict):
+                hours_text = "\n".join([f"{k.capitalize()}: {v}" for k, v in hours.items()])
+                hours_label = QLabel(hours_text)
+                hours_label.setFont(QFont("Manrope", 10))
+                hours_label.setStyleSheet("color: #888888; margin-top: 4px;")
+                hours_label.setVisible(True)
+                info_layout.insertWidget(5, hours_label)
+            
+            # Hide the source label since we have the Tab hint
+            if hasattr(self, 'link_label'):
+                self.link_label.setVisible(False)
+
+        except Exception as e:
+            logging.error(f"Failed to add place details: {e}")
+
+    def execute(self):
+        # Default action when pressing Enter: Open Google Maps
+        self.open_directions()
+
+    def open_directions(self):
+        if self.lat and self.lon:
+            url = f"https://www.google.com/maps/dir/?api=1&destination={self.lat},{self.lon}"
+        else:
+            query = self.name_label.text().replace(" ", "+")
+            url = f"https://www.google.com/maps/dir/?api=1&destination={query}"
+        QDesktopServices.openUrl(QUrl(url))
 
 
 class TerminalActionWidget(QWidget):

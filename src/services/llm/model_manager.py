@@ -154,7 +154,7 @@ class GroqFastWrapper:
     def reset(self):
         pass
 
-    def create_chat_completion(self, messages, max_tokens=128, temperature=0.0, request_id=None, **kwargs):
+    def create_chat_completion(self, messages, max_tokens=128, temperature=0.0, request_id=None, tools=None, tool_choice=None, **kwargs):
         global current_fast_request_id
         import time
 
@@ -167,6 +167,12 @@ class GroqFastWrapper:
         messages = _messages_for_cache(messages)
         eff_temp = temperature if temperature > 0 else 0.1
 
+        extra = {}
+        if tools:
+            extra["tools"] = tools
+        if tool_choice:
+            extra["tool_choice"] = tool_choice
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -174,6 +180,7 @@ class GroqFastWrapper:
                 max_tokens=max_tokens,
                 temperature=eff_temp,
                 stream=False,
+                **extra
             )
         except Exception as e:
             logging.error(f"Groq fast model error: {e}")
@@ -181,8 +188,25 @@ class GroqFastWrapper:
 
         msg = response.choices[0].message
         content = msg.content or ""
+        
+        tool_calls = []
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_calls.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                })
+
         return {
-            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "choices": [{"message": {
+                "role": "assistant", 
+                "content": content,
+                "tool_calls": tool_calls
+            }}],
             "usage": {"completion_tokens": getattr(response.usage, "completion_tokens", 0)},
         }
 

@@ -197,6 +197,11 @@ def search_endpoint():
 
         results = []
         try:
+            # Check if table exists before opening
+            if "files" not in model_manager.db_conn.table_names():
+                # logging.warning("Search endpoint: 'files' table not found (indexer may not have run yet).")
+                return jsonify({"results": []})
+
             tbl = model_manager.db_conn.open_table("files")
             # Encoding and searching must be thread-safe (hence the lock)
             res = tbl.search(model_manager.embed_model.encode(query)).limit(3).to_pandas()
@@ -588,44 +593,41 @@ def action_endpoint():
     system_prompt = """You are an intelligent action classifier.
 Analyze the user query and the provided search results to decide the best action.
 
-First, THINK step-by-step inside <think>...</think> tags. Evaluate:
-1. What is the user's EXACT core intent?
-2. Are they EXPLICITLY asking for Weather, Translation, Currency, or Unit conversion? (Do not trigger these if it's just a casual message or a name).
-3. ONLY trigger a fast action if you are highly confident it's the primary intent.
-4. If it's a casual message, a greeting, or you are unsure, default to SEARCH:query.
+If you are unsure or need more information (e.g. unknown person/place), use the `web_search` tool to find it.
+Then, based on the tool results, output the final command.
 
-After thinking, output ONE command only on a new line:
-- TRANSLATE:source_text|from_lang|to_lang|translated_text (only if explicitly asking to translate, or typing a purely foreign phrase expecting translation)
-- CURRENCY:amount|from_unit|to_unit|converted_value (e.g. "22usd to pln")
-- WEATHER:location|temp|condition (only if explicitly asking for weather)
-- UNIT:amount|from_unit|to_unit|converted_value
-- PERSON:Name (search results strongly confirm real person/biography)
-- PLACE:Name (results confirm location/city)
+First, THINK step-by-step inside <think>...</think> tags.
+Then output ONE or MORE commands (if multiple relevant) on separate lines:
+
+- PERSON:Name|Description (search results confirm real person. Include a short 3rd-person bio in Description.)
+- PLACE:Name (results confirm location/city/school/institution)
 - OPEN:url (results show specific official website)
-- INSTALL:name (results show downloadable software/app)
-- UNINSTALL:name (user explicitly wants to remove software)
-- SEARCH:query (general topic, unclear, or conversational)
-- COLOR:hex|rgb|hsl (e.g. COLOR:#FF0000|255,0,0|0,100,50)
-- TIMER:duration_in_seconds (e.g. TIMER:300 for 5 minutes)
-- PASSWORD:length (e.g. PASSWORD:16)
-- QRCODE:data (e.g. QRCODE:https://google.com)
-- SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode|brightness|volume|mute|night_shift|dnd|wifi|bluetooth","value":true/false or 0-100}
+- TRANSLATE:source_text|from_lang|to_lang|translated_text
+- CURRENCY:amount|from_unit|to_unit|converted_value
+- WEATHER:location|temp|condition
+- UNIT:amount|from_unit|to_unit|converted_value
+- INSTALL:name
+- UNINSTALL:name
+- SEARCH:query (only if general topic and NO specific person/place found)
+- COLOR:hex|rgb|hsl
+- TIMER:duration_in_seconds
+- PASSWORD:length
+- QRCODE:data
+- SYSTEM_SETTINGS:{"type":"system_settings","setting":"...","value":...}
 
 Examples:
-<think>The user said "amor", a simple foreign word. They likely want a translation.</think>
+<think>User asks about Mikolaj Piech. I don't know him. I will call web_search("Mikolaj Piech").
+(Tool returns bio)
+Now I know he is an app developer.</think>
+PERSON:Mikołaj Piech|He is an app developer from Poland...
+
+<think>User said "amor". Likely translation.</think>
 TRANSLATE:amor|es|pl|miłość
 
-<think>User asked "co tam". This is a conversational greeting, no fast action needed.</think>
-SEARCH:co tam
-
-<think>User wants weather in London. Results say 15C and Cloudy.</think>
-WEATHER:London|15°C|Partly Cloudy
-
-<think>User wants to open safelabs. Result 1 is the official site.</think>
-OPEN:https://safelabs.info
-
-<think>User typed "zmień tryb na ciemny". This is a system setting request.</think>
-SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
+<think>User asks about "zstib". Search shows "Zespół Szkół Technicznych i Branżowych w Brzesku" and website "zstib.edu.pl".
+This is a school (PLACE) and has a website (OPEN).</think>
+PLACE:ZSTiB Brzesko
+OPEN:https://zstib.edu.pl
 """
     
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -635,7 +637,25 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
         {"role": "user", "content": user_prompt}
     ]
 
-    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False):
+    web_search_tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for information about people, places, companies, or facts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+
+    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False, tools=None):
         """Run fast model inference under lock with request-abort checks."""
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"{step_name}: request {request_id} superseded before lock.")
@@ -659,7 +679,8 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                request_id=request_id
+                request_id=request_id,
+                tools=tools
             )
             if out is None:
                 logging.info(f"{step_name}: completion aborted/empty for request {request_id}.")
@@ -680,10 +701,69 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
             max_tokens=256,
             temperature=0.0,
             step_name="Action intent",
-            reset_model=True
+            reset_model=True,
+            tools=[web_search_tool]
         )
         if out is None:
             return jsonify({"actions": [], "chips": []})
+
+        # Handle Tool Calls
+        if out['choices'][0]['message'].get('tool_calls'):
+            tool_calls = out['choices'][0]['message']['tool_calls']
+            # Append assistant message with tool calls
+            messages.append(out['choices'][0]['message'])
+            
+            for tc in tool_calls:
+                if tc['function']['name'] == 'web_search':
+                    try:
+                        args = json.loads(tc['function']['arguments'])
+                        q_tool = args.get('query')
+                        logging.info(f"Fast Model executing tool: web_search('{q_tool}')")
+                        
+                        # Execute search
+                        from src.services.search.web_search import search_api
+                        tool_results = search_api(q_tool, categories='general', fast=True)
+                        
+                        # Update global search_results for this request to avoid re-searching in get_person_result
+                        if tool_results:
+                            if search_results is None: search_results = []
+                            search_results.extend(tool_results)
+                        
+                        # Format results
+                        tool_content = "No results found."
+                        if tool_results:
+                            tool_content = ""
+                            for i, res in enumerate(tool_results[:3], 1):
+                                tool_content += f"Result {i}: {res.get('title')} - {res.get('content') or res.get('snippet')}\n"
+                        
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc['id'],
+                            "content": tool_content
+                        })
+                        
+                        # Update context for fallback logic later if needed
+                        search_context += f"\n\nTool Search Results for '{q_tool}':\n{tool_content}"
+                        
+                    except Exception as e:
+                        logging.error(f"Tool execution failed: {e}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc['id'],
+                            "content": f"Error: {str(e)}"
+                        })
+
+            # Phase 2: Get final response after tool outputs
+            logging.info(f"Fast Model Phase 2 (after tools)")
+            out = _safe_fast_completion(
+                messages=messages,
+                max_tokens=256,
+                temperature=0.0,
+                step_name="Action intent (Phase 2)",
+                tools=[web_search_tool] # Keep tools available? or remove? keeping might confuse it to loop. remove for final step.
+            )
+            if out is None:
+                return jsonify({"actions": [], "chips": []})
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -889,21 +969,35 @@ SYSTEM_SETTINGS:{"type":"system_settings","setting":"dark_mode","value":true}
                     classify_messages = [
                         {
                             "role": "system",
-                            "content": """Analyze search results and classify what the user is looking for.
+                            "content": """You are a search result classifier.
+Analyze the provided search results for the user's query.
 
-Reply with ONLY ONE WORD: PERSON, PLACE, or SEARCH
+Task: Determine if the user is looking for a PERSON, a PLACE, or just doing a general SEARCH.
 
-PERSON: Real people, biography, historical figure, celebrity (e.g., "Albert Einstein", "Napoleon")
-PLACE: Cities, countries, landmarks, addresses, geographic locations (e.g., "Paris", "Tokyo Tower", "France")
-SEARCH: Companies, products, websites, brands, topics, services (e.g., "YouTube", "Spotify", "how to cook")
+Categories:
+- PERSON: Real people, historical figures, celebrities, professionals.
+  * Indicators: "biography", "born", "career", "profile", job titles (CEO, Director, Actor), social media profiles (LinkedIn, Facebook).
+- PLACE: Physical locations, cities, schools, landmarks, addresses.
+  * Indicators: "city", "country", "address", "map", "located in", "school", "university".
+- SEARCH: Everything else (products, concepts, companies, websites, lyrics, definitions).
 
-Look at the result titles and descriptions to decide. If results mention "city", "capital", "country", "address", "landmark", "monument", it's PLACE. If they mention a real person's life/biography, it's PERSON. Otherwise SEARCH.
+Instructions:
+1. Read the user query and search snippets carefully.
+2. If the results are predominantly about a specific person's life or career, choose PERSON.
+3. If the results are about a specific physical location or institution, choose PLACE.
+4. Otherwise, choose SEARCH.
+5. Output ONLY the category name.
 
-Output exactly one word."""
+Examples:
+Query: "Albert Einstein" -> PERSON
+Query: "Paris France" -> PLACE
+Query: "How to tie a tie" -> SEARCH
+Query: "Jerzy Soska" (Results: Director of ZSTiB, Mayor) -> PERSON
+Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
                         },
                         {
                             "role": "user",
-                            "content": f"User query: {query}\n\n{context}\n\nAnswer with one word only: PERSON, PLACE, or SEARCH"
+                            "content": f"User query: {query}\n\n{context}\n\nCategory (PERSON/PLACE/SEARCH):"
                         }
                     ]
                     
@@ -937,7 +1031,7 @@ Output exactly one word."""
                             write_messages = [
                                 {
                                     "role": "system",
-                                    "content": "Based on the search results, write a short person card. Output exactly two lines:\nNAME: [person's full name only, nothing else]\nDESCRIPTION: [1-2 sentences summarizing who they are, in the same language as the results. No URLs, no 'source:', no raw snippets.]"
+                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
                                 },
                                 {
                                     "role": "user",
@@ -947,71 +1041,56 @@ Output exactly one word."""
                             try:
                                 write_out = _safe_fast_completion(
                                     messages=write_messages,
-                                    max_tokens=120,
-                                    temperature=0.3,
+                                    max_tokens=150,
+                                    temperature=0.5,
                                     step_name="Person card generation"
                                 )
-                                if write_out is None:
-                                    raise Exception("Writing aborted")
-                                
-                                card_text = write_out['choices'][0]['message']['content'].strip()
-                                logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
-                                # Parse NAME: and DESCRIPTION:
-                                person_name = q
-                                person_desc = ""
-                                for part in card_text.split("\n"):
-                                    part = part.strip()
-                                    if not part:
-                                        continue
-                                    if part.upper().startswith("NAME:"):
-                                        person_name = part.split(":", 1)[1].strip()
-                                    elif part.upper().startswith("DESCRIPTION:"):
-                                        person_desc = part.split(":", 1)[1].strip()
-                                if not person_desc:
-                                    # Fallback: use rest of card as description (skip first line if it looks like name)
-                                    lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                                    if len(lines) >= 2:
-                                        person_desc = " ".join(lines[1:])
-                                    elif lines:
-                                        person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
-                                # Treat garbage (e.g. "::.") or non-name as missing
-                                if not person_name or person_name == q or len(person_name.strip()) < 2 or not any(c.isalpha() for c in person_name):
-                                    # Use first result title to extract name if model didn't
-                                    first_title = results[0].get('title', '')
-                                    person_name = first_title.split('|')[0].split('–')[0].strip() or q
-                                # URL from first result
-                                first_url = results[0].get('url', '')
-                                # Optional: get image
-                                img_url = None
-                                try:
-                                    # Use existing results for image if possible?
-                                    # No, search_api needs explicit categories='images'.
-                                    # But we can try to find image in current results?
-                                    # Usually general results don't have good image URLs unless enriched.
-                                    # Let's check existing results first if we have them.
-                                    pass
-                                except Exception:
-                                    pass
-                                
-                                # Use get_person_result with fallback to avoid re-search
-                                person_res_fallback = get_person_result(person_name, existing_results=results)
-                                if person_res_fallback:
-                                     actions.append(person_res_fallback)
-                                else:
-                                     actions.append({
+                                if write_out:
+                                    card_text = write_out['choices'][0]['message']['content'].strip()
+                                    logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
+                                    # Parse NAME: and DESCRIPTION:
+                                    person_name = q
+                                    person_desc = ""
+                                    for part in card_text.split("\n"):
+                                        part = part.strip()
+                                        if not part:
+                                            continue
+                                        if part.upper().startswith("NAME:"):
+                                            person_name = part.split(":", 1)[1].strip()
+                                        elif part.upper().startswith("DESCRIPTION:"):
+                                            person_desc = part.split(":", 1)[1].strip()
+                                    if not person_desc:
+                                        # Fallback: use rest of card as description (skip first line if it looks like name)
+                                        lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                                        if len(lines) >= 2:
+                                            person_desc = " ".join(lines[1:])
+                                        elif lines:
+                                            person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
+                                    
+                                    # Add the generated action
+                                    actions.append({
                                         "type": "person",
                                         "name": person_name or q,
-                                        "description": person_desc or results[0].get('content', results[0].get('snippet', ''))[:200],
-                                        "url": first_url,
-                                        "image": None
+                                        "description": person_desc,
+                                        "url": results[0].get('url') if results else "",
+                                        "image": None # Will be fetched by get_person_result logic later if we wanted, but here we construct directly
                                     })
+                                    
+                                    # We also want image support. 
+                                    # Let's call get_person_result to get image but OVERRIDE description
+                                    # Actually, let's just use get_person_result and patch it.
+                                    person_res_fallback = get_person_result(person_name, existing_results=results)
+                                    if person_res_fallback:
+                                         if person_desc:
+                                             person_res_fallback['description'] = person_desc
+                                         # Replace the manual action above with this better one
+                                         actions.pop() 
+                                         actions.append(person_res_fallback)
+                                
                                 continue
                             except Exception as e:
-                                logging.error(f"[DEBUG] Person card generation failed: {e}, falling back to get_person_result")
-                                person_result = get_person_result(q, existing_results=results)
-                                if person_result:
-                                    actions.append(person_result)
-                                    continue
+                                logging.error(f"[DEBUG] Person card generation failed: {e}")
+                                pass
                         
                         elif first_word == "PLACE":
                             logging.info(f"[DEBUG] Model chose PLACE for: {q}")
@@ -1026,8 +1105,44 @@ Output exactly one word."""
                 # If query still looks like a person, prefer person card over website link.
                 person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
                 if person_candidate:
+                    # Try to enhance with LLM description if we have context
+                    enhanced_desc = None
+                    if 'context' in locals() and context:
+                        try:
+                            write_messages = [
+                                {
+                                    "role": "system",
+                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Search results about: {person_candidate}\n\n{context}\n\nWrite the person card:"
+                                }
+                            ]
+                            write_out = _safe_fast_completion(
+                                messages=write_messages,
+                                max_tokens=150,
+                                temperature=0.5,
+                                step_name="Person card generation (Heuristic)"
+                            )
+                            if write_out:
+                                card_text = write_out['choices'][0]['message']['content'].strip()
+                                logging.info(f"[DEBUG] Fast model person card output (Heuristic):\n{card_text}")
+                                for part in card_text.split("\n"):
+                                    part = part.strip()
+                                    if part.upper().startswith("DESCRIPTION:"):
+                                        enhanced_desc = part.split(":", 1)[1].strip()
+                                        break
+                                if not enhanced_desc:
+                                     lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                                     if len(lines) >= 2: enhanced_desc = " ".join(lines[1:])
+                        except Exception as e:
+                            logging.error(f"[DEBUG] Heuristic LLM generation failed: {e}")
+
                     person_result = get_person_result(person_candidate, existing_results=results)
                     if person_result:
+                        if enhanced_desc:
+                            person_result['description'] = enhanced_desc
                         logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
                         actions.append(person_result)
                         continue
@@ -1083,9 +1198,65 @@ Output exactly one word."""
                     logging.error(f"Failed to parse TRANSLATE action: {e}")
 
             elif "PERSON:" in line:
-                name = line.split("PERSON:")[1].strip()
-                res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
-                if res: actions.append(res)
+                content = line.split("PERSON:")[1].strip()
+                person_desc = None
+                
+                if "|" in content:
+                    name, desc = content.split("|", 1)
+                    name = name.strip()
+                    person_desc = desc.strip()
+                else:
+                    name = content.strip()
+
+                # If we have a custom description from the "Person card generation" step above,
+                # it would have been added to 'actions' already.
+                
+                # Check if we already have a person action for this name to avoid duplicates
+                already_have = any(a['type'] == 'person' for a in actions)
+                if not already_have:
+                    # If not, generate it NOW using the LLM logic if possible
+                    # Re-use the generation logic if we have context
+                    
+                    # Try to generate description if we haven't already
+                    # Use 'context' if available (from SEARCH block), otherwise 'search_context' (from pre-emptive search)
+                    ctx = context if 'context' in locals() and context else search_context
+
+                    if ctx and not person_desc:
+                        try:
+                            # Re-run generation specifically for this PERSON if not done yet
+                            write_messages = [
+                                {
+                                    "role": "system",
+                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Search results about: {name}\n\n{ctx}\n\nWrite the person card:"
+                                }
+                            ]
+                            write_out = _safe_fast_completion(
+                                messages=write_messages,
+                                max_tokens=150,
+                                temperature=0.5,
+                                step_name="Person card generation (Fallback)"
+                            )
+                            if write_out:
+                                card_text = write_out['choices'][0]['message']['content'].strip()
+                                for part in card_text.split("\n"):
+                                    part = part.strip()
+                                    if part.upper().startswith("DESCRIPTION:"):
+                                        person_desc = part.split(":", 1)[1].strip()
+                                        break
+                                if not person_desc:
+                                     lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                                     if len(lines) >= 2: person_desc = " ".join(lines[1:])
+                        except Exception: pass
+
+                    res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
+                    if res:
+                        if person_desc:
+                            res['description'] = person_desc
+                        actions.append(res)
 
             elif "PLACE:" in line:
                 name = line.split("PLACE:")[1].strip()

@@ -496,6 +496,59 @@ def _split_thinking_and_answer(text):
 
 
 
+def _extract_facts_background(query, prev_ctx_msg):
+    """Run fact extraction in a background thread to avoid blocking the main response."""
+    try:
+        fact_prompt = f"""You are a memory extractor. Extract FACTS (FA) and UPDATES (UP) about the user.
+Rules:
+1. FA: [New Fact]
+2. UP: [Correction]
+3. NO_INFO: [No personal info]
+4. NO_INFO: [No personal info]
+5. BE DECISIVE. If user says "I think so", assume it is a fact.
+6. IGNORE commands or immediate requests (e.g. "Open app"). Output NO_INFO.
+
+Context: {prev_ctx_msg}
+Input: {query}
+Output:"""
+        
+        logging.info("[CHAT] Starting Fast Model memory extraction (BACKGROUND)...")
+        
+        ensure_fast_model()
+        with fast_lock:
+             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
+             f_out = model_manager.fast_model.create_chat_completion(
+                 messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
+                 max_tokens=64,
+                 temperature=0.0,
+                 chat_template_kwargs={"enable_thinking": False},
+             )
+             if f_out and 'choices' in f_out and len(f_out['choices']) > 0:
+                 f_res = f_out['choices'][0]['message']['content'].strip()
+                 
+                 # Clean up Qwen thinking blocks
+                 f_res = re.sub(r'<think>.*?</think>', '', f_res, flags=re.DOTALL | re.IGNORECASE).strip()
+                 
+                 logging.info(f"Memory Extraction RAW: {f_res}")
+                 
+                 if "FA:" in f_res:
+                     fact_to_save = f_res.split("FA:")[1].strip()
+                     if remember_fact(fact_to_save):
+                         logging.info(f"Background Remembered: {fact_to_save}")
+                 elif "UP:" in f_res:
+                     fact_to_save = f_res.split("UP:")[1].strip()
+                     if remember_update(fact_to_save):
+                         logging.info(f"Background Updated: {fact_to_save}")
+                 elif "FO:" in f_res:
+                     fact_to_forget = f_res.split("FO:")[1].strip()
+                     if delete_memory(fact_to_forget):
+                         logging.info(f"Background Forgot: {fact_to_forget}")
+             else:
+                 logging.warning("Memory Extraction: No response from fast_model.")
+
+    except Exception as e: logging.error(f"Extraction Error: {e}")
+
+
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
     abort_fast_event.set()
@@ -547,64 +600,22 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
                 }
 
     # Background: Fact Extraction
-    auto_actions = []
+    # DISABLED: We now rely on the Main Model's function calling ("memory_save") 
+    # to be smarter about what to remember, instead of running a parallel heuristic model.
+    # This optimizes resource usage and simplifies the architecture.
     
-    prev_ctx_msg = "None"
-    if history and len(history) > 0:
-        last_item = history[-1]
-        if isinstance(last_item, dict):
-            prev_ctx_msg = last_item.get('content', 'None')
+    # prev_ctx_msg = "None"
+    # if history and len(history) > 0:
+    #    last_item = history[-1]
+    #    if isinstance(last_item, dict):
+    #        prev_ctx_msg = last_item.get('content', 'None')
 
-    try:
-        fact_prompt = f"""You are a memory extractor. Extract FACTS (FA) and UPDATES (UP) about the user.
-Rules:
-1. FA: [New Fact]
-2. UP: [Correction]
-3. NO_INFO: [No personal info]
-4. NO_INFO: [No personal info]
-5. BE DECISIVE. If user says "I think so", assume it is a fact.
-6. IGNORE commands or immediate requests (e.g. "Open app"). Output NO_INFO.
-
-Context: {prev_ctx_msg}
-Input: {query}
-Output:"""
-        
-        # === LOGGING: Fast Model extraction start ===
-        logging.info("[CHAT] Starting Fast Model memory extraction...")
-        
-        ensure_fast_model()
-        with fast_lock:
-             if hasattr(model_manager.fast_model, 'reset'): model_manager.fast_model.reset()
-             f_out = model_manager.fast_model.create_chat_completion(
-                 messages=[{"role": "system", "content": "You are a memory extractor."}, {"role": "user", "content": fact_prompt}],
-                 max_tokens=64,
-                 temperature=0.0,
-                 chat_template_kwargs={"enable_thinking": False},
-             )
-             if f_out and 'choices' in f_out and len(f_out['choices']) > 0:
-                 f_res = f_out['choices'][0]['message']['content'].strip()
-                 
-                 # Clean up Qwen thinking blocks
-                 f_res = re.sub(r'<think>.*?</think>', '', f_res, flags=re.DOTALL | re.IGNORECASE).strip()
-                 
-                 logging.info(f"Memory Extraction RAW: {f_res}")
-                 
-                 if "FA:" in f_res:
-                     fact_to_save = f_res.split("FA:")[1].strip()
-                     if remember_fact(fact_to_save):
-                         auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Remembered: {fact_to_save}"})
-                 elif "UP:" in f_res:
-                     fact_to_save = f_res.split("UP:")[1].strip()
-                     if remember_update(fact_to_save):
-                         auto_actions.append({"type": "remember", "fact": fact_to_save, "description": f"Updated: {fact_to_save}"})
-                 elif "FO:" in f_res:
-                     fact_to_forget = f_res.split("FO:")[1].strip()
-                     if delete_memory(fact_to_forget):
-                         auto_actions.append({"type": "forget", "fact": fact_to_forget, "description": f"Forgot: {fact_to_forget}"})
-             else:
-                 logging.warning("Memory Extraction: No response from fast_model.")
-
-    except Exception as e: logging.error(f"Extraction Error: {e}")
+    # Launch in background thread
+    # import threading
+    # threading.Thread(target=_extract_facts_background, args=(query, prev_ctx_msg), daemon=True).start()
+    
+    # Auto-actions are no longer available immediately
+    auto_actions = []
 
     if screenshot_b64:
         logging.info("[CHAT] Screenshot provided — skipping tool calls for this request.")
@@ -612,15 +623,8 @@ Output:"""
     user_loc = get_ip_location()
     user_personal_context = get_user_memory(query)
     
-    for act in auto_actions:
-        if act.get('type') == 'remember':
-            from datetime import datetime
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            user_personal_context += f"\n- [{date_str}] {act['fact']} (Just Learned)"
-        elif act.get('type') == 'forget':
-            from datetime import datetime
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            user_personal_context += f"\n- [{date_str}] {act['fact']} (Just Deleted - CONFIRM this to user)"
+    # NOTE: user_personal_context will NOT have the "Just Learned" fact from this turn,
+    # because it is being extracted in the background. This is a trade-off for speed.
     
     from datetime import datetime
     current_date = datetime.now().strftime('%Y-%m-%d')
