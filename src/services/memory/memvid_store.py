@@ -56,22 +56,27 @@ Facts:
 resolved facts:"""
 
     try:
-        # We need to access model_manager from somewhere, but here it was imported as llm, main_lock
-        # The original code used model_manager.main_lock and model_manager.llm but imported llm, main_lock
-        # Let's import model_manager properly to match usage
         from src.services.llm import model_manager
-        
-        with model_manager.main_lock:
-             if not model_manager.llm:
-                 return "\n".join(unique_facts)
-             # Using a lower temperature for logic
-             out = model_manager.llm.create_chat_completion(
-                 messages=[{"role": "system", "content": "You are a logical consistency engine. Output ONLY the resolved facts list."}, {"role": "user", "content": prompt}],
-                 max_tokens=256, temperature=0.0
-             )
-             cleaned = out['choices'][0]['message']['content'].strip()
-             logging.info(f"Resolved Facts Output:\n{cleaned}")
-             return cleaned
+
+        # Non-blocking acquire: if the main model already holds the lock (e.g. we are
+        # inside a tool call), skip the LLM step to avoid deadlocking.
+        acquired = model_manager.main_lock.acquire(blocking=False)
+        if not acquired:
+            logging.info("Fact Resolution skipped (main_lock held — inside tool call)")
+            return "\n".join(unique_facts)
+
+        try:
+            if not model_manager.llm:
+                return "\n".join(unique_facts)
+            out = model_manager.llm.create_chat_completion(
+                messages=[{"role": "system", "content": "You are a logical consistency engine. Output ONLY the resolved facts list."}, {"role": "user", "content": prompt}],
+                max_tokens=256, temperature=0.0
+            )
+            cleaned = out['choices'][0]['message']['content'].strip()
+            logging.info(f"Resolved Facts Output:\n{cleaned}")
+            return cleaned
+        finally:
+            model_manager.main_lock.release()
     except Exception as e:
         logging.error(f"Fact Resolution Failed: {e}")
         return "\n".join(unique_facts)

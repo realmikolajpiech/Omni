@@ -681,6 +681,21 @@ Available settings and values:
 {{"type": "password", "length": 16}}
 {{"type": "qrcode", "data": "https://..."}}
 
+**Open a local file** — when user asks to find, open, show, or locate a file:
+→ Call search_files to find it, then IMMEDIATELY open the best match:
+{{"type": "terminal_command", "command": "open \"/path/to/file\"", "description": "Open file"}}
+→ Always pick the most relevant result (prefer PDFs/documents over source code for document queries).
+→ NEVER just report the path or save it to memory — always open the file right away.
+→ If multiple results found, open the most likely match (e.g. Downloads PDF > source code file).
+
+**Terminal command** — use for ANY shell/system task that's not in the built-in settings list
+{{"type": "terminal_command", "command": "defaults write com.apple.dock autohide -bool false && killall Dock", "description": "Disable Dock autohide"}}
+→ CRITICAL: NEVER tell user to open Terminal, paste commands, or run anything manually.
+→ NEVER write "Wklej i enter:" or "Open Terminal and run:". That is FORBIDDEN.
+→ The command runs automatically in the background. Just tell him what you did in 1 sentence.
+→ Useful macOS tools: defaults write | osascript -e '...' | networksetup | pmset | diskutil | killall | launchctl
+→ System info: battery → pmset -g batt | CPU/RAM → top -l 1 | disk → df -h / | uptime → uptime
+
 **Computer control** (only when user explicitly says click/type/scroll/press)
 {{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}
 {{"type": "computer_control", "action": "scroll", "direction": "down", "description": "scrolling"}}
@@ -697,6 +712,7 @@ Available settings and values:
 - NEVER tell user to install anything manually. Always use install_app / uninstall_app tools.
 - If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
+- "Find / open / show me [file]" → search_files THEN immediately open the best match with terminal_command `open "/path"`. Never just report the path.
 """
     
     messages = [{"role": "system", "content": system_prompt}]

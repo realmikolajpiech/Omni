@@ -156,6 +156,7 @@ class OmniWindow(QWidget):
 
         self.frame = GradientBorderFrame()
         self.frame.setObjectName("MainFrame")
+        self.frame.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         
         self._is_closing = False # Flag to track animation state
 
@@ -166,6 +167,7 @@ class OmniWindow(QWidget):
         # Content Frame (Inner)
         self.content_frame = QWidget()
         self.content_frame.setObjectName("ContentFrame")
+        self.content_frame.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         content_layout = QVBoxLayout(self.content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -175,6 +177,8 @@ class OmniWindow(QWidget):
 
         self.input_container = QWidget()
         self.input_container.setFixedHeight(84) # Increased height to prevent clipping
+        self.input_container.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.input_container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         input_layout = QHBoxLayout(self.input_container)
         input_layout.setContentsMargins(24, 4, 12, 4) # Increased left margin
         input_layout.setSpacing(4)
@@ -262,7 +266,7 @@ class OmniWindow(QWidget):
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.itemClicked.connect(self.on_entered)
-        self.list_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Allow keyboard nav
+        self.list_widget.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Only take focus on click, never programmatically
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setMouseTracking(True)  # Enable mouse tracking for smooth hover
         self.list_widget.setStyleSheet("""
@@ -294,10 +298,11 @@ class OmniWindow(QWidget):
 
         # self.setStyleSheet(STYLE_SHEET) # Moved to set_theme
 
-        self.chat_history = []  
+        self.chat_history = []
         self.is_history_mode = False
         self._streaming_answer_widget = None  # tracks widget currently being streamed
         self.is_settings_mode = False
+        self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
 
         self.apps = self.load_apps()
         self.is_entry_animating = False
@@ -409,6 +414,10 @@ class OmniWindow(QWidget):
         
         # 1. Update Window Stylesheet
         self.setStyleSheet(get_style_sheet(theme_name))
+        
+        # Ensure focus ring is disabled (sometimes reset by style change)
+        if hasattr(self, 'input_field'):
+            self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         
         # 2. Update Frame (GradientBorderFrame)
         if hasattr(self, 'frame'):
@@ -753,20 +762,26 @@ class OmniWindow(QWidget):
                 # Maybe flash the logo or UI to acknowledge?
                 self.logo_label.boost_speed()
             else:
-                # Manual toggle (hotkey/tray)
-                if self.is_history_mode and not self.isActiveWindow():
-                    # Conversation window is open but not focused — bring it to front
-                    # (like Spotlight: one press to focus, another to close)
-                    self.raise_()
-                    self.activateWindow()
-                    self.input_field.setFocus()
-                else:
-                    self.animate_close()
+                # Manual toggle (hotkey/tray) — always close, preserve state for reopen
+                self._closed_by_deactivation = False
+                self.animate_close()
         else:
-            # Window was hidden — show it again
+            # Window was hidden — show it.
+            # If a close animation is still in progress, abort it and reopen immediately
+            # so the shortcut always works on the first press.
+            if self._is_closing:
+                if hasattr(self, 'anim_close_group'):
+                    self.anim_close_group.stop()
+                self._is_closing = False
+                self.setWindowOpacity(0.0)  # Stay invisible — animate_entry will fade in
+                self.resize(DEFAULT_WIDTH, 84)
+
             if source == "voice" and len(self.chat_history) > 0:
                 # Same chat: user said wake word again while we had a conversation — keep context for follow-up
                 logging.info("Reopening with existing chat (voice follow-up)")
+                # Mark animating early so changeEvent can't fire a spurious close during processEvents
+                self.is_entry_animating = True
+                self.setWindowOpacity(0.0)
                 self.show()
                 self.center()
                 if self.is_history_mode:
@@ -781,12 +796,33 @@ class OmniWindow(QWidget):
                     self.follow_up_widget.set_active(True)
                     self.frame.set_minimal_mode(False)
             else:
-                # Manual open or no previous chat
-                # DO NOT clear the session so that previous chat remains!
+                if self._closed_by_deactivation:
+                    # Closed by clicking outside — always start fresh
+                    self.chat_history = []
+                    self.is_history_mode = False
+                    self.follow_up_widget.set_active(False)
+                    self.frame.set_minimal_mode(True)
+                    self.input_field.setPlaceholderText("Search or ask...")
+                    self.input_field.clear()
+                    self.list_widget.clear()
+                # else: shortcut close — existing list/input preserved, just need height restore
+                # Mark animating early so changeEvent can't fire a spurious close during processEvents
+                self.is_entry_animating = True
+                self.setWindowOpacity(0.0)
                 self.show()
                 self.center()
-                if self.is_history_mode:
-                    self._restore_history_ui()
+                if not self._closed_by_deactivation:
+                    # Expand the window to fit whatever is in the list (collapsed to 84px on close).
+                    # For history mode, _restore_history_ui also rebuilds the list from chat_history.
+                    if self.is_history_mode:
+                        self._restore_history_ui()
+                    else:
+                        # Restore active border if AI is still running (e.g. thinking on first query)
+                        ai_active = hasattr(self, 'ai_worker') and self.ai_worker and self.ai_worker.isRunning()
+                        if ai_active:
+                            self.frame.set_minimal_mode(False)
+                            self.logo_label.boost_speed()
+                        self.adjust_window_height(animate=False)
                 self.animate_entry()
                 self.input_field.setFocus()
                 if source == "voice":
@@ -799,11 +835,27 @@ class OmniWindow(QWidget):
     def _restore_history_ui(self):
         """Restore the chat/history UI after the window is reshown (was resized to 84px on close)."""
         self.follow_up_widget.set_active(True)
-        self.frame.set_minimal_mode(False)
+        assistant_count = sum(1 for m in self.chat_history if m.get('role') == 'assistant')
+        ai_active = bool(self.ai_worker and self.ai_worker.isRunning())
+        # Active border when AI is generating OR when multiple exchanges exist
+        if assistant_count > 1 or ai_active:
+            self.frame.set_minimal_mode(False)
+        else:
+            self.frame.set_minimal_mode(True)
         self.input_field.setPlaceholderText("Ask a follow-up...")
         # Rebuild list so items are visible, then let adjust_window_height size the window
         # before animate_entry fires (so the entry animation starts at the correct height).
         self._rebuild_history_list()
+        if ai_active:
+            # _streaming_answer_widget still points to a widget from the old list (now cleared).
+            # Reset it so on_partial_response() creates a fresh widget in the rebuilt list.
+            self._streaming_answer_widget = None
+            # Re-add the thinking indicator so the user sees activity while waiting.
+            self.add_list_item(ThinkingWidget(), "thinking", animation="instant")
+            self.adjust_window_height(animate=False)
+            self.logo_label.boost_speed()
+        # Re-assert input focus after list rebuild — list widget may have grabbed it transiently
+        self.input_field.setFocus()
 
     def send_udp_command(self, command):
         try:
@@ -1023,7 +1075,11 @@ class OmniWindow(QWidget):
              logging.info("Window deactivated but screenshot taking - keeping window open.")
              return
 
-        if self.isVisible() and not self.is_entry_animating:
+        # Only trigger if we're not already in the middle of a shortcut-close.
+        # Without this guard, the focus-loss side-effect of the shortcut animation
+        # would overwrite _closed_by_deactivation=False with True.
+        if self.isVisible() and not self.is_entry_animating and not self._is_closing:
+            self._closed_by_deactivation = True
             self.animate_close()
 
     def event(self, event):
@@ -1043,6 +1099,7 @@ class OmniWindow(QWidget):
                 # Ensure no other key is pressed (e.g. Cmd+Opt+C should not hide window)
                 if event.key() in (Qt.Key.Key_Meta, Qt.Key.Key_Alt, Qt.Key.Key_Option):
                     if self.isVisible() and not self._is_closing:
+                        self._closed_by_deactivation = False
                         self.animate_close()
                     return True
 
@@ -1124,8 +1181,14 @@ class OmniWindow(QWidget):
     def _rebuild_history_list(self):
         self.list_widget.clear()
         first = True
-        
-        # Iterate backwards to get Newest first (newest at top of list)
+
+        # Use conversation bubbles only when there are multiple exchanges.
+        # A single Q&A is restored as the original simple full-width view so it
+        # looks identical to how it appeared right after the response streamed in.
+        assistant_count = sum(1 for m in self.chat_history if m.get('role') == 'assistant')
+        use_chat_mode = assistant_count > 1
+
+        # Iterate backwards: newest first (newest at top of list)
         for i in range(len(self.chat_history) - 1, -1, -1):
             msg = self.chat_history[i]
             if msg.get('role') == 'assistant':
@@ -1133,22 +1196,46 @@ class OmniWindow(QWidget):
                 user_query = ""
                 if i > 0 and self.chat_history[i-1].get('role') == 'user':
                     user_query = self.chat_history[i-1].get('content', '')
-                
+
                 if not first:
                     self.add_list_item(SeparatorWidget(), "separator", animation="instant")
-                
-                # chat_mode=True is required so the user bubble (_BubbleWidget) is
-                # created and set_query_visible(True) can actually show the message.
-                w = AnswerWidget(content, query_text=user_query, chat_mode=True)
-                w.set_query_visible(True)
+
+                thinking_text = msg.get('thinking', '')
+                w = AnswerWidget(content, query_text=user_query, thinking_text=thinking_text, chat_mode=use_chat_mode)
+                w.set_query_visible(use_chat_mode)
+                if thinking_text:
+                    w.set_thinking_collapsed(True)
                 self.add_list_item(w, "history_ai", animation="instant")
                 first = False
-        
-        self.adjust_window_height()
+
+        # Force a layout pass so widgets have a visible parent chain and isVisible()=True.
+        # Without this, AnswerWidget.sizeHint() skips the document-height calculation
+        # (text_edit.isVisible() == False) and returns the minimum 40px stub height.
+        QApplication.processEvents()
+        # Re-sync every item's sizeHint from its actual rendered widget size.
+        for _i in range(self.list_widget.count()):
+            _item = self.list_widget.item(_i)
+            _w = self.list_widget.itemWidget(_item)
+            if _w is not None:
+                _item.setSizeHint(_w.sizeHint())
+        # Use animate=False so geometry is set immediately. animate_entry() runs after
+        # and uses self.geometry() as its target — it must see the full height, not 84px.
+        self.adjust_window_height(animate=False)
 
     def on_tts_finished(self):
         self.is_tts_playing = False
         logging.info("TTS Finished")
+
+    def _actions_include_file_open(self, actions):
+        """True if any action is a terminal_command that opens a file (open /path, xdg-open, etc)."""
+        if not actions:
+            return False
+        for act in actions:
+            if isinstance(act, dict) and act.get('type') == 'terminal_command':
+                cmd = (act.get('command') or '').strip()
+                if cmd.startswith('open ') or cmd.startswith('xdg-open '):
+                    return True
+        return False
 
     def animate_close(self):
         if self._is_closing: return
@@ -1166,9 +1253,10 @@ class OmniWindow(QWidget):
         if hasattr(self, 'anim') and self.anim.state() == QPropertyAnimation.State.Running:
             self.anim.stop()
 
-        # Stop entry animation if running
+        # Stop entry animation if running; reset flag since on_finished won't fire after stop()
         if hasattr(self, 'anim_group') and self.anim_group.state() == QPropertyAnimation.State.Running:
             self.anim_group.stop()
+        self.is_entry_animating = False
             
         self._is_closing = True
         
@@ -1202,6 +1290,7 @@ class OmniWindow(QWidget):
         def on_close_finished():
              self.hide()
              self._is_closing = False
+             self.is_entry_animating = False
              self.setWindowOpacity(1.0)
              # Reset to clean default geometry so the next show always starts from
              # the correct width and a minimal height. center() will re-position it.
@@ -1413,10 +1502,18 @@ class OmniWindow(QWidget):
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
             if not self.isActiveWindow():
-                # Window lost focus - close it to maintain state sync
-                if self.isVisible() and not self._is_closing:
-                    self.animate_close()
+                # Window lost focus — schedule a deferred check instead of closing immediately.
+                # This absorbs transient deactivation events caused by force_focus() timer cycles
+                # and by processEvents() draining stale ActivationChange events during restore.
+                if self.isVisible() and not self._is_closing and not self.is_entry_animating:
+                    QTimer.singleShot(80, self._deactivation_close_check)
         super().changeEvent(event)
+
+    def _deactivation_close_check(self):
+        """Close only if the window is still genuinely inactive after a short settle period."""
+        if not self.isActiveWindow() and self.isVisible() and not self._is_closing and not self.is_entry_animating:
+            self._closed_by_deactivation = True
+            self.animate_close()
 
     def closeEvent(self, event):
         self._is_closing = False
@@ -2354,6 +2451,7 @@ class OmniWindow(QWidget):
         
         if not is_followup:
             self.list_widget.clear()
+            self.chat_history = []
         
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
@@ -2628,9 +2726,15 @@ class OmniWindow(QWidget):
             if isinstance(w, AnswerWidget) and not w.chat_mode:
                 answer_text = getattr(w, '_answer_text', '') or (w.text_edit.toPlainText() if w.text_edit else '')
                 query_text = w._query_text
-                new_w = AnswerWidget(answer_text, query_text=query_text, chat_mode=True)
+                thinking_text = (
+                    w.thinking_widget.thinking_text.toPlainText()
+                    if w.thinking_widget is not None else ''
+                )
+                new_w = AnswerWidget(answer_text, query_text=query_text, thinking_text=thinking_text, chat_mode=True)
                 new_w._answer_text = answer_text
                 new_w.set_query_visible(bool(query_text))
+                if thinking_text:
+                    new_w.set_thinking_collapsed(True)
                 self.list_widget.takeItem(i)
                 self.insert_list_item(i, new_w, "answer", animation="instant")
                 new_item = self.list_widget.item(i)
@@ -2804,9 +2908,10 @@ class OmniWindow(QWidget):
         if has_streaming_answer:
             saved_query = getattr(self, '_current_query', "")
             answer_final = data.get("answer", "")
+            thinking_final = data.get("thinking", "")
             if saved_query and answer_final:
                 self.chat_history.append({"role": "user", "content": saved_query})
-                self.chat_history.append({"role": "assistant", "content": answer_final})
+                self.chat_history.append({"role": "assistant", "content": answer_final, "thinking": thinking_final})
 
         answer = data.get("answer", "")
         
@@ -2838,6 +2943,9 @@ class OmniWindow(QWidget):
 
         if has_streaming_answer:
             self._finalize_response_ui()
+            # If AI opened a file via terminal_command, close like shortcut — preserves state
+            if self._actions_include_file_open(data.get("actions", [])):
+                QTimer.singleShot(500, self.animate_close)
             return  # Already handled the response via streaming
         
         # Remove thinking widget and separator (iterate backwards)
@@ -2992,7 +3100,7 @@ class OmniWindow(QWidget):
         # Add Answer (non-streaming path: always normal/first query → simple view)
         if answer:
             self.chat_history.append({"role": "user", "content": saved_query})
-            self.chat_history.append({"role": "assistant", "content": answer})
+            self.chat_history.append({"role": "assistant", "content": answer, "thinking": thinking})
 
             w = AnswerWidget(answer, query_text=saved_query, thinking_text=thinking, chat_mode=False)
             add_item(w, "answer")
@@ -3095,3 +3203,6 @@ class OmniWindow(QWidget):
 
         self._finalize_response_ui()
         self.adjust_window_height()
+        # If AI opened a file via terminal_command, close like shortcut — preserves state
+        if self._actions_include_file_open(actions):
+            QTimer.singleShot(500, self.animate_close)

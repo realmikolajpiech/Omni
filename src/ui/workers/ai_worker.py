@@ -46,14 +46,17 @@ class AIWorker(QThread):
                                 self.finished.emit({
                                     "special_action": data.get("special_action")
                                 })
+                                break
                             elif data.get("type") == "final":
                                 self.finished.emit({
                                     "answer": data.get("answer", ""),
                                     "actions": data.get("actions", []),
                                     "thinking": data.get("thinking", "")
                                 })
+                                break
                             elif data.get("type") == "error":
                                 self.finished.emit({"answer": f"Error: {data.get('error')}"})
+                                break
                         except json.JSONDecodeError:
                             pass
 

@@ -955,8 +955,9 @@ class AnswerWidget(QWidget):
                 # In chat mode: thinking lives inside the AI bubble (above answer text)
                 self.ai_bubble.bubble.insert_thinking_widget(self.thinking_widget)
             else:
-                # In simple mode: thinking sits above the answer text area
-                self.outer_layout.addWidget(self.thinking_widget)
+                # In simple mode: thinking sits above the answer text area.
+                # insertWidget(0) ensures it precedes the text_edit that was just added.
+                self.outer_layout.insertWidget(0, self.thinking_widget)
 
         # Legacy alias
         self.query_label = self.user_bubble.name_label if self.user_bubble else None

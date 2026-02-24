@@ -64,7 +64,7 @@ QWidget#ContentFrame {{
 /* Input Field - Editorial Style */
 QLineEdit {{
     background-color: transparent;
-    border: 1px solid transparent;
+    border: none;
     outline: none;
     padding: 12px 16px;
     font-family: "Instrument Serif";
@@ -76,7 +76,7 @@ QLineEdit {{
 }}
 
 QLineEdit:focus {{
-    border: 1px solid transparent;
+    border: none;
     outline: none;
 }}
 
@@ -88,6 +88,17 @@ QLineEdit::placeholder {{
     color: {t['placeholder']};
     font-family: "Instrument Serif";
     font-style: italic;
+}}
+
+/* Text Edit - No Border */
+QTextEdit {{
+    background-color: transparent;
+    border: none;
+    outline: none;
+}}
+QTextEdit:focus {{
+    border: none;
+    outline: none;
 }}
 
 /* Divider Line - Barely There */
