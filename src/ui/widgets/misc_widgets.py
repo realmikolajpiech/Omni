@@ -924,7 +924,7 @@ class AnswerWidget(QWidget):
         # ── USER BUBBLE (chat mode only) ───────────────────────────────
         if chat_mode:
             self.user_bubble = _BubbleWidget(self._query_text, sender="user")
-            self._show_user_bubble = bool(self._query_text)
+            self._show_user_bubble = bool(self._query_text) and not self._query_text.startswith("[SYSTEM]")
             self.user_bubble.setVisible(self._show_user_bubble)
             self.outer_layout.addWidget(self.user_bubble)
         else:
@@ -992,7 +992,7 @@ class AnswerWidget(QWidget):
 
     def set_query_visible(self, visible):
         if self.user_bubble and self.chat_mode:
-            self._show_user_bubble = visible and bool(self._query_text)
+            self._show_user_bubble = visible and bool(self._query_text) and not self._query_text.startswith("[SYSTEM]")
             self.user_bubble.setVisible(self._show_user_bubble)
 
     # ── Thinking ───────────────────────────────────────────────────────

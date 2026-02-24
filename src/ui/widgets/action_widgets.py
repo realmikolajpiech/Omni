@@ -569,12 +569,12 @@ class AppActionWidget(QWidget):
             border = "rgba(255, 255, 255, 0.10)"
             title_color = "#FFFFFF"
             desc_color = "#AAAAAA"
-            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_bg = "rgba(255,255,255,0.08)"
             btn_no_col = "#FFFFFF"
             btn_no_hover = "rgba(255,255,255,0.15)"
-            btn_yes_bg = "#007AFF"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10A37F, stop:1 #0E906F)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#0A84FF"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #14B88F, stop:1 #10A37F)"
         else:
             bg = "rgba(255, 255, 255, 0.4)"
             border = "rgba(100, 100, 100, 0.2)"
@@ -583,9 +583,9 @@ class AppActionWidget(QWidget):
             btn_no_bg = "rgba(0,0,0,0.05)"
             btn_no_col = "#333333"
             btn_no_hover = "rgba(0,0,0,0.1)"
-            btn_yes_bg = "#007AFF"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10A37F, stop:1 #0E906F)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#0066CC"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #14B88F, stop:1 #10A37F)"
             
         self.card.setStyleSheet(f"""
             QWidget#AppActionCard {{
@@ -603,10 +603,10 @@ class AppActionWidget(QWidget):
                 background-color: {btn_no_bg};
                 color: {btn_no_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: 600;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_no_hover}; }}
         """)
@@ -616,10 +616,10 @@ class AppActionWidget(QWidget):
                 background-color: {btn_yes_bg};
                 color: {btn_yes_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_yes_hover}; }}
         """)
@@ -814,23 +814,23 @@ class InstallActionWidget(QWidget):
             border = "rgba(255, 255, 255, 0.10)"
             title_color = "#FFFFFF"
             desc_color = "#AAAAAA"
-            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_bg = "rgba(255,255,255,0.08)"
             btn_no_col = "#FFFFFF"
             btn_no_hover = "rgba(255,255,255,0.15)"
-            btn_yes_bg = "#007AFF"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667EEA, stop:1 #764BA2)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#0A84FF"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7A8FF0, stop:1 #8B57D6)"
         else:
-            bg = "rgba(255, 255, 255, 0.4)"
-            border = "rgba(100, 100, 100, 0.2)"
+            bg = "rgba(255, 255, 255, 0.6)"
+            border = "rgba(100, 100, 100, 0.15)"
             title_color = "#111111"
             desc_color = "#555555"
             btn_no_bg = "rgba(0,0,0,0.05)"
             btn_no_col = "#333333"
             btn_no_hover = "rgba(0,0,0,0.1)"
-            btn_yes_bg = "#007AFF"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667EEA, stop:1 #764BA2)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#0066CC"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7A8FF0, stop:1 #8B57D6)"
             
         self.card.setStyleSheet(f"""
             QWidget#InstallActionCard {{
@@ -840,7 +840,7 @@ class InstallActionWidget(QWidget):
             }}
         """)
         self.title_label.setStyleSheet(f"color: {title_color}; background: transparent;")
-        if "cancelled" not in self.desc_label.text().lower():
+        if "cancelled" not in self.desc_label.text().lower() and "started" not in self.desc_label.text().lower():
             self.desc_label.setStyleSheet(f"color: {desc_color}; background: transparent;")
             
         self.btn_no.setStyleSheet(f"""
@@ -848,10 +848,10 @@ class InstallActionWidget(QWidget):
                 background-color: {btn_no_bg};
                 color: {btn_no_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: 600;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_no_hover}; }}
         """)
@@ -861,10 +861,10 @@ class InstallActionWidget(QWidget):
                 background-color: {btn_yes_bg};
                 color: {btn_yes_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_yes_hover}; }}
         """)
@@ -1013,12 +1013,12 @@ class UninstallActionWidget(QWidget):
             border = "rgba(255, 80, 60, 0.18)"
             title_color = "#FFFFFF"
             desc_color = "#AAAAAA"
-            btn_no_bg = "rgba(255,255,255,0.1)"
+            btn_no_bg = "rgba(255,255,255,0.08)"
             btn_no_col = "#FFFFFF"
             btn_no_hover = "rgba(255,255,255,0.15)"
-            btn_yes_bg = "#FF453A"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF6B35, stop:1 #FF453A)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#FF3B30"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF7B4A, stop:1 #FF5A4F)"
         else:
             bg = "rgba(255, 80, 60, 0.04)"
             border = "rgba(255, 80, 60, 0.15)"
@@ -1027,9 +1027,9 @@ class UninstallActionWidget(QWidget):
             btn_no_bg = "rgba(0,0,0,0.05)"
             btn_no_col = "#333333"
             btn_no_hover = "rgba(0,0,0,0.1)"
-            btn_yes_bg = "#FF3B30"
+            btn_yes_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF6B35, stop:1 #FF453A)"
             btn_yes_col = "#FFFFFF"
-            btn_yes_hover = "#D32F2F"
+            btn_yes_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF7B4A, stop:1 #FF5A4F)"
 
         self.card.setStyleSheet(f"""
             QWidget#UninstallActionCard {{
@@ -1048,10 +1048,10 @@ class UninstallActionWidget(QWidget):
                 background-color: {btn_no_bg};
                 color: {btn_no_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: 600;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_no_hover}; }}
         """)
@@ -1061,10 +1061,10 @@ class UninstallActionWidget(QWidget):
                 background-color: {btn_yes_bg};
                 color: {btn_yes_col};
                 border: none;
-                border-radius: 8px;
+                border-radius: 10px;
                 font-family: 'Manrope';
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 13px;
             }}
             QPushButton:hover {{ background-color: {btn_yes_hover}; }}
         """)

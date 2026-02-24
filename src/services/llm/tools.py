@@ -133,6 +133,73 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "run_terminal",
+            "description": (
+                "Execute a shell command on the user's macOS system and return its output. "
+                "Use for any system task: reading battery/CPU/disk/RAM info, changing settings via "
+                "defaults write or osascript, running scripts, managing files, getting uptime, etc. "
+                "NEVER tell the user to open Terminal manually — just call this tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute, e.g. 'defaults write com.apple.dock autohide -bool true && killall Dock'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Brief human-readable description of what this command does, e.g. 'Enable Dock autohide'.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_app",
+            "description": (
+                "Install an application on the user's macOS using Homebrew. "
+                "Use when the user asks to install, download, or get any app or CLI tool. "
+                "Tries --cask first (GUI apps like firefox, vlc, discord), falls back to formula (CLI tools like git, ffmpeg)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The Homebrew package name, e.g. 'firefox', 'vlc', 'discord', 'git'.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "uninstall_app",
+            "description": (
+                "Uninstall/remove an application from the user's macOS using Homebrew. "
+                "Use when the user asks to uninstall, remove, or delete an app."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The Homebrew package or cask name to remove, e.g. 'firefox', 'vlc', 'discord'.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "memory_delete",
             "description": (
                 "Delete or forget a specific memory about the user. "
@@ -173,6 +240,12 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _tool_memory_save(arguments.get("fact", ""))
         elif name == "memory_delete":
             return _tool_memory_delete(arguments.get("query", ""))
+        elif name == "run_terminal":
+            return _tool_run_terminal(arguments.get("command", ""), arguments.get("description", ""))
+        elif name == "install_app":
+            return _tool_install_app(arguments.get("name", ""))
+        elif name == "uninstall_app":
+            return _tool_uninstall_app(arguments.get("name", ""))
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -241,3 +314,81 @@ def _tool_memory_delete(query: str) -> str:
     logging.info(f"[tool:memory_delete] query={query!r}")
     ok = delete_memory(query)
     return f"Deleted memories matching: {query}" if ok else "No matching memories found to delete."
+
+
+def _tool_run_terminal(command: str, description: str = "") -> str:
+    import subprocess
+    command = command.strip()
+    if not command:
+        return "Error: empty command."
+    logging.info(f"[tool:run_terminal] {description or command!r}")
+    try:
+        proc = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=15
+        )
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+        output = stdout
+        if stderr:
+            output += ("\n" if output else "") + f"STDERR: {stderr}"
+        if not output:
+            output = f"Done (exit code {proc.returncode})"
+        return output
+    except subprocess.TimeoutExpired:
+        return "Error: command timed out after 15 seconds."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _find_brew() -> str | None:
+    import os
+    for path in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _tool_install_app(name: str) -> str:
+    import subprocess, os
+    name = name.strip().lower()
+    if not name:
+        return "Error: empty app name."
+    brew = _find_brew()
+    if not brew:
+        return "Error: Homebrew not found. Install it from https://brew.sh"
+    logging.info(f"[tool:install_app] name={name!r}")
+    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
+    try:
+        result = subprocess.run(
+            f"{brew} install --cask {name} || {brew} install {name}",
+            shell=True, capture_output=True, text=True, timeout=300, env=env
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return output[:1200] if output else f"Installed {name}"
+    except subprocess.TimeoutExpired:
+        return "Error: install timed out after 5 minutes."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _tool_uninstall_app(name: str) -> str:
+    import subprocess, os
+    name = name.strip().lower()
+    if not name:
+        return "Error: empty app name."
+    brew = _find_brew()
+    if not brew:
+        return "Error: Homebrew not found."
+    logging.info(f"[tool:uninstall_app] name={name!r}")
+    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
+    try:
+        result = subprocess.run(
+            f"{brew} uninstall --cask {name} || {brew} uninstall {name}",
+            shell=True, capture_output=True, text=True, timeout=120, env=env
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return output[:1200] if output else f"Uninstalled {name}"
+    except subprocess.TimeoutExpired:
+        return "Error: uninstall timed out."
+    except Exception as e:
+        return f"Error: {e}"

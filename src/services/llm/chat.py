@@ -3,7 +3,6 @@ import json
 import re
 import time
 import os
-import subprocess
 from simpleeval import SimpleEval
 from flask import jsonify
 
@@ -28,6 +27,9 @@ _TOOL_META = {
     "memory_recall": {"icon": "🧠", "label": "Memory recall"},
     "memory_save":   {"icon": "🧠", "label": "Remember"},
     "memory_delete": {"icon": "🧠", "label": "Forget"},
+    "run_terminal":  {"icon": "🖥️", "label": "Terminal"},
+    "install_app":   {"icon": "📦", "label": "Install"},
+    "uninstall_app": {"icon": "🗑️", "label": "Uninstall"},
 }
 
 
@@ -51,6 +53,13 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
         if len(fact) > 72:
             fact = fact[:69] + "…"
         arg_part = f'"{fact}"'
+    elif tool_name == "run_terminal":
+        display = args.get("description", "") or args.get("command", "")
+        if len(display) > 72:
+            display = display[:69] + "…"
+        arg_part = display
+    elif tool_name in ("install_app", "uninstall_app"):
+        arg_part = args.get("name", "")
     else:
         arg_part = "  ".join(f"{k}: {v!r}" for k, v in args.items())
 
@@ -95,6 +104,27 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
 
     if tool_name == "memory_delete":
         return "deleted" if result.startswith("Deleted") else "not found"
+
+    if tool_name == "run_terminal":
+        lines = [l for l in result.strip().splitlines() if l.strip()]
+        if not lines:
+            return "done"
+        last = lines[-1][:60]
+        return last if not last.startswith("STDERR:") else "error"
+
+    if tool_name == "install_app":
+        low = result.lower()
+        if "already installed" in low:
+            return "already installed"
+        if "error" in low or "not found" in low:
+            return "failed"
+        return "installed"
+
+    if tool_name == "uninstall_app":
+        low = result.lower()
+        if "error" in low or "not found" in low or "no such" in low:
+            return "not found / failed"
+        return "removed"
 
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
@@ -465,42 +495,6 @@ def _split_thinking_and_answer(text):
     return "", text
 
 
-def _run_terminal_commands(actions: list) -> list:
-    """Execute all terminal_command actions in-place and return output strings for LLM feedback."""
-    results = []
-    for act in actions:
-        if act.get('type') != 'terminal_command':
-            continue
-        cmd = act.get('command', '').strip()
-        if not cmd:
-            continue
-        try:
-            proc = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=15
-            )
-            act['stdout'] = proc.stdout.strip()
-            act['stderr'] = proc.stderr.strip()
-            act['returncode'] = proc.returncode
-            act['success'] = proc.returncode == 0
-            logging.info(f"[terminal] {cmd!r} → rc={proc.returncode} out={proc.stdout[:200]!r}")
-            entry = f"$ {cmd}"
-            if proc.stdout.strip():
-                entry += f"\n{proc.stdout.strip()}"
-            if proc.stderr.strip():
-                entry += f"\nSTDERR: {proc.stderr.strip()}"
-            results.append(entry)
-        except subprocess.TimeoutExpired:
-            act['success'] = False
-            act['stdout'] = ''
-            act['stderr'] = 'Timed out after 15s'
-            results.append(f"$ {cmd}\nERROR: command timed out after 15 seconds")
-        except Exception as e:
-            act['success'] = False
-            act['stdout'] = ''
-            act['stderr'] = str(e)
-            results.append(f"$ {cmd}\nERROR: {e}")
-    return results
-
 
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
@@ -646,6 +640,9 @@ Location: {user_loc} | Date: {current_date}
 - **memory_recall** — retrieve facts/preferences/details you've remembered about this user from past conversations
 - **memory_save** — permanently store a new fact or preference about this user for future conversations
 - **memory_delete** — forget/remove a memory when user asks you to or when info is outdated
+- **run_terminal** — execute any shell command on macOS (defaults write, osascript, pmset, diskutil, etc.); NEVER tell user to open Terminal manually
+- **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
+- **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request
 
 Memory usage rules:
 - Call **memory_recall** proactively when the answer might depend on something the user told you before.
@@ -661,17 +658,6 @@ Use tools proactively. Do NOT pretend to search or recall — actually call the 
 **Open application**
 {{"type": "open_app", "name": "google-chrome"}}
 → "browser"/"chrome" → "google-chrome". This will prompt the user if they want to launch the app.
-
-**Install application**
-{{"type": "install", "name": "libreoffice"}}
-→ ALWAYS use this — never use terminal_command for installs.
-→ Your text answer MUST be ONLY a short question like: "Pobrać Steam?" or "Install Discord?" — no explanations.
-
-**Uninstall application**
-{{"type": "uninstall", "name": "steam"}}
-→ ALWAYS use this — never use terminal_command for uninstalls.
-→ Your text answer MUST be ONLY a short question like: "Odinstalować Steam?" or "Remove Discord?" — no explanations.
-→ Use when user asks to remove, uninstall, delete, or odinstaluj any app.
 
 **Open URL** (ONLY links from Context data above — never invent)
 {{"type": "open_url", "url": "https://..."}}
@@ -695,14 +681,6 @@ Available settings and values:
 {{"type": "password", "length": 16}}
 {{"type": "qrcode", "data": "https://..."}}
 
-**Terminal command** — use for ANY shell/system task that's not in the built-in settings list
-{{"type": "terminal_command", "command": "defaults write com.apple.dock autohide -bool false && killall Dock", "description": "Disable Dock autohide"}}
-→ CRITICAL: NEVER tell user to open Terminal, paste commands, or run anything manually.
-→ NEVER write "Wklej i enter:" or "Open Terminal and run:". That is FORBIDDEN.
-→ The command runs automatically in the background. Just tell him what you did in 1 sentence.
-→ Useful macOS tools: defaults write | osascript -e '...' | networksetup | pmset | diskutil | killall | launchctl
-→ System info: battery → pmset -g batt | CPU/RAM → top -l 1 | disk → df -h / | uptime → uptime
-
 **Computer control** (only when user explicitly says click/type/scroll/press)
 {{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}
 {{"type": "computer_control", "action": "scroll", "direction": "down", "description": "scrolling"}}
@@ -715,7 +693,8 @@ Available settings and values:
 - Never invent URLs. Only use links from Context data.
 - "Describe screen" / "What do you see?" → text answer only, no computer_control action.
 - For any command: just DO it. Never ask "would you like me to…?" — act immediately.
-- NEVER instruct user to open Terminal or manually run commands. Always use terminal_command action.
+- NEVER instruct user to open Terminal or manually run commands. Always use run_terminal tool.
+- NEVER tell user to install anything manually. Always use install_app / uninstall_app tools.
 - If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
 """
@@ -971,54 +950,6 @@ Available settings and values:
                     _postprocess_actions(actions, answer)
                     logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(answer)}, actions={len(actions)}")
 
-                    # ── Terminal feedback loop (streaming) ───────────────────
-                    terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
-                    if terminal_actions:
-                        yield ("partial", {"thinking": thinking_content, "answer": answer, "actions": terminal_actions})
-                        cmd_outputs = _run_terminal_commands(terminal_actions)
-                        yield ("final", {"answer": answer, "actions": actions, "thinking": thinking_content})
-
-                        if cmd_outputs:
-                            tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
-                            logging.info(f"[terminal] streaming second pass ({len(cmd_outputs)} cmd(s))")
-                            messages.append({"role": "assistant", "content": accumulated_text})
-                            messages.append({"role": "user", "content": tool_feedback})
-                            if hasattr(model_manager.llm, 'reset'):
-                                model_manager.llm.reset()
-                            streamer2 = model_manager.llm.create_chat_completion(
-                                messages=messages, max_tokens=1024, temperature=0.6, stream=True
-                            )
-                            accumulated_text2 = ""
-                            external_thinking2 = ""
-                            for chunk2 in streamer2:
-                                if model_manager.abort_fast_event.is_set():
-                                    break
-                                if hasattr(chunk2, 'choices') and chunk2.choices:
-                                    delta2 = chunk2.choices[0].delta
-                                    token2 = (delta2.content or "") if hasattr(delta2, 'content') else ""
-                                    rt2 = ""
-                                    if hasattr(delta2, 'reasoning_content') and delta2.reasoning_content:
-                                        rt2 = delta2.reasoning_content
-                                    elif hasattr(delta2, 'model_extra') and delta2.model_extra:
-                                        rt2 = delta2.model_extra.get('reasoning_content', '')
-                                else:
-                                    delta2_dict = (chunk2 or {}).get('choices', [{}])[0].get('delta', {}) if isinstance(chunk2, dict) else {}
-                                    token2 = delta2_dict.get('content', '')
-                                    rt2 = delta2_dict.get('reasoning_content', '')
-                                if rt2:
-                                    external_thinking2 += rt2
-                                accumulated_text2 += token2
-                                it2, ans2_so_far = _split_thinking_and_answer(accumulated_text2)
-                                ct2 = external_thinking2 + it2
-                                ans_clean2, _, _ = extract_actions(ans2_so_far) if ans2_so_far else ("", [], "")
-                                if ct2 or ans_clean2:
-                                    yield ("partial", {"thinking": ct2, "answer": ans_clean2, "actions": []})
-                            it2, answer_text2 = _split_thinking_and_answer(accumulated_text2)
-                            answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (accumulated_text2, [], "")
-                            non_terminal2 = [a for a in actions2 if a.get('type') != 'terminal_command']
-                            yield ("final", {"answer": answer2, "actions": non_terminal2, "thinking": external_thinking2 + it2})
-                        return
-
                     final_header = f"Used {len(tool_records)} tool{'s' if len(tool_records) != 1 else ''}" if tool_records else None
                     yield ("final", {
                         "answer": answer,
@@ -1091,31 +1022,6 @@ Available settings and values:
                 if auto_actions:
                     actions.extend(auto_actions)
                 _postprocess_actions(actions, answer)
-
-                # ── Terminal feedback loop ────────────────────────────────────
-                terminal_actions = [a for a in actions if a.get('type') == 'terminal_command']
-                if terminal_actions:
-                    cmd_outputs = _run_terminal_commands(terminal_actions)
-                    if cmd_outputs:
-                        tool_feedback = "Terminal output:\n" + "\n\n".join(cmd_outputs)
-                        logging.info(f"[terminal] feeding back to LLM ({len(cmd_outputs)} cmd(s))")
-                        messages.append({"role": "assistant", "content": full_text})
-                        messages.append({"role": "user", "content": tool_feedback})
-                        if hasattr(model_manager.llm, 'reset'):
-                            model_manager.llm.reset()
-                        out2 = model_manager.llm.create_chat_completion(
-                            messages=messages, max_tokens=1024, temperature=0.6
-                        )
-                        msg2 = out2['choices'][0]['message']
-                        full_text2 = (msg2.get('content') or "").strip()
-                        if full_text2.startswith(':'):
-                            full_text2 = full_text2[1:].strip()
-                        _, answer_text2 = _split_thinking_and_answer(full_text2)
-                        answer2, actions2, _ = extract_actions(answer_text2) if answer_text2 else (full_text2, [], "")
-                        if answer2:
-                            answer = answer2
-                        non_terminal = [a for a in actions if a.get('type') != 'terminal_command']
-                        actions = terminal_actions + non_terminal + actions2
 
                 return {"answer": answer, "actions": actions, "thinking": thinking_content}
 

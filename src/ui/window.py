@@ -2136,18 +2136,36 @@ class OmniWindow(QWidget):
         self.install_widget.candidate_confirmed.connect(self.on_install_candidate_confirmed)
         
         if source_widget:
-            if self.is_history_mode:
-                # In chat mode: list is reversed, so insert at 0 = top (newest)
-                self.insert_list_item(0, self.install_widget, "install_progress", animation="fade")
+            # Try to find the list item containing the source_widget and replace it
+            found_item = None
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                w = self.list_widget.itemWidget(item)
+                # Unwrap SmoothEntryWidget if present
+                if hasattr(w, 'content_widget'):
+                    if w.content_widget is source_widget:
+                        found_item = item
+                        break
+                elif w is source_widget:
+                    found_item = item
+                    break
+
+            if found_item:
+                found_item.setData(Qt.ItemDataRole.UserRole, "install_progress")
+                found_item.setSizeHint(self.install_widget.sizeHint())
+                anim_w = SmoothEntryWidget(self.install_widget, animate=True)
+                self.list_widget.setItemWidget(found_item, anim_w)
+                QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
             else:
-                # Normal mode: add at bottom
-                self.add_list_item(self.install_widget, "install_progress", animation="fade")
-            QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
-            is_chat = self.is_history_mode
-            if is_chat:
-                QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
-                    self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
-                ))
+                if self.is_history_mode:
+                    self.insert_list_item(0, self.install_widget, "install_progress", animation="fade")
+                else:
+                    self.add_list_item(self.install_widget, "install_progress", animation="fade")
+                QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
+                if self.is_history_mode:
+                    QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
+                        self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
+                    ))
         else:
             item = QListWidgetItem()
             item.setSizeHint(self.install_widget.sizeHint())
@@ -2202,15 +2220,36 @@ class OmniWindow(QWidget):
         self.uninstall_widget = UninstallProgressWidget(app_name, theme=current_theme)
 
         if source_widget:
-            if self.is_history_mode:
-                self.insert_list_item(0, self.uninstall_widget, "uninstall_progress", animation="fade")
+            # Try to find the list item containing the source_widget and replace it
+            found_item = None
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                w = self.list_widget.itemWidget(item)
+                # Unwrap SmoothEntryWidget if present
+                if hasattr(w, 'content_widget'):
+                    if w.content_widget is source_widget:
+                        found_item = item
+                        break
+                elif w is source_widget:
+                    found_item = item
+                    break
+
+            if found_item:
+                found_item.setData(Qt.ItemDataRole.UserRole, "uninstall_progress")
+                found_item.setSizeHint(self.uninstall_widget.sizeHint())
+                anim_w = SmoothEntryWidget(self.uninstall_widget, animate=True)
+                self.list_widget.setItemWidget(found_item, anim_w)
+                QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
             else:
-                self.add_list_item(self.uninstall_widget, "uninstall_progress", animation="fade")
-            QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
-            if self.is_history_mode:
-                QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
-                    self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
-                ))
+                if self.is_history_mode:
+                    self.insert_list_item(0, self.uninstall_widget, "uninstall_progress", animation="fade")
+                else:
+                    self.add_list_item(self.uninstall_widget, "uninstall_progress", animation="fade")
+                QTimer.singleShot(80, lambda: self.adjust_window_height(animate=True))
+                if self.is_history_mode:
+                    QTimer.singleShot(120, lambda: self.list_widget.scrollToItem(
+                        self.list_widget.item(0), QAbstractItemView.ScrollHint.PositionAtTop
+                    ))
         else:
             item = QListWidgetItem()
             item.setSizeHint(self.uninstall_widget.sizeHint())

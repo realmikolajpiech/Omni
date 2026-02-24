@@ -13,7 +13,7 @@ from src.services.llm.chat import process_chat_request, perform_calculation, sho
 from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
 from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata, get_app_cache
-from src.services.system.installer import generate_install_plan, log_debug
+from src.services.system.installer import generate_install_plan, log_debug, KNOWN
 
 api_bp = Blueprint('api', __name__)
 
@@ -353,8 +353,19 @@ def action_endpoint():
         if "." in app and " " not in app:
              pass # Let LLM handle it as OPEN:url
         else:
-             logging.info(f"Regex Open App: {app}")
-             act = {"type": "open_app", "name": app}
+             cache = get_app_cache()
+             app_lower = app.lower()
+             is_installed = (
+                 app_lower in cache or
+                 any(k.startswith(app_lower) for k in cache) or
+                 (len(app_lower) >= 3 and any(app_lower in k for k in cache))
+             )
+             if is_installed:
+                 logging.info(f"Regex Open App: {app}")
+                 act = {"type": "open_app", "name": app}
+             else:
+                 logging.info(f"Regex Open App (not installed → suggest install): {app}")
+                 act = {"type": "install", "name": app}
              return jsonify({"actions": [act], "chips": []})
     
     # Install
@@ -367,6 +378,21 @@ def action_endpoint():
         logging.info(f"Regex Install: {app}")
         act = {"type": "install", "name": app}
         return jsonify({"actions": [act], "chips": []})
+
+    # 1.7.1 Bare known-app name — if user types e.g. "chrome" or "spotify" and it's not installed
+    _bare = query.strip().lower()
+    if (len(_bare.split()) <= 2 and
+            not any(c in _bare for c in '.:/\\?') and
+            _bare in KNOWN):
+        _cache = get_app_cache()
+        _installed = (
+            _bare in _cache or
+            any(k.startswith(_bare) for k in _cache) or
+            (len(_bare) >= 3 and any(_bare in k for k in _cache))
+        )
+        if not _installed:
+            logging.info(f"Known app '{_bare}' not installed → suggest install")
+            return jsonify({"actions": [{"type": "install", "name": query.strip()}], "chips": []})
 
     # 1.7.5 Implicit Calculation
     # Check for simple math expressions like "12*3", "100/4", "5+5", "10-2"
@@ -1103,7 +1129,18 @@ Output exactly one word."""
                 if success:
                     actions.append({"type": "status", "status": "success", "description": f"Opened {msg}"})
                 else:
-                    actions.append({"type": "status", "status": "error", "description": f"Could not find app '{app}'"})
+                    # App not found locally — suggest installation instead of showing error
+                    logging.info(f"OPEN_APP: '{app}' not found, suggesting install")
+                    metadata = resolve_app_metadata(app)
+                    if metadata:
+                        actions.append({
+                            "type": "install",
+                            "name": app,
+                            "website": metadata.get("website"),
+                            "image": metadata.get("image")
+                        })
+                    else:
+                        actions.append({"type": "install", "name": app})
 
             elif "SYSTEM_SETTINGS:" in line:
                 try:
