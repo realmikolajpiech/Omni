@@ -813,6 +813,11 @@ Available settings and values:
 
     try:
         abort_fast_event.clear()
+        
+        # Start total request timer
+        request_start_time = time.time()
+        logging.info(f"[CHAT] Processing request at {request_start_time:.2f}")
+
         with main_lock:
             logging.info("[CHAT] Main lock acquired. Starting generation...")
 
@@ -826,7 +831,10 @@ Available settings and values:
                 tool_records: list = []  # Completed tool-call entries for display
 
                 while tool_iter < max_tool_iters:
+                    iter_start_time = time.time()
                     tool_iter += 1
+                    logging.info(f"[CHAT] Iteration {tool_iter} started at {iter_start_time:.2f}")
+
                     if hasattr(model_manager.llm, 'reset'):
                         model_manager.llm.reset()
 
@@ -913,6 +921,7 @@ Available settings and values:
 
                         # Execute each tool and show real-time progress
                         for tc in tool_calls:
+                            tool_start = time.time()
                             tool_name = tc["function"]["name"]
                             try:
                                 args = json.loads(tc["function"]["arguments"])
@@ -937,7 +946,8 @@ Available settings and values:
                             })
 
                             result = execute_tool(tool_name, args)
-                            logging.info(f"[tool:{tool_name}] result length={len(result)}")
+                            tool_dur = time.time() - tool_start
+                            logging.info(f"[tool:{tool_name}] result length={len(result)} (took {tool_dur:.4f}s)")
 
                             summary = _tool_result_summary(tool_name, result)
                             detail = _format_tool_detail(tool_name, result)
@@ -958,9 +968,11 @@ Available settings and values:
                                 "content": result,
                             })
 
+                        logging.info(f"[CHAT] Iteration {tool_iter} finished in {time.time() - iter_start_time:.4f}s")
                         continue  # Next iteration with tool results in messages
 
                     # ── No tool calls: this is the final response ────────────
+                    logging.info(f"[CHAT] Final response generation started after {time.time() - request_start_time:.4f}s total")
                     inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
                     # model_reasoning already includes all iterations; inline_thinking from <think> tags
                     thinking_content = _build_thinking(model_reasoning, tool_records, inline_thinking)
@@ -990,6 +1002,9 @@ Available settings and values:
                 external_thinking = ""
 
                 for tool_iter in range(max_tool_iters):
+                    iter_start_time = time.time()
+                    logging.info(f"[CHAT-NS] Iteration {tool_iter+1} started")
+
                     if hasattr(model_manager.llm, 'reset'):
                         model_manager.llm.reset()
 
@@ -1007,6 +1022,7 @@ Available settings and values:
                     tool_calls = msg.get('tool_calls', [])
 
                     if not tool_calls:
+                        logging.info(f"[CHAT-NS] Final response received after {time.time() - request_start_time:.4f}s total")
                         break  # Final answer — no more tool calls
 
                     messages.append({
@@ -1015,18 +1031,21 @@ Available settings and values:
                         "tool_calls": tool_calls,
                     })
                     for tc in tool_calls:
+                        tool_start = time.time()
                         tool_name = tc["function"]["name"]
                         try:
                             args = json.loads(tc["function"]["arguments"])
                         except Exception:
                             args = {}
                         result = execute_tool(tool_name, args)
-                        logging.info(f"[tool:{tool_name}] result length={len(result)}")
+                        logging.info(f"[tool-ns:{tool_name}] result length={len(result)} (took {time.time() - tool_start:.4f}s)")
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": result,
                         })
+                    
+                    logging.info(f"[CHAT-NS] Iteration {tool_iter+1} finished in {time.time() - iter_start_time:.4f}s")
 
                 if full_text.startswith(':'):
                     full_text = full_text[1:].strip()

@@ -324,28 +324,35 @@ def get_navigation_result(query, fast=False, existing_results=None):
         best_score = -1
         best_res = None
         normalized_query = query.lower().strip()
-
-        info_sites = ["wikipedia.org", "wiktionary.org", "fandom.com", "dictionary.com", "britannica.com"]
+        
+        # Helper to extract domain part
+        from urllib.parse import urlparse
+        
+        info_sites = ["wikipedia.org", "wiktionary.org", "fandom.com", "dictionary.com", "britannica.com", "imdb.com", "filmweb.pl", "rotten tomatoes"]
         is_info_query = any(x in normalized_query for x in ["wiki", "define", "meaning", "what is"])
 
         for res in results[:5]:
             url = res.get('url', '').lower()
             title = res.get('title', '').lower()
             score = 0
-
-            domain_match = False
-            if f"://{normalized_query}." in url or f".{normalized_query}." in url or f"/{normalized_query}." in url:
-                score += 50
-                domain_match = True
-            elif url.split('://')[-1].startswith(normalized_query + '.'):
-                score += 50
-                domain_match = True
-
-            if domain_match:
-                if ".info" in url and not normalized_query.endswith("info"):
-                    score -= 5
-                if ".pl" in url:
-                    score += 5
+            
+            try:
+                parsed = urlparse(url)
+                netloc = parsed.netloc.replace("www.", "")
+                # strict domain match: "z.ai" -> "z", "facebook.com" -> "facebook"
+                domain_parts = netloc.split('.')
+                domain_root = domain_parts[-2] if len(domain_parts) >= 2 else domain_parts[0]
+                
+                # Check for exact domain match (high confidence)
+                # e.g. query="z", domain="z.ai" -> match
+                # e.g. query="facebook", domain="facebook.com" -> match
+                if domain_root == normalized_query:
+                    score += 60
+                elif normalized_query in domain_root:
+                    # partial match (e.g. query="face", domain="facebook.com")
+                    score += 10
+            except:
+                pass
 
             if res.get('title', '').lower().startswith(normalized_query):
                 score += 10
@@ -360,8 +367,16 @@ def get_navigation_result(query, fast=False, existing_results=None):
                 best_score = score
                 best_res = res
 
-        if not best_res and results:
-            best_res = results[0]
+        # Strict thresholds
+        # If query is short (<= 3 chars), we require a very high score (exact domain match)
+        # Otherwise, we require a moderate score to avoid random "I feel lucky" results
+        min_threshold = 50 if len(normalized_query) <= 3 else 20
+        
+        if best_score < min_threshold:
+            # If we didn't meet the threshold, do NOT return a navigation result.
+            # This allows the caller to fall back to a generic "Search Google" action.
+            _set_cache_nav(query, None, fast)
+            return None
 
         is_app = False
         if best_score >= 20:
@@ -404,19 +419,16 @@ def get_person_result(name, existing_results=None):
 
     try:
         results = []
-        img_results = []
         if existing_results:
             results = existing_results
             logging.info(f"Using {len(results)} existing results for person fallback")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future_img = executor.submit(search_api, name, categories='images')
-                img_results = future_img.result()
+            # Don't do a separate image search to save time.
+            # We will try to extract an image from the existing results if possible,
+            # or just return the card without one. The UI handles missing images gracefully.
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_gen = executor.submit(search_api, name, categories='general')
-                future_img = executor.submit(search_api, name, categories='images')
-                results = future_gen.result()
-                img_results = future_img.result()
+            # If we must search, just do ONE general search. 
+            # We avoid the parallel image search to reduce latency.
+            results = search_api(name, categories='general')
 
         if results:
             best = results[0]
@@ -427,19 +439,58 @@ def get_person_result(name, existing_results=None):
                 description = description[:-3].strip()
             description = description[:300]
 
+            # Try to find an image in the general results first
+            image_url = best.get('img_src') or best.get('thumbnail') or best.get('image')
+            
+            # If no image in first result, check others briefly
+            if not image_url:
+                for r in results[:3]:
+                    potential = r.get('img_src') or r.get('thumbnail') or r.get('image')
+                    if potential:
+                        image_url = potential
+                        break
+
             result = {
                 "type": "person",
                 "name": name_clean or name,
                 "description": description,
                 "url": best.get('url'),
-                "image": None
+                "image": image_url
             }
 
-            if img_results:
-                img_url = img_results[0].get('img_src') or img_results[0].get('thumbnail') or img_results[0].get('url')
-                if img_url:
-                    result['image'] = img_url
-                    logging.info(f"Found image for {name_clean}: {img_url[:80]}")
+            if image_url:
+                logging.info(f"Found image for {name_clean} in search results: {image_url[:80]}")
+            else:
+                # Fire-and-forget background image search
+                # We return the result immediately, and the UI can update if we had a mechanism,
+                # but since the UI expects 'image' in the payload or fetches it itself, 
+                # we can rely on the UI's PersonActionWidget _download_image logic if we pass a special flag or URL.
+                # However, the backend is stateless here. 
+                # Best approach: Return the result NOW.
+                # If we want a separate image search that doesn't block, we can't easily do it here because we need to return 'result'.
+                # BUT, we can spawn a thread that updates a cache or... 
+                # Actually, the user asked to "do it in parallel so it doesn't block person card from showing, the image can load later".
+                # The PersonActionWidget ALREADY has a thread `_download_image`.
+                # So we can just return image=None (or a placeholder) and let the UI handle it?
+                # No, the UI downloads the image *at the URL provided*. It doesn't search for a URL.
+                
+                # So we need to FIND the URL quickly.
+                # If we really want to search for an image without blocking, we can't. We have to return the URL.
+                # Unless we return a "loading" URL that triggers a backend fetch? Too complex.
+                
+                # Compromise: Do the image search BUT with a very short timeout and only 1 result.
+                logging.info(f"No image in general results for {name_clean}, trying quick dedicated image search...")
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        # Short timeout (1.2s) - if it fails, we just show no image
+                        # We use fast=True to use the faster API key if available
+                        future = executor.submit(search_api, name, categories='images', fast=True)
+                        img_results = future.result(timeout=1.2) 
+                        if img_results:
+                            result['image'] = img_results[0].get('img_src') or img_results[0].get('thumbnail')
+                            logging.info(f"Quick image search found: {str(result['image'])[:60]}")
+                except Exception as e:
+                    logging.info(f"Quick image search timed out or failed: {e}")
 
             return result
     except Exception as e:

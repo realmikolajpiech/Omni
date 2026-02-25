@@ -6,6 +6,7 @@ import os
 import logging
 import threading
 import base64
+import time
 
 # Suppress HuggingFace Hub Permission Warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -156,7 +157,6 @@ class GroqFastWrapper:
 
     def create_chat_completion(self, messages, max_tokens=128, temperature=0.0, request_id=None, tools=None, tool_choice=None, **kwargs):
         global current_fast_request_id
-        import time
 
         if abort_fast_event.is_set():
             return None
@@ -233,24 +233,39 @@ class XAIMainWrapper:
         if tools:
             extra["tools"] = tools
 
+        start_time = time.time()
+
         if stream:
-            return self.client.chat.completions.create(
+            try:
+                stream_response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stream=True,
+                    **extra,
+                )
+                logging.info(f"[Main Model] Stream initiated in {time.time() - start_time:.4f}s")
+                return stream_response
+            except Exception as e:
+                logging.error(f"[Main Model] Stream error after {time.time() - start_time:.4f}s: {e}")
+                raise e
+
+        try:
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                stream=True,
+                stream=False,
                 **extra,
             )
+            duration = time.time() - start_time
+            logging.info(f"[Main Model] Completion received in {duration:.4f}s")
+        except Exception as e:
+            logging.error(f"[Main Model] Completion error after {time.time() - start_time:.4f}s: {e}")
+            raise e
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=False,
-            **extra,
-        )
         msg = response.choices[0].message
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""

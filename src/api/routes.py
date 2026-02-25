@@ -318,6 +318,7 @@ def action_endpoint():
     if not query: return jsonify({"actions": [], "chips": []})
 
     logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
+    endpoint_start_time = time.time()
     
     # 1. Shortcuts
     if query.lower() in COMMON_SHORTCUTS:
@@ -568,16 +569,18 @@ def action_endpoint():
     # 1.8 SEARCH FIRST (Workflow Optimization)
     # Perform general search immediately to provide context for the LLM.
     # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
+    logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
     from src.services.search.web_search import search_api
     
     logging.info(f"Performing pre-emptive search for: '{query}'")
+    # Reduced from 4 to 3 to save time/tokens, usually enough for context
     search_results = search_api(query, categories='general', fast=True)
     
     # Build search context for LLM
     search_context = ""
     if search_results:
         search_context = "Search results:\n"
-        for i, res in enumerate(search_results[:4], 1): # Top 4 results
+        for i, res in enumerate(search_results[:3], 1): # Top 3 results
             title = res.get('title', 'N/A')
             content = (res.get('content') or res.get('snippet', '') or 'N/A')
             if len(content) > 300: content = content[:300] + "..."
@@ -587,6 +590,7 @@ def action_endpoint():
         search_context = "Search results: No results found."
 
     logging.info(f"Search Context prepared ({len(search_context)} chars)")
+    logging.info(f"[TIMING] Pre-emptive search + context prep took: {time.time() - endpoint_start_time:.3f}s")
 
     # 2. LLM Inference
     # Better prompt with more examples for different command types
@@ -709,6 +713,7 @@ OPEN:https://zstib.edu.pl
 
         # Handle Tool Calls
         if out['choices'][0]['message'].get('tool_calls'):
+            logging.info(f"[TIMING] Phase 1 decided to use tools at: {time.time() - endpoint_start_time:.3f}s")
             tool_calls = out['choices'][0]['message']['tool_calls']
             # Append assistant message with tool calls
             messages.append(out['choices'][0]['message'])
@@ -755,6 +760,7 @@ OPEN:https://zstib.edu.pl
 
             # Phase 2: Get final response after tool outputs
             logging.info(f"Fast Model Phase 2 (after tools)")
+            logging.info(f"[TIMING] Tool execution finished at: {time.time() - endpoint_start_time:.3f}s")
             out = _safe_fast_completion(
                 messages=messages,
                 max_tokens=256,
@@ -778,6 +784,7 @@ OPEN:https://zstib.edu.pl
         tok_count = out.get('usage', {}).get('completion_tokens', 0)
         tps = tok_count / dur if dur > 0 else 0
         logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
+        logging.info(f"[TIMING] Fast Model total inference time (end-to-end): {time.time() - endpoint_start_time:.3f}s")
         result_text = out['choices'][0]['message']['content'].strip()
 
         # Remove thinking blocks from Qwen (Handle unclosed tags too)
@@ -802,6 +809,7 @@ OPEN:https://zstib.edu.pl
             logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
             result_text = f"SEARCH:{query}"
 
+        logging.info(f"[TIMING] Starting action parsing at: {time.time() - endpoint_start_time:.3f}s")
         actions = []
         for line in result_text.split('\n'):
             line = line.strip()
@@ -1335,6 +1343,34 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
         chips = []
         logging.info(f"Chips ({len(chips)}): {[c['label'] for c in chips]}")
 
+        # Post-processing: Remove redundant or unwanted actions
+        final_actions = []
+        has_person = any(a['type'] == 'person' for a in actions)
+        
+        for a in actions:
+            if a['type'] == 'link':
+                url = a.get('url', '').lower()
+                
+                # Rule 1: If Person card exists, remove Wikipedia links (redundant bio)
+                if has_person and 'wikipedia.org' in url:
+                    continue
+                    
+                # Rule 2: For very short queries (<=1 char), remove Wikipedia links
+                # (unless it's a specific website match like z -> z.ai, which is handled by not being wikipedia)
+                if len(query) <= 1 and 'wikipedia.org' in url:
+                    continue
+                
+                # Rule 3: Remove duplicate URLs (if Person card already has this URL)
+                if has_person:
+                    person_card = next((p for p in actions if p['type'] == 'person'), None)
+                    if person_card and person_card.get('url') == a.get('url'):
+                        continue
+
+            final_actions.append(a)
+        
+        actions = final_actions
+
+        logging.info(f"[TIMING] Total action_endpoint time: {time.time() - endpoint_start_time:.3f}s")
         return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
 
     except Exception as e:

@@ -2345,7 +2345,7 @@ class PersonActionWidget(QWidget):
 
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.desc_label)
-        info_layout.addStretch()
+        # info_layout.addStretch() # Removed stretch to reduce gap
         info_layout.addWidget(self.link_label)
 
         card_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
@@ -2404,8 +2404,8 @@ class PersonActionWidget(QWidget):
             }}
         """)
         
-        self.name_label.setStyleSheet(f"color: {name_color};")
-        self.desc_label.setStyleSheet(f"color: {desc_color}; line-height: 1.5;")
+        self.name_label.setStyleSheet(f"color: {name_color}; margin-bottom: -5px;") # Tighten name-desc gap
+        self.desc_label.setStyleSheet(f"color: {desc_color}; line-height: 1.4; margin-bottom: 5px;") # Tighter line height
         self.link_label.setStyleSheet(f"color: {link_color}; letter-spacing: 1px;")
         
         # Only update avatar style if it's text (not image)
