@@ -2531,14 +2531,14 @@ class PlaceActionWidget(PersonActionWidget):
             def create_key_badge(text):
                 lbl = QLabel(text)
                 lbl.setStyleSheet("""
-                    background-color: rgba(0, 0, 0, 0.08);
-                    color: #555555;
+                    background-color: rgba(0, 0, 0, 0.15);
+                    color: #333333;
                     border-radius: 4px;
                     padding: 2px 6px;
                     font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
                     font-size: 10px;
                     font-weight: bold;
-                    border: 1px solid rgba(0, 0, 0, 0.1);
+                    border: 1px solid rgba(0, 0, 0, 0.2);
                 """)
                 lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 return lbl
@@ -2546,7 +2546,7 @@ class PlaceActionWidget(PersonActionWidget):
             def create_action_label(text):
                 lbl = QLabel(text)
                 lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
-                lbl.setStyleSheet("color: #888888;")
+                lbl.setStyleSheet("color: #666666;")
                 return lbl
 
             # Enter -> Open directions
@@ -2595,12 +2595,12 @@ class PlaceActionWidget(PersonActionWidget):
                     if "Zamknięte" in today_hours:
                         details_text.append(f"🔴 Closed ({today_hours})")
                     else:
-                        details_text.append(f"🟢 Open ({today_hours})")
+                        details_text.append(f"({today_hours})") # Removed 'Green Open' text, just showing hours
 
             if details_text:
                 details_label = QLabel("  ".join(details_text))
                 details_label.setFont(QFont("Manrope", 11))
-                details_label.setStyleSheet("color: #666666; margin-top: 2px;")
+                details_label.setStyleSheet("color: #333333; margin-top: 2px;") # Darker phone/hours
                 info_layout.insertWidget(4, details_label)
 
             # Full Opening Hours

@@ -31,12 +31,14 @@ fi
 PYTHON_CMD="./venv/bin/python3"
 
 # Check dependencies
-echo "Checking dependencies..."
-$PYTHON_CMD setup.py
-if [ $? -ne 0 ]; then
-    echo "Dependency check failed."
-    exit 1
-fi
+# Skipping automatic dependency check to speed up startup and avoid network errors.
+# Run 'python3 setup.py' manually if you need to install new dependencies or fix permissions.
+# echo "Checking dependencies..."
+# $PYTHON_CMD setup.py
+# if [ $? -ne 0 ]; then
+#     echo "Dependency check failed."
+#     exit 1
+# fi
 
 # Cleanup old instances
 echo "Cleaning up old instances..."

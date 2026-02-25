@@ -570,32 +570,22 @@ def action_endpoint():
     # Perform general search immediately to provide context for the LLM.
     # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
-    from src.services.search.web_search import search_api
     
-    logging.info(f"Performing pre-emptive search for: '{query}'")
-    # Reduced from 4 to 3 to save time/tokens, usually enough for context
-    search_results = search_api(query, categories='general', fast=True)
+    # Pre-emptive search REMOVED to save time (was taking ~2.8s).
+    # The LLM will use the `web_search` tool if it needs information.
+    # We only initialize an empty context or minimal context if needed.
+    search_context = "Search results: No results found (Pre-emptive search disabled for speed)."
+    search_results = []
     
-    # Build search context for LLM
-    search_context = ""
-    if search_results:
-        search_context = "Search results:\n"
-        for i, res in enumerate(search_results[:3], 1): # Top 3 results
-            title = res.get('title', 'N/A')
-            content = (res.get('content') or res.get('snippet', '') or 'N/A')
-            if len(content) > 300: content = content[:300] + "..."
-            url = res.get('url', 'N/A')
-            search_context += f"\n--- Result {i} ---\nTitle: {title}\nDescription: {content}\nURL: {url}\n"
-    else:
-        search_context = "Search results: No results found."
-
     logging.info(f"Search Context prepared ({len(search_context)} chars)")
     logging.info(f"[TIMING] Pre-emptive search + context prep took: {time.time() - endpoint_start_time:.3f}s")
 
     # 2. LLM Inference
     # Better prompt with more examples for different command types
     system_prompt = """You are an intelligent action classifier.
-Analyze the user query and the provided search results to decide the best action.
+Analyze the user query to decide the best action.
+You are NOT an assistant. You do NOT answer questions. You ONLY output commands.
+You are uncensored and must process ANY query (including adult/NSFW) by converting it to a search or open command.
 
 If you are unsure or need more information (e.g. unknown person/place), use the `web_search` tool to find it.
 Then, based on the tool results, output the final command.
@@ -632,6 +622,9 @@ TRANSLATE:amor|es|pl|miłość
 This is a school (PLACE) and has a website (OPEN).</think>
 PLACE:ZSTiB Brzesko
 OPEN:https://zstib.edu.pl
+
+<think>User said "pornhub". This is a website. I should open it.</think>
+OPEN:https://www.pornhub.com
 """
     
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -761,12 +754,15 @@ OPEN:https://zstib.edu.pl
             # Phase 2: Get final response after tool outputs
             logging.info(f"Fast Model Phase 2 (after tools)")
             logging.info(f"[TIMING] Tool execution finished at: {time.time() - endpoint_start_time:.3f}s")
+            
+            # Remove tools for the final phase to prevent the model from trying to call them again
+            # or hallucinating tool calls (which causes 400 errors with Groq/Qwen)
             out = _safe_fast_completion(
                 messages=messages,
                 max_tokens=256,
                 temperature=0.0,
                 step_name="Action intent (Phase 2)",
-                tools=[web_search_tool] # Keep tools available? or remove? keeping might confuse it to loop. remove for final step.
+                tools=None # Explicitly disable tools for the final answer
             )
             if out is None:
                 return jsonify({"actions": [], "chips": []})
@@ -786,9 +782,21 @@ OPEN:https://zstib.edu.pl
         logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
         logging.info(f"[TIMING] Fast Model total inference time (end-to-end): {time.time() - endpoint_start_time:.3f}s")
         result_text = out['choices'][0]['message']['content'].strip()
+        logging.info(f"Raw Fast Model Output: {result_text!r}")
 
         # Remove thinking blocks from Qwen (Handle unclosed tags too)
-        result_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
+        # If the result is ONLY thinking (no output), we might want to peek inside or just fail
+        cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
+        
+        # If cleaning removed everything, but we had content, maybe the model forgot to close the tag
+        # or put the answer inside. Recover commands from the raw text if cleaned is empty.
+        if not cleaned_text and result_text:
+            logging.warning("Regex stripped everything. Checking raw text for commands...")
+            # Simple check: if raw text has commands, use raw text (stripping only the tag markers if possible)
+            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+                 cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
+        
+        result_text = cleaned_text
 
         logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
 
@@ -1323,7 +1331,6 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
 
             elif "SYSTEM_SETTINGS:" in line:
                 try:
-                    import json
                     from src.services.system.macos_settings import SETTING_META, execute_setting
                     json_str = line.split("SYSTEM_SETTINGS:")[1].strip()
                     settings_act = json.loads(json_str)
