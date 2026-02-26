@@ -63,20 +63,24 @@ IGNORE_DIRS = {
     "go", ".cargo", ".rustup",
     "Library", "Applications", ".Trash",
     ".gemini", ".antigravity", ".vscode", ".idea",
-    "target", "build", "dist",
+    "target", "build", "dist", "out", "bin", "obj",
     # macOS user dirs unlikely to contain useful documents
     "Movies", "Music", "Pictures", "Public",
     # Dev tools / package caches
     ".docker", ".gradle", ".m2", ".ivy2", ".sbt",
     ".conda", "miniconda3", "miniforge3",
     ".gem", ".rbenv", ".pyenv", ".nvm",
-    ".cocoapods", "Pods",
+    ".cocoapods", "Pods", ".dart_tool", ".pub-cache",
     # Other
     "Parallels", ".Spotlight-V100", ".fseventsd",
     # CMake build output (auto-generated, zero user value)
     "cmake-build-debug", "cmake-build-release", "CMakeFiles", ".cmake",
     # HuggingFace / model caches (model weights, tokenizer blobs — zero user value)
     "hf_cache", "hub", "blobs", "snapshots",
+    # Unity
+    "Library", "Temp", "Obj", "Logs", "MemoryCaptures",
+    # Flutter/Dart
+    "flutter", ".fvm",
 }
 
 # File extensions that are purely internal / developer noise
@@ -88,9 +92,23 @@ BLOCKED_EXTENSIONS = {
     ".whl", ".egg", ".iso", ".dmg", ".pkg", ".deb", ".rpm",
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
     # Media (indexed separately via image/CLIP phase if applicable)
-    ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flac", ".wav",
+    ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flac", ".wav", ".webm",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot", ".ico", ".icns",
     # Databases
-    ".sqlite3",
+    ".sqlite3", ".hprof", ".rdb",
+    # ML Models & Binaries
+    ".pth", ".tflite", ".onnx", ".pb", ".binarypb", ".wasm", ".data", ".safetensors",
+    ".pt", ".ckpt", ".bin", ".caffemodel", ".pbtxt", ".h5", ".keras",
+    # Certificates & Keys
+    ".pem", ".key", ".crt", ".cer", ".p12", ".pfx", ".jks", ".keystore",
+    ".asc", ".gpg", ".ssh",
+    # Unity / 3D
+    ".meta", ".unity", ".prefab", ".mat", ".fbx", ".obj", ".blend", ".physicMaterial",
+    ".anim", ".controller", ".mixer", ".flare", ".guiSkin", ".guiskin",
+    # Flutter / Dart / Mobile
+    ".dill", ".snapshot", ".symbols", ".xcframework", ".framework", ".dSYM",
+    ".xcworkspacedata", ".xcscheme", ".xcsettings", ".xcconfig", ".plist",
+    ".storyboard", ".xib", ".entitlements", ".mobileprovision",
 }
 
 # Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).
@@ -101,8 +119,10 @@ CONTENT_SKIP_FILENAMES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Podfile.lock", "Gemfile.lock", "composer.lock",
     "poetry.lock", "Cargo.lock", "flake.lock",
+    "pubspec.lock", "project-app.lockfile", "buildscript-gradle.lockfile",
+    "compile.lockfile", "packages-lock.json",
     # Config boilerplate
-    "tsconfig.json", "tsconfig.node.json",
+    "tsconfig.json", "tsconfig.node.json", "tsconfig.tsbuildinfo",
     "eslint.config.js", ".eslintrc.js", ".eslintrc.json",
     "postcss.config.js", "postcss.config.cjs",
     "babel.config.js", "babel.config.json", ".babelrc",
@@ -110,17 +130,20 @@ CONTENT_SKIP_FILENAMES = {
     "webpack.config.js", "vite.config.js", "vite.config.ts",
     "tailwind.config.js", "tailwind.config.ts",
     ".prettierrc", ".prettierrc.json", ".prettierrc.js",
-    ".editorconfig",
+    ".editorconfig", ".gitignore", ".gitattributes", ".dockerignore",
     # Build / iOS / Android boilerplate
-    "gradlew", "gradlew.bat",
+    "gradlew", "gradlew.bat", "gradle-wrapper.properties",
+    "local.properties", "key.properties",
     "Podfile", "Podfile.properties.json",
     "Contents.json",  # Xcode asset catalog metadata (repeated in every .xcassets dir)
+    "PrivacyInfo.xcprivacy", "module.modulemap",
     # Expo / React Native project config (boilerplate, no user content)
     "app.json", "eas.json", "nodemon.json",
     # Deployment / cloud config (boilerplate)
     "vercel.json", "firebase.json", "components.json",
     # Credential / secrets files (sensitive + not useful for search)
     "credentials.json", "google-services.json", "firebaseConfig.js",
+    "service-account.json", "secrets.json",
     # ML model metadata (generated, zero user value)
     "tokenizer_config.json", "special_tokens_map.json",
     "config_sentence_transformers.json", "sentence_bert_config.json",
@@ -128,6 +151,15 @@ CONTENT_SKIP_FILENAMES = {
     # Standard web boilerplate (no meaningful content to search)
     "manifest.json", "robots.txt", "sitemap.xml",
     "index.css", "App.css", "global.css", "globals.css", "reset.css",
+    # Flutter/Mobile boilerplate
+    "GeneratedPluginRegistrant.swift", "GeneratedPluginRegistrant.m",
+    "GeneratedPluginRegistrant.h", "GeneratedPluginRegistrant.java",
+    "generated_plugin_registrant.cc", "generated_plugin_registrant.h",
+    "generated_plugins.cmake", "flutter_export_environment.sh",
+    "launch_background.xml", "ic_launcher.xml", "styles.xml",
+    "colors.xml", "themes.xml", "strings.xml",
+    # Unity
+    "ProjectVersion.txt",
 }
 
 # Directory names that trigger content-skip for any file found inside them.
@@ -140,23 +172,30 @@ CONTENT_SKIP_DIRS = {
     # Xcode asset catalogs (only Contents.json boilerplate inside)
     "xcassets",
     # Android build directory (gradlew, generated xml, R files, etc.)
-    "android",
+    "android", "ios", "macos", "linux", "windows", "web",
     # Lottie animations, SVGs, and other large binary-like asset blobs
-    "assets",
+    "assets", "static", "public", "res", "resources",
+    # Flutter
+    "flutter_assets", "fonts",
 }
 
 # File extensions whose content is never worth semantic indexing.
 # These are style sheets, compiled outputs, or schema files — not human-readable search targets.
 CONTENT_SKIP_EXTENSIONS = {
     ".css", ".scss", ".sass", ".less",  # stylesheets
-    ".ini", ".cfg",                     # low-signal config formats
+    ".ini", ".cfg", ".conf",            # low-signal config formats
+    ".xml", ".plist", ".entitlements",  # verbose config
+    ".svg", ".eps",                     # vector graphics
+    ".csv", ".tsv",                     # large data dumps
+    ".sql", ".db",                      # database dumps
 }
 
 # Filename suffix patterns for content-skip (for variable-name files that can't be matched exactly).
 CONTENT_SKIP_SUFFIXES = {
     "-Bridging-Header.h",  # Xcode Swift/ObjC bridge stubs (AppName-Bridging-Header.h)
-    ".test.js", ".spec.js", ".test.ts", ".spec.ts",  # test files
+    ".test.js", ".spec.js", ".test.ts", ".spec.ts", ".test.jsx", ".spec.jsx", ".test.tsx", ".spec.tsx", # test files
     ".min.js", ".min.css",  # minified (already in BLOCKED_EXTENSIONS but belt-and-suspenders)
+    ".g.dart", ".freezed.dart", ".config.dart", # Dart generated files
 }
 
 # Ensure directories exist
