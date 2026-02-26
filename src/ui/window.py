@@ -2092,6 +2092,11 @@ class OmniWindow(QWidget):
         self.og_data = None   # reset previous OG data when action changes
         self.refresh_list(query, animate=False)
 
+        # Ensure window is active when actions arrive to prevent accidental close on focus loss
+        if not self.isActiveWindow():
+            self.activateWindow()
+            self.raise_()
+
         # For link-type actions start an OG preview fetch
         if actions and actions[0].get("type") == "link":
             link_url = actions[0].get("url", "")

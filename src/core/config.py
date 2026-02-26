@@ -121,16 +121,18 @@ BLOCKED_EXTENSIONS = {
     ".asset", ".dwlt", ".index", ".shader", ".shadergraph", ".cginc", ".hlsl",
     
     # [JAVA/ANDROID BUILD]
-    ".aar", ".pom", ".bundle", ".iml", ".manifest",
+    ".aar", ".pom", ".bundle", ".iml", ".manifest", ".kts", ".pro", ".properties",
 
     # [MACOS/APP BUNDLES]
     ".app", ".pak", ".dat", ".nib", ".icns", ".car", ".asar", ".prof", ".hprof",
     ".lock", ".log",
     # [XCODE/IOS/MACOS PROJECT]
     ".xcassets", ".imageset", ".appiconset", ".launchimage", ".xcodeproj", ".xcworkspace",
-    ".playground", ".pbs", ".storyboardc",
+    ".playground", ".pbs", ".storyboardc", ".podspec", ".resolved",
     # [GENERATED JS BLOBS]
     "_bin.js", "_loader.js", ".worker.js",
+    # [BINARY OUTPUT]
+    ".out",
 }
 
 # Files that are completely ignored (not indexed by name OR content)
@@ -149,6 +151,8 @@ BLOCKED_FILENAMES = {
     "CMakeLists.txt", "Podfile", "Podfile.lock", "pubspec.lock",
     "gradlew", "gradlew.bat", "gradle-wrapper.properties", "local.properties", "key.properties",
     "Podfile.properties.json", "modules.json", "project.pbxproj",
+    "sha_debug.txt", "errors.txt", "intercomlogs.txt", "braktlumaczn.txt",
+    "braktlumaczn_mapping.csv", "firestore.indexes.json", "a.out",
     # [CONFIG]
     "tsconfig.tsbuildinfo",
 }
@@ -184,7 +188,7 @@ CONTENT_SKIP_FILENAMES = {
     # Deployment / cloud config (boilerplate)
     "vercel.json", "firebase.json", "components.json",
     # Credential / secrets files (sensitive + not useful for search)
-    "credentials.json", "google-services.json", "firebaseConfig.js",
+    "credentials.json", "firebaseConfig.js",
     "service-account.json", "secrets.json",
     # ML model metadata (generated, zero user value)
     "tokenizer_config.json", "special_tokens_map.json",
@@ -231,12 +235,12 @@ CONTENT_SKIP_DIRS = {
 CONTENT_SKIP_EXTENSIONS = {
     ".css", ".scss", ".sass", ".less",  # stylesheets
     ".ini", ".cfg", ".conf",            # low-signal config formats
-    ".xml", ".plist", ".entitlements",  # verbose config
+    ".entitlements",                    # verbose config
     ".svg", ".eps",                     # vector graphics
     ".csv", ".tsv",                     # large data dumps
     ".sql", ".db",                      # database dumps
     # [MOBILE BOILERPLATE]
-    ".kts", ".gradle", ".pbxproj", ".strings"
+    ".strings"
 }
 
 # Filename suffix patterns for content-skip (for variable-name files that can't be matched exactly).
