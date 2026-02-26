@@ -179,8 +179,8 @@ class OmniWindow(QWidget):
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.input_container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         input_layout = QHBoxLayout(self.input_container)
-        input_layout.setContentsMargins(24, 4, 12, 4) # Increased left margin
-        input_layout.setSpacing(4)
+        input_layout.setContentsMargins(24, 4, 24, 4) # Increased left margin
+        input_layout.setSpacing(12)
 
         self.logo_label = RotatingLabel()
         self.logo_label.setFixedSize(50, 50)
