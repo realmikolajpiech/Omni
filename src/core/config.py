@@ -109,6 +109,13 @@ BLOCKED_EXTENSIONS = {
     ".dill", ".snapshot", ".symbols", ".xcframework", ".framework", ".dSYM",
     ".xcworkspacedata", ".xcscheme", ".xcsettings", ".xcconfig", ".plist",
     ".storyboard", ".xib", ".entitlements", ".mobileprovision",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".heic",
+
+    # [UNITY & SHADERS] 
+    ".asset", ".dwlt", ".index", ".shader", ".shadergraph", ".cginc", ".hlsl",
+    
+    # [JAVA/ANDROID BUILD]
+    ".aar", ".pom", ".bundle", ".iml", ".manifest"
 }
 
 # Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).
@@ -160,6 +167,11 @@ CONTENT_SKIP_FILENAMES = {
     "colors.xml", "themes.xml", "strings.xml",
     # Unity
     "ProjectVersion.txt",
+    # [IDE & GRADLE CONFIGS]
+    "workspace.json", "local.properties", "settings.gradle.kts", "gradle.properties",
+    
+    # [MASSIVE WEB LIBS]
+    "tailwindcss.js"
 }
 
 # Directory names that trigger content-skip for any file found inside them.
@@ -188,6 +200,8 @@ CONTENT_SKIP_EXTENSIONS = {
     ".svg", ".eps",                     # vector graphics
     ".csv", ".tsv",                     # large data dumps
     ".sql", ".db",                      # database dumps
+    # [MOBILE BOILERPLATE]
+    ".kts", ".gradle", ".pbxproj", ".strings"
 }
 
 # Filename suffix patterns for content-skip (for variable-name files that can't be matched exactly).
@@ -196,6 +210,8 @@ CONTENT_SKIP_SUFFIXES = {
     ".test.js", ".spec.js", ".test.ts", ".spec.ts", ".test.jsx", ".spec.jsx", ".test.tsx", ".spec.tsx", # test files
     ".min.js", ".min.css",  # minified (already in BLOCKED_EXTENSIONS but belt-and-suspenders)
     ".g.dart", ".freezed.dart", ".config.dart", # Dart generated files
+    # [WASM & COMPILED BLOBS]
+    "_bin.js", "loader.js", "worker.js"
 }
 
 # Ensure directories exist

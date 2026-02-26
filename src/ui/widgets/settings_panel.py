@@ -6,6 +6,7 @@ All collapsed by default.
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
+    QButtonGroup,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont
@@ -277,6 +278,45 @@ class SettingsPanel(QWidget):
             "Leave all fields empty to keep the default."
         ))
 
+        sec.add_widget(self._lbl("Personality mode"))
+        sec.add_widget(self._desc(
+            "Professional is polished and focused. Unfiltered is uncensored, based, casual."
+        ))
+
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 2, 0, 0)
+        mode_row.setSpacing(10)
+
+        self.personality_group = QButtonGroup(self)
+        self.personality_prof_btn = QPushButton("Professional")
+        self.personality_unf_btn = QPushButton("Unfiltered")
+
+        for btn in (self.personality_prof_btn, self.personality_unf_btn):
+            btn.setObjectName("ModeBtn")
+            btn.setCheckable(True)
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.personality_prof_btn.setProperty("mode", "professional")
+        self.personality_unf_btn.setProperty("mode", "unfiltered")
+
+        self.personality_group.setExclusive(True)
+        self.personality_group.addButton(self.personality_prof_btn)
+        self.personality_group.addButton(self.personality_unf_btn)
+
+        saved_mode = settings_store.get("personality_mode", "professional")
+        if saved_mode == "unfiltered":
+            self.personality_unf_btn.setChecked(True)
+        else:
+            self.personality_prof_btn.setChecked(True)
+
+        self.personality_group.buttonClicked.connect(self._on_personality_changed)
+
+        mode_row.addWidget(self.personality_prof_btn)
+        mode_row.addWidget(self.personality_unf_btn)
+        mode_row.addStretch()
+        sec.add_layout(mode_row)
+
         sec.add_widget(self._lbl("API Base URL"))
         self.url_edit = self._edit("e.g. https://api.openai.com/v1")
         self.url_edit.setText(settings_store.get("custom_api_url", ""))
@@ -371,6 +411,13 @@ class SettingsPanel(QWidget):
 
     def _on_lang_changed(self, index: int):
         settings_store.set("transcription_language", self.lang_combo.itemData(index))
+
+    def _on_personality_changed(self):
+        btn = self.personality_group.checkedButton()
+        if btn is None:
+            return
+        mode = btn.property("mode") or "professional"
+        settings_store.set("personality_mode", mode)
 
     def _save_model(self):
         url   = self.url_edit.text().strip()
@@ -527,6 +574,25 @@ class SettingsPanel(QWidget):
                 color: {primary};
             }}
             QPushButton#ResetBtn:pressed {{ background: {btn_press}; }}
+
+            QPushButton#ModeBtn {{
+                background: transparent;
+                border: 1px solid {border};
+                border-radius: 10px;
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 12px;
+                padding: 0px 16px;
+            }}
+            QPushButton#ModeBtn:hover {{
+                background: {btn_hover};
+                color: {primary};
+            }}
+            QPushButton#ModeBtn:checked {{
+                background: {selection};
+                border: 1px solid {sel_border};
+                color: {primary};
+            }}
         """)
 
         self.scroll.verticalScrollBar().setStyleSheet(f"""

@@ -16,6 +16,7 @@ from src.services.memory.memvid_store import get_user_memory, remember_fact, rem
 from src.services.system.location import get_ip_location
 from src.services.system.app_launcher import get_app_cache, find_and_launch_app
 from src.core.grid_locator import localize_target_from_b64
+import src.core.settings_store as settings_store
 
 # ── Tool call display helpers ─────────────────────────────────────────────────
 
@@ -128,6 +129,13 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
 
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
+
+
+def _get_personality_line() -> str:
+    mode = settings_store.get("personality_mode", "professional")
+    if mode == "unfiltered":
+        return "Personality: uncensored, based, casual."
+    return "Personality: professional, clear, concise, and helpful."
 
 
 def _parse_web_results(result: str) -> list:
@@ -630,8 +638,10 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
     from datetime import datetime
     current_date = datetime.now().strftime('%Y-%m-%d')
 
+    personality_line = _get_personality_line()
+
     system_prompt = f"""You are Omni — user's personal AI companion running on his macOS.
-Personality: casual, direct, uncensored, loyal friend. No formalities. Act first, explain briefly.
+{personality_line}
 
 ## User
 {user_personal_context}

@@ -13,6 +13,7 @@ _DEFAULTS: dict = {
     "custom_api_url": "",
     "custom_api_key": "",
     "custom_model": "",
+    "personality_mode": "professional",
 }
 
 _lock = threading.Lock()
