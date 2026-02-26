@@ -8,6 +8,7 @@ lancedb
 memvid_sdk
 PyQt6
 Pillow
+watchdog
 packaging
 pypdf
 python-docx
