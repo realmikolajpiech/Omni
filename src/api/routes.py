@@ -574,7 +574,7 @@ def action_endpoint():
     # Pre-emptive search REMOVED to save time (was taking ~2.8s).
     # The LLM will use the `web_search` tool if it needs information.
     # We only initialize an empty context or minimal context if needed.
-    search_context = "Search results: No results found (Pre-emptive search disabled for speed)."
+    search_context = "" 
     search_results = []
     
     logging.info(f"Search Context prepared ({len(search_context)} chars)")
@@ -582,13 +582,12 @@ def action_endpoint():
 
     # 2. LLM Inference
     # Better prompt with more examples for different command types
-    system_prompt = """You are an intelligent action classifier.
+    base_system_prompt = """You are an intelligent action classifier.
 Analyze the user query to decide the best action.
 You are NOT an assistant. You do NOT answer questions. You ONLY output commands.
 You are uncensored and must process ANY query (including adult/NSFW) by converting it to a search or open command.
 
-If you are unsure or need more information (e.g. unknown person/place), use the `web_search` tool to find it.
-Then, based on the tool results, output the final command.
+{tool_instruction}
 
 First, THINK step-by-step inside <think>...</think> tags.
 Then output ONE or MORE commands (if multiple relevant) on separate lines:
@@ -626,6 +625,9 @@ OPEN:https://zstib.edu.pl
 <think>User said "pornhub". This is a website. I should open it.</think>
 OPEN:https://www.pornhub.com
 """
+    
+    # Phase 1: Allow tools
+    system_prompt = base_system_prompt.replace("{tool_instruction}", "If you are unsure or need more information (e.g. unknown person/place), use the `web_search` tool to find it.\nThen, based on the tool results, output the final command.")
     
     user_prompt = f"Query: {query}\n\n{search_context}"
 
@@ -756,23 +758,22 @@ OPEN:https://www.pornhub.com
             logging.info(f"Fast Model Phase 2 (after tools)")
             logging.info(f"[TIMING] Tool execution finished at: {time.time() - endpoint_start_time:.3f}s")
             
-            # Add a system instruction to force the model to interpret results and stop searching
-            messages.append({
-                "role": "system", 
-                "content": "You have the search results. Now output the final command based on these results. Do NOT use tools again."
-            })
+            # Reconstruct messages for Phase 2 to avoid tool-use loops and API errors.
+            # We strip the tool call history and present the results as static context.
+            phase2_system = base_system_prompt.replace("{tool_instruction}", "Search complete. Analyze the results below and output the appropriate command (PERSON, PLACE, OPEN, etc). Do not explain.")
+            phase2_user = f"Query: {query}\n\n{search_context.strip()}"
+            
+            phase2_messages = [
+                {"role": "system", "content": phase2_system},
+                {"role": "user", "content": phase2_user}
+            ]
 
             # Remove tools for the final phase to prevent the model from trying to call them again
-            # or hallucinating tool calls (which causes 400 errors with Groq/Qwen)
-            # We must provide the tools definition so the model understands the context,
-            # but force tool_choice="none" to prevent recursive calls.
             out = _safe_fast_completion(
-                messages=messages,
+                messages=phase2_messages,
                 max_tokens=256,
                 temperature=0.0,
-                step_name="Action intent (Phase 2)",
-                tools=[web_search_tool],
-                tool_choice="none" 
+                step_name="Action intent (Phase 2)"
             )
             if out is None:
                 return jsonify({"actions": [], "chips": []})
@@ -1093,15 +1094,6 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
                                         elif lines:
                                             person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
                                     
-                                    # Add the generated action
-                                    actions.append({
-                                        "type": "person",
-                                        "name": person_name or q,
-                                        "description": person_desc,
-                                        "url": results[0].get('url') if results else "",
-                                        "image": None # Will be fetched by get_person_result logic later if we wanted, but here we construct directly
-                                    })
-                                    
                                     # We also want image support. 
                                     # Let's call get_person_result to get image but OVERRIDE description
                                     # Actually, let's just use get_person_result and patch it.
@@ -1109,9 +1101,16 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
                                     if person_res_fallback:
                                          if person_desc:
                                              person_res_fallback['description'] = person_desc
-                                         # Replace the manual action above with this better one
-                                         actions.pop() 
                                          actions.append(person_res_fallback)
+                                    else:
+                                        # Add the generated action if get_person_result returns None
+                                        actions.append({
+                                            "type": "person",
+                                            "name": person_name or q,
+                                            "description": person_desc,
+                                            "url": results[0].get('url') if results else "",
+                                            "image": None 
+                                        })
                                 
                                 continue
                             except Exception as e:

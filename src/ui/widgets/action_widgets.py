@@ -2505,12 +2505,16 @@ class PlaceActionWidget(PersonActionWidget):
         full_desc += description or ""
         self.desc_label.setText(full_desc.strip(" • "))
         
-        # Adjust Fonts for compactness
-        self.name_label.setStyleSheet("color: #111111;")
+        # Adjust Fonts for compactness (colors handled by update_style)
         self.name_label.setFont(QFont("Instrument Serif", 24, QFont.Weight.Normal)) 
-        
-        self.desc_label.setStyleSheet("color: #555555; line-height: 1.4;")
         self.desc_label.setFont(QFont("Manrope", 12, QFont.Weight.Normal)) 
+
+        # Track widgets for styling
+        self.hint_badges = []
+        self.hint_labels = []
+        self.rating_label = None
+        self.details_label = None
+        self.hours_label = None
 
         # Enhance layout with extra info
         try:
@@ -2530,23 +2534,14 @@ class PlaceActionWidget(PersonActionWidget):
             
             def create_key_badge(text):
                 lbl = QLabel(text)
-                lbl.setStyleSheet("""
-                    background-color: rgba(0, 0, 0, 0.15);
-                    color: #333333;
-                    border-radius: 4px;
-                    padding: 2px 6px;
-                    font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
-                    font-size: 10px;
-                    font-weight: bold;
-                    border: 1px solid rgba(0, 0, 0, 0.2);
-                """)
                 lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.hint_badges.append(lbl)
                 return lbl
             
             def create_action_label(text):
                 lbl = QLabel(text)
                 lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
-                lbl.setStyleSheet("color: #666666;")
+                self.hint_labels.append(lbl)
                 return lbl
 
             # Enter -> Open directions
@@ -2571,12 +2566,11 @@ class PlaceActionWidget(PersonActionWidget):
                 star_label.setStyleSheet("color: #F5C518; font-size: 12px;")
                 rating_text = f"{rating}"
                 if rating_count: rating_text += f" ({rating_count})"
-                val_label = QLabel(rating_text)
-                val_label.setFont(QFont("Manrope", 11, QFont.Weight.Bold))
-                val_label.setStyleSheet("color: #444444;")
+                self.rating_label = QLabel(rating_text)
+                self.rating_label.setFont(QFont("Manrope", 11, QFont.Weight.Bold))
                 
                 rating_row.addWidget(star_label)
-                rating_row.addWidget(val_label)
+                rating_row.addWidget(self.rating_label)
                 # Insert after name/desc (hints=0, name=1, desc=2) -> 3
                 info_layout.insertLayout(3, rating_row)
 
@@ -2598,19 +2592,17 @@ class PlaceActionWidget(PersonActionWidget):
                         details_text.append(f"({today_hours})") # Removed 'Green Open' text, just showing hours
 
             if details_text:
-                details_label = QLabel("  ".join(details_text))
-                details_label.setFont(QFont("Manrope", 11))
-                details_label.setStyleSheet("color: #333333; margin-top: 2px;") # Darker phone/hours
-                info_layout.insertWidget(4, details_label)
+                self.details_label = QLabel("  ".join(details_text))
+                self.details_label.setFont(QFont("Manrope", 11))
+                info_layout.insertWidget(4, self.details_label)
 
             # Full Opening Hours
             if hours and isinstance(hours, dict):
                 hours_text = "\n".join([f"{k.capitalize()}: {v}" for k, v in hours.items()])
-                hours_label = QLabel(hours_text)
-                hours_label.setFont(QFont("Manrope", 10))
-                hours_label.setStyleSheet("color: #888888; margin-top: 4px;")
-                hours_label.setVisible(True)
-                info_layout.insertWidget(5, hours_label)
+                self.hours_label = QLabel(hours_text)
+                self.hours_label.setFont(QFont("Manrope", 10))
+                self.hours_label.setVisible(True)
+                info_layout.insertWidget(5, self.hours_label)
             
             # Hide the source label since we have the Tab hint
             if hasattr(self, 'link_label'):
@@ -2618,6 +2610,59 @@ class PlaceActionWidget(PersonActionWidget):
 
         except Exception as e:
             logging.error(f"Failed to add place details: {e}")
+
+        # Apply theme-aware styles
+        self.update_style()
+
+    def update_style(self):
+        super().update_style()
+        is_dark = self.current_theme == "dark"
+        
+        if is_dark:
+            badge_bg = "rgba(255, 255, 255, 0.15)"
+            badge_text = "#EEEEEE"
+            badge_border = "rgba(255, 255, 255, 0.2)"
+            
+            action_text = "#AAAAAA"
+            rating_text = "#EEEEEE"
+            details_text = "#DDDDDD"
+            hours_text = "#BBBBBB"
+        else:
+            badge_bg = "rgba(0, 0, 0, 0.15)"
+            badge_text = "#333333"
+            badge_border = "rgba(0, 0, 0, 0.2)"
+            
+            action_text = "#666666"
+            rating_text = "#444444"
+            details_text = "#333333"
+            hours_text = "#888888"
+
+        # Apply to tracked widgets
+        if hasattr(self, 'hint_badges'):
+            for badge in self.hint_badges:
+                badge.setStyleSheet(f"""
+                    background-color: {badge_bg};
+                    color: {badge_text};
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+                    font-size: 10px;
+                    font-weight: bold;
+                    border: 1px solid {badge_border};
+                """)
+        
+        if hasattr(self, 'hint_labels'):
+            for lbl in self.hint_labels:
+                lbl.setStyleSheet(f"color: {action_text};")
+        
+        if getattr(self, 'rating_label', None):
+            self.rating_label.setStyleSheet(f"color: {rating_text};")
+            
+        if getattr(self, 'details_label', None):
+            self.details_label.setStyleSheet(f"color: {details_text}; margin-top: 2px;")
+            
+        if getattr(self, 'hours_label', None):
+            self.hours_label.setStyleSheet(f"color: {hours_text}; margin-top: 4px;")
 
     def execute(self):
         # Default action when pressing Enter: Open Google Maps

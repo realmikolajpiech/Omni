@@ -172,6 +172,10 @@ class GroqFastWrapper:
             extra["tools"] = tools
         if tool_choice:
             extra["tool_choice"] = tool_choice
+        elif tools and not tool_choice:
+             # Default to auto if tools are present but no choice specified
+             extra["tool_choice"] = "auto"
+
 
         try:
             response = self.client.chat.completions.create(

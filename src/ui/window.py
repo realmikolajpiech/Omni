@@ -310,6 +310,7 @@ class OmniWindow(QWidget):
         self.is_entry_animating = False
         self.is_installing = False 
         self.voice_triggered_query = False
+        self.last_action_time = 0
         self.refresh_list("", animate=False)
         self.center()  
 
@@ -1086,6 +1087,17 @@ class OmniWindow(QWidget):
         if self.action_worker and self.action_worker.isRunning():
             logging.info("Window deactivated but action worker is running - keeping window open.")
             return
+
+        # Prevent closing if OG worker is running (fetching rich previews)
+        if hasattr(self, 'og_worker') and self.og_worker and self.og_worker.isRunning():
+             logging.info("Window deactivated but OG worker is running - keeping window open.")
+             return
+
+        # Grace period: if we just showed actions (within 1.5s), ignore deactivation
+        # This handles race conditions where activateWindow() or UI updates cause transient focus loss
+        if time.time() - getattr(self, 'last_action_time', 0) < 1.5:
+             logging.info("Window deactivated but in action grace period - keeping window open.")
+             return
 
         # In conversation/follow-up mode keep the window alive so the user can
         # read, copy, and interact with responses. The shortcut still closes it.
@@ -2090,6 +2102,7 @@ class OmniWindow(QWidget):
         actions.sort(key=action_priority)
         self.external_actions = actions
         self.og_data = None   # reset previous OG data when action changes
+        self.last_action_time = time.time()
         self.refresh_list(query, animate=False)
 
         # Ensure window is active when actions arrive to prevent accidental close on focus loss
