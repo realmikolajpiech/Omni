@@ -643,7 +643,7 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
     system_prompt = f"""You are Omni — user's personal AI companion running on his macOS.
 {personality_line}
 
-## User
+## User context (private notes — use when relevant, do NOT dump verbatim)
 {user_personal_context}
 Location: {user_loc} | Date: {current_date}
 
@@ -661,9 +661,11 @@ Location: {user_loc} | Date: {current_date}
 
 Memory usage rules:
 - Call **memory_recall** proactively when the answer might depend on something the user told you before.
-- Call **memory_save** when the user shares something personal or important that should persist.
+- Call **memory_save** IMMEDIATELY when the user shares something personal or important that should persist, a new fact, name, preference, or corrects you.
 - Call **memory_delete** when the user says "forget that", "that's wrong", or info is confirmed outdated.
 - Never tell the user you "can't remember" without first calling memory_recall.
+- CRITICAL: Do NOT just say "I will remember that" — you MUST call the memory_save tool.
+- Privacy: Use memory naturally. If asked "what do you know about me?", summarize key facts conversationally. Do NOT list email addresses, passwords, or sensitive data unless explicitly asked.
 
 Use tools proactively. Do NOT pretend to search or recall — actually call the tool.
 
@@ -840,6 +842,7 @@ Available settings and values:
                 tool_iter = 0
                 model_reasoning = ""   # Accumulated LLM reasoning_content tokens (all iterations)
                 tool_records: list = []  # Completed tool-call entries for display
+                all_answer_text = ""   # Accumulated answer text across iterations
 
                 while tool_iter < max_tool_iters:
                     iter_start_time = time.time()
@@ -911,11 +914,15 @@ Available settings and values:
                         if token or reasoning_token:
                             inline_thinking, answer_so_far = _split_thinking_and_answer(accumulated_text)
                             ans_clean, _, _ = extract_actions(answer_so_far) if answer_so_far else ("", [], "")
+                            
+                            # Combine previous iterations' text with current
+                            full_display_answer = (all_answer_text + ans_clean).strip()
+                            
                             combined_thinking = _build_thinking(
                                 model_reasoning + iter_reasoning, tool_records, inline_thinking
                             )
-                            if combined_thinking or ans_clean:
-                                yield ("partial", {"thinking": combined_thinking, "answer": ans_clean})
+                            if combined_thinking or full_display_answer:
+                                yield ("partial", {"thinking": combined_thinking, "answer": full_display_answer})
 
                     # Persist this iteration's reasoning tokens
                     model_reasoning += iter_reasoning
@@ -978,6 +985,12 @@ Available settings and values:
                                 "tool_call_id": tc["id"],
                                 "content": result,
                             })
+                            
+                        # Save this iteration's text for future display
+                        inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
+                        ans_clean, _, _ = extract_actions(answer_text) if answer_text else ("", [], "")
+                        if ans_clean:
+                            all_answer_text += ans_clean + "\n"
 
                         logging.info(f"[CHAT] Iteration {tool_iter} finished in {time.time() - iter_start_time:.4f}s")
                         continue  # Next iteration with tool results in messages
@@ -988,14 +1001,18 @@ Available settings and values:
                     # model_reasoning already includes all iterations; inline_thinking from <think> tags
                     thinking_content = _build_thinking(model_reasoning, tool_records, inline_thinking)
                     answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
+                    
+                    # Prepend previous iterations' text
+                    final_full_answer = (all_answer_text + answer).strip()
+                    
                     if auto_actions:
                         actions.extend(auto_actions)
-                    _postprocess_actions(actions, answer)
-                    logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(answer)}, actions={len(actions)}")
+                    _postprocess_actions(actions, final_full_answer)
+                    logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(final_full_answer)}, actions={len(actions)}")
 
                     final_header = f"Used {len(tool_records)} tool{'s' if len(tool_records) != 1 else ''}" if tool_records else None
                     yield ("final", {
-                        "answer": answer,
+                        "answer": final_full_answer,
                         "actions": actions,
                         "thinking": thinking_content,
                         **({"thinking_header": final_header} if final_header else {}),

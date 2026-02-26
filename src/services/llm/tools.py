@@ -115,8 +115,8 @@ TOOL_SCHEMAS = [
             "name": "memory_save",
             "description": (
                 "Permanently save a new fact or preference about the user to long-term memory. "
-                "Use when the user shares something important about themselves that should be remembered "
-                "across future conversations — preferences, life events, goals, relationships, habits."
+                "MUST be called IMMEDIATELY when the user shares a name, preference, correction, or personal detail. "
+                "Do not just acknowledge — save it."
             ),
             "parameters": {
                 "type": "object",
