@@ -352,13 +352,23 @@ class FollowUpWidget(QWidget):
     def sizeHint(self):
         return QSize(150, 32)
     
-    def set_active(self, active):
-        if active:
-            self.hint.setText("Press Tab to exit follow up mode")
+    def set_mode(self, mode):
+        """
+        mode: "hidden" | "followup" | "ask_omni"
+        """
+        if mode == "followup":
+            self.hint.setText("Press Escape to exit follow up mode")
+            self.show()
+        elif mode == "ask_omni":
+            self.hint.setText("Press Tab to Ask Omni")
             self.show()
         else:
-            self.hint.setText("Press Tab to follow up")
+            self.hint.setText("")
             self.hide()
+
+    def set_active(self, active):
+        # Deprecated: alias for backward compatibility until refactored
+        self.set_mode("followup" if active else "hidden")
 
 class UnscrollableTextEdit(QTextEdit):
     def wheelEvent(self, event):

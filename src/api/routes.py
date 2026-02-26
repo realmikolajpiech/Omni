@@ -652,7 +652,7 @@ OPEN:https://www.pornhub.com
         }
     }
 
-    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False, tools=None):
+    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False, tools=None, tool_choice=None):
         """Run fast model inference under lock with request-abort checks."""
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"{step_name}: request {request_id} superseded before lock.")
@@ -677,7 +677,8 @@ OPEN:https://www.pornhub.com
                 max_tokens=max_tokens,
                 temperature=temperature,
                 request_id=request_id,
-                tools=tools
+                tools=tools,
+                tool_choice=tool_choice
             )
             if out is None:
                 logging.info(f"{step_name}: completion aborted/empty for request {request_id}.")
@@ -755,14 +756,23 @@ OPEN:https://www.pornhub.com
             logging.info(f"Fast Model Phase 2 (after tools)")
             logging.info(f"[TIMING] Tool execution finished at: {time.time() - endpoint_start_time:.3f}s")
             
+            # Add a system instruction to force the model to interpret results and stop searching
+            messages.append({
+                "role": "system", 
+                "content": "You have the search results. Now output the final command based on these results. Do NOT use tools again."
+            })
+
             # Remove tools for the final phase to prevent the model from trying to call them again
             # or hallucinating tool calls (which causes 400 errors with Groq/Qwen)
+            # We must provide the tools definition so the model understands the context,
+            # but force tool_choice="none" to prevent recursive calls.
             out = _safe_fast_completion(
                 messages=messages,
                 max_tokens=256,
                 temperature=0.0,
                 step_name="Action intent (Phase 2)",
-                tools=None # Explicitly disable tools for the final answer
+                tools=[web_search_tool],
+                tool_choice="none" 
             )
             if out is None:
                 return jsonify({"actions": [], "chips": []})

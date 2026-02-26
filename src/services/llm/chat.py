@@ -436,7 +436,8 @@ def extract_actions(text):
             elif isinstance(parsed, list):
                 actions = parsed
         except Exception as e:
-            logging.warning(f"Failed to parse JSON block: {e}")
+            # Common during streaming (incomplete JSON) - log as debug to avoid noise
+            logging.debug(f"Failed to parse JSON block (partial?): {e}")
 
     # Remove trailing cleanup markers
     clean_text = re.sub(r"(?i)(JSON block for actions|Actions|JSON|Here is the JSON):\s*$", "", clean_text).strip()

@@ -728,7 +728,7 @@ class OmniWindow(QWidget):
         self._is_closing = False # Reset closing flag in case we interrupted a close animation
         
         self.is_history_mode = False
-        self.follow_up_widget.set_active(False)
+        self.follow_up_widget.set_mode("hidden")
         self.frame.set_minimal_mode(True)
         self.input_field.setPlaceholderText("Search or ask...")
 
@@ -1168,17 +1168,19 @@ class OmniWindow(QWidget):
                             self.animate_close()
                             return True
 
-                if self.is_history_mode:
-                    self.reset_to_search_mode(clear=False)
-                else:
-                    self.enter_history_mode()
-                return True
+                if not self.is_history_mode:
+                    query = self.input_field.text().strip()
+                    if query:
+                        self.perform_ai_query(query)
+                    else:
+                        self.enter_history_mode()
+                    return True
         return super().eventFilter(obj, event)
 
     def enter_history_mode(self):
         if self.is_history_mode: return
         self.is_history_mode = True
-        self.follow_up_widget.set_active(True)
+        self.follow_up_widget.set_mode("followup")
         self.frame.set_minimal_mode(False)
         self.input_field.setPlaceholderText("Ask a follow-up...")
         self._rebuild_history_list()
@@ -1540,6 +1542,7 @@ class OmniWindow(QWidget):
             self.instant_url = None
             self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
+            self.follow_up_widget.set_mode("hidden")
             return
 
         # Query changed, clear external results until new ones arrive
@@ -1564,6 +1567,7 @@ class OmniWindow(QWidget):
         
         self.frame.set_minimal_mode(True)
         # self.refresh_list(text, animate=True)
+        self.follow_up_widget.set_mode("ask_omni")
         self.local_search_timer.start() # Debounce local search slightly
         self.debounce_timer.start()
 
@@ -1766,15 +1770,15 @@ class OmniWindow(QWidget):
                 new_items_data.append((key, data, create_file_widget))
 
         # Always add "Ask Omni" option at the end if there is a query
-        if query:
-            key = "ask_omni"
-            is_only_item = (len(new_items_data) == 0)
-            data = {"type": "ask_omni", "query": query, "is_only_item": is_only_item}
-            
-            def create_omni_widget(q=query):
-                return StandardItemWidget(f"Ask Omni: {q}", icon_name=LOGO_PATH)
-            
-            new_items_data.append((key, data, create_omni_widget))
+        # if query:
+        #     key = "ask_omni"
+        #     is_only_item = (len(new_items_data) == 0)
+        #     data = {"type": "ask_omni", "query": query, "is_only_item": is_only_item}
+        #     
+        #     def create_omni_widget(q=query):
+        #         return StandardItemWidget(f"Ask Omni: {q}", icon_name=LOGO_PATH)
+        #     
+        #     new_items_data.append((key, data, create_omni_widget))
 
         self.sync_list_items(new_items_data)
         self.adjust_window_height(animate)
@@ -2453,6 +2457,7 @@ class OmniWindow(QWidget):
         
         self.frame.set_minimal_mode(False) # Active mode
         self.logo_label.boost_speed()
+        self.follow_up_widget.set_mode("hidden")
 
         # Initialize streaming TTS state
         self.tts_buffer = ""
@@ -2544,6 +2549,7 @@ class OmniWindow(QWidget):
 
         self.frame.set_minimal_mode(False)
         self.logo_label.boost_speed()
+        self.follow_up_widget.set_mode("hidden")
         self.adjust_window_height()
         self.start_ai_worker(system_query, None)
 
@@ -2748,10 +2754,10 @@ class OmniWindow(QWidget):
         self.input_field.blockSignals(False)
         self.input_field.setPlaceholderText("Ask a follow-up...")
         self.input_field.setFocus()
+        self.follow_up_widget.set_mode("followup")
 
         if not self.is_history_mode:
             self.is_history_mode = True
-            self.follow_up_widget.set_active(True)
             self.frame.set_minimal_mode(False)
 
     def on_ai_response(self, data):
