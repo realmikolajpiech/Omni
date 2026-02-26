@@ -1,15 +1,13 @@
 """
-SettingsPanel — right-click-on-logo settings UI.
-Three collapsible accordion sections: Transcription, AI Model, Privacy.
-All collapsed by default.
+SettingsPanel — Redesigned settings UI with sidebar navigation.
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
-    QButtonGroup,
+    QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtGui import QFont, QIcon, QColor, QPainter
 
 from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
@@ -79,123 +77,62 @@ def _font(family: str, size: int, bold: bool = False, italic: bool = False) -> Q
 
 
 # ---------------------------------------------------------------------------
-# Collapsible section
+# Settings Page Base
 # ---------------------------------------------------------------------------
 
-class CollapsibleSection(QWidget):
+class SettingsPage(QWidget):
     """
-    Accordion row: clickable header that slides the content open/closed.
-    Starts collapsed.
+    Base class for a settings page content area with built-in scrolling.
     """
-
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
-        self._expanded = False
-        self._anim = None
+        
+        # Main layout for the page
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Scroll Area
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background: transparent; border: none;")
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Content Widget
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("SettingsPageContent")
+        
+        # Content Layout
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(30, 30, 30, 30)
+        self.content_layout.setSpacing(15)
+        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # ── Header ──────────────────────────────────────────────────
-        self.header = QPushButton()
-        self.header.setObjectName("CollapseHeader")
-        self.header.setCheckable(True)
-        self.header.setChecked(False)
-        self.header.setFixedHeight(52)
-        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.header.clicked.connect(self._toggle)
-
-        h_inner = QHBoxLayout(self.header)
-        h_inner.setContentsMargins(2, 0, 8, 0)
-        h_inner.setSpacing(0)
-
+        # Title
         self.title_lbl = QLabel(title)
-        self.title_lbl.setObjectName("CollapseTitle")
-        self.title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.title_lbl.setObjectName("PageTitle")
+        self.title_lbl.setFont(_font("Instrument Serif", 24))
+        self.content_layout.addWidget(self.title_lbl)
+        
+        # Spacer after title
+        self.content_layout.addSpacing(10)
+        
+        self.scroll.setWidget(self.content_widget)
+        main_layout.addWidget(self.scroll)
 
-        self.chevron = QLabel("›")
-        self.chevron.setObjectName("CollapseChevron")
-        self.chevron.setFixedWidth(20)
-        self.chevron.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        h_inner.addWidget(self.title_lbl)
-        h_inner.addStretch()
-        h_inner.addWidget(self.chevron)
-
-        # ── Content wrapper ──────────────────────────────────────────
-        self.content_wrap = QWidget()
-        self.content_wrap.setObjectName("CollapseContent")
-        self._inner = QVBoxLayout(self.content_wrap)
-        self._inner.setContentsMargins(2, 14, 2, 16)
-        self._inner.setSpacing(10)
-
-        # Start fully collapsed
-        self.content_wrap.setMaximumHeight(0)
-        self.content_wrap.hide()
-
-        root.addWidget(self.header)
-        root.addWidget(self.content_wrap)
-
-    # public helpers ────────────────────────────────────────────────
     def add_widget(self, w: QWidget):
-        self._inner.addWidget(w)
+        self.content_layout.addWidget(w)
 
     def add_layout(self, lay):
-        self._inner.addLayout(lay)
-
-    # toggle ────────────────────────────────────────────────────────
-    def _toggle(self, checked: bool):
-        self._expanded = checked
-        # Chevron: rotated › for open, straight › for closed
-        self.chevron.setText("⌄" if checked else "›")
-
-        if self._anim and self._anim.state() == QPropertyAnimation.State.Running:
-            self._anim.stop()
-
-        if checked:
-            self.content_wrap.show()
-            natural = self.content_wrap.sizeHint().height()
-            self._anim = QPropertyAnimation(self.content_wrap, b"maximumHeight")
-            self._anim.setDuration(240)
-            self._anim.setStartValue(0)
-            self._anim.setEndValue(max(natural, 80) + 24)
-            self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            self._anim.start()
-        else:
-            self._anim = QPropertyAnimation(self.content_wrap, b"maximumHeight")
-            self._anim.setDuration(200)
-            self._anim.setStartValue(self.content_wrap.height())
-            self._anim.setEndValue(0)
-            self._anim.setEasingCurve(QEasingCurve.Type.InCubic)
-            self._anim.finished.connect(self.content_wrap.hide)
-            self._anim.start()
-
-    # theming ────────────────────────────────────────────────────────
-    def apply_colors(self, primary: str, secondary: str, border: str,
-                     hover_bg: str, press_bg: str):
-        self.title_lbl.setStyleSheet(
-            f"color: {primary}; font-family: 'Instrument Serif'; font-size: 18px;"
-        )
-        self.chevron.setStyleSheet(
-            f"color: {secondary}; font-family: 'Manrope'; font-size: 15px;"
-        )
-        self.header.setStyleSheet(f"""
-            QPushButton#CollapseHeader {{
-                background: transparent;
-                border: none;
-                border-bottom: 1px solid {border};
-                border-radius: 0px;
-            }}
-            QPushButton#CollapseHeader:hover {{
-                background: {hover_bg};
-            }}
-            QPushButton#CollapseHeader:pressed {{
-                background: {press_bg};
-            }}
-        """)
+        self.content_layout.addLayout(lay)
+        
+    def add_stretch(self):
+        self.content_layout.addStretch()
+        
+    def add_spacing(self, spacing: int):
+        self.content_layout.addSpacing(spacing)
 
 
 # ---------------------------------------------------------------------------
@@ -208,48 +145,56 @@ class SettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_theme = "dark"
-        self._sections = []
+        self._pages = {}  # name -> widget
         self._build_ui()
 
     # ── Build ────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        self.scroll.viewport().setStyleSheet("background: transparent;")
+        # ── Sidebar ──────────────────────────────────────────────────
+        self.sidebar = QListWidget()
+        self.sidebar.setObjectName("SettingsSidebar")
+        self.sidebar.setFixedWidth(200)
+        self.sidebar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sidebar.itemSelectionChanged.connect(self._on_sidebar_changed)
+        
+        # ── Content Area ─────────────────────────────────────────────
+        self.content_stack = QStackedWidget()
+        self.content_stack.setObjectName("SettingsContent")
 
-        self.body = QWidget()
-        self.body.setObjectName("SettingsBody")
-        body_lay = QVBoxLayout(self.body)
-        body_lay.setContentsMargins(22, 4, 22, 28)
-        body_lay.setSpacing(0)
-        body_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # ── Build Pages ──────────────────────────────────────────────
+        self._add_page("Transcription", self._build_transcription())
+        self._add_page("AI Model", self._build_model())
+        self._add_page("Privacy", self._build_privacy())
 
-        self._sec_trans   = self._build_transcription()
-        self._sec_model   = self._build_model()
-        self._sec_privacy = self._build_privacy()
+        root.addWidget(self.sidebar)
+        root.addWidget(self.content_stack)
+        
+        # Select first item by default
+        if self.sidebar.count() > 0:
+            self.sidebar.setCurrentRow(0)
 
-        for sec in [self._sec_trans, self._sec_model, self._sec_privacy]:
-            body_lay.addWidget(sec)
-            self._sections.append(sec)
-
-        body_lay.addStretch()
-        self.scroll.setWidget(self.body)
-        root.addWidget(self.scroll)
+    def _add_page(self, name: str, widget: QWidget):
+        item = QListWidgetItem(name)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        item.setSizeHint(QSize(0, 40))
+        
+        self.sidebar.addItem(item)
+        self.content_stack.addWidget(widget)
+        self._pages[name] = widget
 
     # ── Section builders ─────────────────────────────────────────────
 
-    def _build_transcription(self) -> CollapsibleSection:
-        sec = CollapsibleSection("Transcription")
+    def _build_transcription(self) -> QWidget:
+        page = SettingsPage("Transcription")
 
-        sec.add_widget(self._desc(
+        page.add_widget(self._desc(
             "Default language for Whisper speech recognition. "
             "Picking a specific language makes transcription faster and more accurate."
         ))
@@ -266,26 +211,33 @@ class SettingsPanel(QWidget):
                 self.lang_combo.setCurrentIndex(i)
 
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        sec.add_widget(self.lang_combo)
-        return sec
+        page.add_widget(self.lang_combo)
+        
+        page.add_stretch()
+        return page
 
-    def _build_model(self) -> CollapsibleSection:
-        sec = CollapsibleSection("AI Model")
+    def _build_model(self) -> QWidget:
+        page = SettingsPage("AI Model")
 
-        sec.add_widget(self._desc(
+        page.add_widget(self._desc(
             "Override the default model (xAI Grok) with any OpenAI-compatible API. "
             "Works with OpenAI, Ollama, LM Studio, Anthropic proxies, and more. "
             "Leave all fields empty to keep the default."
         ))
 
-        sec.add_widget(self._lbl("Personality mode"))
-        sec.add_widget(self._desc(
+        page.add_widget(self._lbl("Personality mode"))
+        page.add_widget(self._desc(
             "Professional is polished and focused. Unfiltered is uncensored, based, casual."
         ))
 
-        mode_row = QHBoxLayout()
-        mode_row.setContentsMargins(0, 2, 0, 0)
-        mode_row.setSpacing(10)
+        # Container for the toggle (acting as the track)
+        self.mode_container = QFrame()
+        self.mode_container.setObjectName("ModeContainer")
+        self.mode_container.setFixedHeight(44)
+        
+        mode_layout = QHBoxLayout(self.mode_container)
+        mode_layout.setContentsMargins(4, 4, 4, 4)
+        mode_layout.setSpacing(0)
 
         self.personality_group = QButtonGroup(self)
         self.personality_prof_btn = QPushButton("Professional")
@@ -294,8 +246,9 @@ class SettingsPanel(QWidget):
         for btn in (self.personality_prof_btn, self.personality_unf_btn):
             btn.setObjectName("ModeBtn")
             btn.setCheckable(True)
-            btn.setFixedHeight(34)
+            btn.setFixedHeight(36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            mode_layout.addWidget(btn)
 
         self.personality_prof_btn.setProperty("mode", "professional")
         self.personality_unf_btn.setProperty("mode", "unfiltered")
@@ -312,28 +265,27 @@ class SettingsPanel(QWidget):
 
         self.personality_group.buttonClicked.connect(self._on_personality_changed)
 
-        mode_row.addWidget(self.personality_prof_btn)
-        mode_row.addWidget(self.personality_unf_btn)
-        mode_row.addStretch()
-        sec.add_layout(mode_row)
+        page.add_widget(self.mode_container)
+        
+        page.add_spacing(10)
 
-        sec.add_widget(self._lbl("API Base URL"))
+        page.add_widget(self._lbl("API Base URL"))
         self.url_edit = self._edit("e.g. https://api.openai.com/v1")
         self.url_edit.setText(settings_store.get("custom_api_url", ""))
-        sec.add_widget(self.url_edit)
+        page.add_widget(self.url_edit)
 
-        sec.add_widget(self._lbl("API Key"))
+        page.add_widget(self._lbl("API Key"))
         self.key_edit = self._edit("sk-...", password=True)
         self.key_edit.setText(settings_store.get("custom_api_key", ""))
-        sec.add_widget(self.key_edit)
+        page.add_widget(self.key_edit)
 
-        sec.add_widget(self._lbl("Model name"))
+        page.add_widget(self._lbl("Model name"))
         self.model_edit = self._edit("e.g. gpt-4o, claude-3-5-sonnet")
         self.model_edit.setText(settings_store.get("custom_model", ""))
-        sec.add_widget(self.model_edit)
+        page.add_widget(self.model_edit)
 
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_row.setContentsMargins(0, 10, 0, 0)
         btn_row.setSpacing(10)
 
         self.save_btn = QPushButton("Save")
@@ -350,20 +302,22 @@ class SettingsPanel(QWidget):
 
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.reset_btn)
-        sec.add_layout(btn_row)
+        btn_row.addStretch()
+        page.add_layout(btn_row)
 
         self.status_lbl = QLabel("")
         self.status_lbl.setObjectName("StatusLbl")
         self.status_lbl.setFont(_font("Manrope", 10))
         self.status_lbl.setWordWrap(True)
-        sec.add_widget(self.status_lbl)
+        page.add_widget(self.status_lbl)
+        
+        page.add_stretch()
+        return page
 
-        return sec
-
-    def _build_privacy(self) -> CollapsibleSection:
-        sec = CollapsibleSection("Privacy")
-
-        sec.add_widget(self._desc(
+    def _build_privacy(self) -> QWidget:
+        page = SettingsPage("Privacy")
+        
+        page.add_widget(self._desc(
             "Omni is built with privacy as a first principle. "
             "Here's the full picture of what happens with your data."
         ))
@@ -373,15 +327,16 @@ class SettingsPanel(QWidget):
             h.setObjectName("PrivacyHeading")
             h.setFont(_font("Manrope", 11, bold=True))
             h.setWordWrap(True)
-            sec.add_widget(h)
+            page.add_widget(h)
 
             b = QLabel(body_text)
             b.setObjectName("PrivacyBody")
             b.setFont(_font("Manrope", 10))
             b.setWordWrap(True)
-            sec.add_widget(b)
-
-        return sec
+            page.add_widget(b)
+            
+        page.add_stretch()
+        return page
 
     # ── Widget factories ─────────────────────────────────────────────
 
@@ -408,6 +363,11 @@ class SettingsPanel(QWidget):
         return edit
 
     # ── Slots ────────────────────────────────────────────────────────
+
+    def _on_sidebar_changed(self):
+        row = self.sidebar.currentRow()
+        if row >= 0:
+            self.content_stack.setCurrentIndex(row)
 
     def _on_lang_changed(self, index: int):
         settings_store.set("transcription_language", self.lang_combo.itemData(index))
@@ -462,21 +422,60 @@ class SettingsPanel(QWidget):
         selection  = t["selection_bg"]
         scrollbar  = t["scrollbar_handle"]
 
-        field_bg       = "rgba(255,255,255,0.06)" if dark else "rgba(0,0,0,0.04)"
-        field_bg_focus = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.07)"
-        btn_bg         = "rgba(255,255,255,0.09)" if dark else "rgba(0,0,0,0.05)"
-        btn_hover      = "rgba(255,255,255,0.14)" if dark else "rgba(0,0,0,0.08)"
-        btn_press      = "rgba(255,255,255,0.05)" if dark else "rgba(0,0,0,0.03)"
-        hdr_hover      = "rgba(255,255,255,0.04)" if dark else "rgba(0,0,0,0.03)"
-        hdr_press      = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.06)"
+        field_bg       = "rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.08)"
+        field_bg_focus = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.12)"
+        btn_bg         = "rgba(255,255,255,0.15)" if dark else "rgba(0,0,0,0.10)"
+        btn_hover      = "rgba(255,255,255,0.20)" if dark else "rgba(0,0,0,0.15)"
+        btn_press      = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.05)"
+        
+        sidebar_bg     = "rgba(0,0,0,0.3)" if dark else "rgba(0,0,0,0.05)"
+        item_hover     = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.08)"
+        item_selected  = "rgba(255,255,255,0.15)" if dark else "rgba(0,0,0,0.12)"
+        
+        toggle_track   = "rgba(0,0,0,0.2)" if dark else "rgba(0,0,0,0.05)"
+        toggle_bg      = "rgba(255,255,255,0.1)" if dark else "#FFFFFF"
+        toggle_text    = primary
+        toggle_text_off= secondary
+
         reset_color    = secondary
         combo_popup_bg = "#1c1c1c" if dark else "#f3f3f3"
 
-        for sec in self._sections:
-            sec.apply_colors(primary, secondary, border, hdr_hover, hdr_press)
-
-        self.body.setStyleSheet(f"""
-            QWidget#SettingsBody {{ background: transparent; }}
+        # Apply to pages
+        for name, page in self._pages.items():
+            page.title_lbl.setStyleSheet(f"color: {primary};")
+            
+        self.setStyleSheet(f"""
+            QWidget {{ background: transparent; }}
+            
+            /* Sidebar */
+            QListWidget#SettingsSidebar {{
+                background: {sidebar_bg};
+                border: none;
+                border-right: 1px solid {border};
+                outline: none;
+                padding-top: 20px;
+            }}
+            QListWidget#SettingsSidebar::item {{
+                height: 40px;
+                padding-left: 15px;
+                color: {secondary};
+                border-radius: 6px;
+                margin: 2px 10px;
+            }}
+            QListWidget#SettingsSidebar::item:hover {{
+                background: {item_hover};
+                color: {primary};
+            }}
+            QListWidget#SettingsSidebar::item:selected {{
+                background: {item_selected};
+                color: {primary};
+                font-weight: bold;
+            }}
+            
+            /* Content Area */
+            QWidget#SettingsContent {{
+                background: transparent;
+            }}
 
             /* labels */
             QLabel {{ background: transparent; color: {primary}; }}
@@ -575,27 +574,35 @@ class SettingsPanel(QWidget):
             }}
             QPushButton#ResetBtn:pressed {{ background: {btn_press}; }}
 
+            /* Toggle Switch */
+            QFrame#ModeContainer {{
+                background: {toggle_track};
+                border-radius: 12px;
+                border: 1px solid {border};
+            }}
+            
             QPushButton#ModeBtn {{
                 background: transparent;
-                border: 1px solid {border};
+                border: none;
                 border-radius: 10px;
-                color: {secondary};
+                color: {toggle_text_off};
                 font-family: "Manrope";
-                font-size: 12px;
+                font-size: 13px;
                 padding: 0px 16px;
+                margin: 2px;
             }}
             QPushButton#ModeBtn:hover {{
-                background: {btn_hover};
-                color: {primary};
+                color: {toggle_text};
+                background: rgba(255,255,255,0.03);
             }}
             QPushButton#ModeBtn:checked {{
-                background: {selection};
-                border: 1px solid {sel_border};
-                color: {primary};
+                background: {toggle_bg};
+                color: {toggle_text};
+                font-weight: 600;
+                border: 1px solid {border};
             }}
-        """)
-
-        self.scroll.verticalScrollBar().setStyleSheet(f"""
+            
+            /* Scrollbars */
             QScrollBar:vertical {{
                 border: none; background: transparent; width: 5px; margin: 0;
             }}

@@ -654,9 +654,11 @@ class OmniWindow(QWidget):
         if current_os_theme != self.current_theme:
             self.set_theme(current_os_theme)
             
-        # Ensure minimal size on show if in search mode
-        if not self.is_history_mode and not self.input_field.text():
+        # Ensure minimal size on show if in search mode (and NOT in settings mode)
+        if not self.is_history_mode and not self.input_field.text() and not self.is_settings_mode:
              self.resize(self.width(), 84)
+        elif self.is_settings_mode:
+             self.resize(self.width(), self._SETTINGS_HEIGHT)
              
         QTimer.singleShot(100, self.apply_blur)
         # Focus immediately and again after a short delay (Windows often needs both)
@@ -804,7 +806,11 @@ class OmniWindow(QWidget):
                     self.anim_close_group.stop()
                 self._is_closing = False
                 self.setWindowOpacity(0.0)  # Stay invisible — animate_entry will fade in
-                self.resize(DEFAULT_WIDTH, 84)
+                
+                if self.is_settings_mode:
+                    self.resize(DEFAULT_WIDTH, self._SETTINGS_HEIGHT)
+                else:
+                    self.resize(DEFAULT_WIDTH, 84)
 
             if source == "voice" and len(self.chat_history) > 0:
                 # Same chat: user said wake word again while we had a conversation — keep context for follow-up
@@ -1009,7 +1015,8 @@ class OmniWindow(QWidget):
         self.raise_()
 
     def adjust_window_height(self, animate=True, force=False):
-        # if self.is_settings_mode: return
+        if self.is_settings_mode:
+            return
 
         if not force and hasattr(self, 'is_entry_animating') and self.is_entry_animating:
             # Don't interrupt entry animation
@@ -1396,7 +1403,7 @@ class OmniWindow(QWidget):
     # Settings mode
     # ------------------------------------------------------------------
 
-    _SETTINGS_HEIGHT = 480
+    _SETTINGS_HEIGHT = 600
 
     def enter_settings_mode(self):
         if self.is_settings_mode:
