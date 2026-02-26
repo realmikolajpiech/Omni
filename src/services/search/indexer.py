@@ -155,15 +155,23 @@ def _collect_files(base_dir):
     image_files = []
 
     for root, dirs, files in os.walk(base_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+        # Filter out ignored directories
+        dirs[:] = [
+            d for d in dirs
+            if d not in IGNORE_DIRS
+            and not d.startswith(".")
+            and not any(d.lower().endswith(ext) for ext in BLOCKED_EXTENSIONS)
+        ]
         for file in files:
             if file.startswith("."):
                 continue
             if file in BLOCKED_FILENAMES:
                 continue
-            _, ext = os.path.splitext(file)
-            if ext.lower() in BLOCKED_EXTENSIONS:
+            
+            # Use endswith for multi-part extensions like .min.js or _bin.js
+            if any(file.lower().endswith(ext) for ext in BLOCKED_EXTENSIONS):
                 continue
+                
             full_path = os.path.join(root, file)
             entry = (full_path, file)
             all_files.append(entry)

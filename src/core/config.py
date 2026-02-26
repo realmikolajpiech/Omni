@@ -126,6 +126,11 @@ BLOCKED_EXTENSIONS = {
     # [MACOS/APP BUNDLES]
     ".app", ".pak", ".dat", ".nib", ".icns", ".car", ".asar", ".prof", ".hprof",
     ".lock", ".log",
+    # [XCODE/IOS/MACOS PROJECT]
+    ".xcassets", ".imageset", ".appiconset", ".launchimage", ".xcodeproj", ".xcworkspace",
+    ".playground", ".pbs", ".storyboardc",
+    # [GENERATED JS BLOBS]
+    "_bin.js", "_loader.js", ".worker.js",
 }
 
 # Files that are completely ignored (not indexed by name OR content)
@@ -137,6 +142,15 @@ BLOCKED_FILENAMES = {
     "compile.lockfile", "packages-lock.json",
     "Thumbs.db", ".DS_Store", ".env", "Desktop.ini",
     "npm-debug.log", "yarn-error.log",
+    # [GENERATED / BOILERPLATE]
+    "Contents.json", "flutter_export_environment.sh", "flutter_lldbinit", "flutter_lldb_helper.py",
+    "GeneratedPluginRegistrant.swift", "GeneratedPluginRegistrant.m", "GeneratedPluginRegistrant.h",
+    "generated_plugin_registrant.cc", "generated_plugin_registrant.h",
+    "CMakeLists.txt", "Podfile", "Podfile.lock", "pubspec.lock",
+    "gradlew", "gradlew.bat", "gradle-wrapper.properties", "local.properties", "key.properties",
+    "Podfile.properties.json", "modules.json", "project.pbxproj",
+    # [CONFIG]
+    "tsconfig.tsbuildinfo",
 }
 
 # Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).
