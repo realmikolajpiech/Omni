@@ -203,6 +203,7 @@ class OmniWindow(QWidget):
             QLineEdit:focus {
                 border: none;
                 outline: none;
+                background: transparent;
             }
         """)
         self.input_field.setFrame(False) # Important for Qt widgets to remove native frame
@@ -1149,6 +1150,11 @@ class OmniWindow(QWidget):
                         self.animate_close()
                     return True
 
+        if obj == self.input_field and event.type() == QEvent.Type.MouseButtonPress:
+            self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+            self.input_field.style().unpolish(self.input_field)
+            self.input_field.style().polish(self.input_field)
+
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
 
             if event.key() == Qt.Key.Key_Down:
@@ -1227,6 +1233,12 @@ class OmniWindow(QWidget):
                     else:
                         self.enter_history_mode()
                     return True
+                else:
+                    # In history mode, TAB also sends the follow-up if there is text
+                    query = self.input_field.text().strip()
+                    if query:
+                        self.perform_ai_query(query)
+                        return True
         return super().eventFilter(obj, event)
 
     def enter_history_mode(self):

@@ -19,7 +19,7 @@ if PROJECT_ROOT not in sys.path:
 from src.core.config import (
     DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS,
     INDEX_DONE_MARKER, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS,
-    CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS,
+    CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS, INDEX_LOG_PATH
 )
 from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
@@ -29,6 +29,18 @@ TABLE_NAME = "files"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
 CLASSIFY_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/classify_files"
 LLM_FILTER_BATCH_SIZE = 32
+
+
+def _log_indexed_file(phase: str, path: str, extra: str = ""):
+    """Append a line to the indexing log file."""
+    try:
+        with open(INDEX_LOG_PATH, "a", encoding="utf-8") as f:
+            line = f"[{phase}] {path}"
+            if extra:
+                line += f" ({extra})"
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def _wait_for_brain(timeout: int = 60) -> bool:
@@ -222,6 +234,13 @@ def main():
         sys.exit(1)
     logging.info("Brain service is up. Starting indexing.")
 
+    # Clear index log
+    try:
+        with open(INDEX_LOG_PATH, "w", encoding="utf-8") as f:
+            f.write(f"Indexing started at {time.ctime()}\n")
+    except Exception as e:
+        logging.warning(f"Could not init log file: {e}")
+
     # ── Single-pass file collection ───────────────────────────────
     logging.info(f"Scanning {HOME} for files...")
     scan_start = time.time()
@@ -268,6 +287,7 @@ def main():
 
         with ThreadPoolExecutor(max_workers=EMBED_WORKERS) as pool:
             for full_path, filename in all_files:
+                _log_indexed_file("filename", full_path)
                 current_batch.append({"filename": filename, "path": full_path})
 
                 if len(current_batch) >= BATCH_SIZE:
@@ -375,15 +395,18 @@ def main():
     for full_path, filename in text_files:
         if _static_skip(full_path, filename) or full_path in llm_skip_paths:
             skipped_content += 1
+            _log_indexed_file("content-skipped", full_path)
             continue
 
         try:
             chunks = process_file_content(full_path, chunk_size=512)
             if not chunks:
+                _log_indexed_file("content-empty", full_path)
                 continue
 
             content_files += 1
             logging.info(f"  [content] indexing: {full_path}")
+            _log_indexed_file("content", full_path)
 
             for i, chunk in enumerate(chunks):
                 if len(chunk) > 512:
@@ -525,6 +548,7 @@ def main():
         return vmodel, tbl, count
 
     for full_path, filename in image_files:
+        _log_indexed_file("image", full_path)
         img_batch.append({"filename": filename, "path": full_path})
 
         if len(img_batch) >= IMAGE_BATCH_SIZE:

@@ -285,6 +285,32 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "organize_folder",
+            "description": (
+                "Organize files in a specific folder into subfolders based on file type or date. "
+                "Use when the user asks to 'cleanup', 'organize', or 'tidy up' a folder. "
+                "It intelligently groups code files by language (e.g. Python, JS) and media by type."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The directory path to organize, e.g. '~/Desktop/personal'.",
+                    },
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["smart", "type", "date"],
+                        "description": "Strategy: 'smart' (default, groups code by language), 'type' (broad categories), 'date' (YYYY-MM).",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
@@ -330,6 +356,8 @@ def execute_tool(name: str, arguments: dict) -> str:
                 arguments.get("subject", ""),
                 arguments.get("body", "")
             )
+        elif name == "organize_folder":
+            return _tool_organize_folder(arguments.get("path", ""), arguments.get("strategy", "smart"))
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -510,3 +538,11 @@ def _tool_uninstall_app(name: str) -> str:
         return "Error: uninstall timed out."
     except Exception as e:
         return f"Error: {e}"
+
+def _tool_organize_folder(path: str, strategy: str) -> str:
+    from src.services.system.files import organize_folder
+    path = path.strip()
+    if not path:
+        return "Error: empty path."
+    logging.info(f"[tool:organize_folder] path={path!r} strategy={strategy!r}")
+    return organize_folder(path, strategy)

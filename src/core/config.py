@@ -52,6 +52,7 @@ DB_PATH = os.path.join(HOME, ".local/share/ai-memory-db")
 INDEX_DONE_MARKER = os.path.join(DB_PATH, ".indexed")
 PERSONAL_MEM_PATH = os.path.join(PROJECT_ROOT, "data", "personal.mv2")
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "omni.log")
+INDEX_LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "indexing_history.log")
 
 # Directories to skip during indexing / watching
 IGNORE_DIRS = {
