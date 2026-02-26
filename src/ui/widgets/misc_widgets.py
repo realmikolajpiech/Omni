@@ -1,6 +1,6 @@
 
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider, QPushButton)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QTextBrowser, QFrame, QListWidget, QGraphicsOpacityEffect, QFileIconProvider, QPushButton)
 from PyQt6.QtCore import (Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, 
                           QParallelAnimationGroup, pyqtProperty, QRectF, QFileInfo,
                           QThreadPool, QRunnable, QObject, pyqtSignal, QPoint)
@@ -370,7 +370,13 @@ class FollowUpWidget(QWidget):
         # Deprecated: alias for backward compatibility until refactored
         self.set_mode("followup" if active else "hidden")
 
-class UnscrollableTextEdit(QTextEdit):
+class UnscrollableTextEdit(QTextBrowser):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(True)
+        self.setOpenLinks(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+
     def wheelEvent(self, event):
         event.ignore()
 
@@ -729,6 +735,10 @@ class _BubbleInner(QWidget):
     def set_theme(self, theme):
         self.current_theme = theme
         t = THEMES.get(theme, THEMES["light"])
+        if theme == "dark":
+            link_color = "rgba(120, 190, 255, 0.95)"
+        else:
+            link_color = "rgba(30, 110, 235, 0.95)"
         if self.sender == "user":
             if theme == "dark":
                 # Frosted pill — distinct, slightly brighter than window
@@ -750,7 +760,10 @@ class _BubbleInner(QWidget):
             text_color = t["text_primary"]
 
         if self.edit is not None:
-            self.edit.setStyleSheet(f"background: transparent; color: {text_color}; line-height: 1.5;")
+            self.edit.setStyleSheet(
+                f"background: transparent; color: {text_color}; line-height: 1.5; "
+                f"a {{ color: {link_color}; text-decoration: underline; }}"
+            )
         elif self.label is not None:
             self.label.setStyleSheet(f"color: {text_color}; background: transparent;")
         if self.thinking_placeholder is not None:
@@ -993,7 +1006,14 @@ class AnswerWidget(QWidget):
             self.ai_bubble.set_theme(self.current_theme)
         else:
             text_color = t.get("text_primary", "#ffffff")
-            self.text_edit.setStyleSheet(f"background: transparent; color: {text_color};")
+            if self.current_theme == "dark":
+                link_color = "rgba(120, 190, 255, 0.95)"
+            else:
+                link_color = "rgba(30, 110, 235, 0.95)"
+            self.text_edit.setStyleSheet(
+                f"background: transparent; color: {text_color}; line-height: 1.5; "
+                f"a {{ color: {link_color}; text-decoration: underline; }}"
+            )
         if self.thinking_widget:
             self.thinking_widget.set_theme(self.current_theme)
 
@@ -1489,5 +1509,4 @@ class GradientBorderFrame(QFrame):
             painter.setOpacity(self._mode_progress)
             painter.strokePath(border_path, QPen(QBrush(grad), 3))
             painter.setOpacity(1.0)
-
 
