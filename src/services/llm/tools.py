@@ -200,6 +200,73 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_calendar_events",
+            "description": "Get upcoming calendar events from the macOS Calendar app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days to look ahead (default 3).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Create a new event in the macOS Calendar app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Title of the event."},
+                    "start_iso": {"type": "string", "description": "Start time in 'YYYY-MM-DD HH:MM:SS' format."},
+                    "duration_minutes": {"type": "integer", "description": "Duration in minutes (default 60)."},
+                    "description": {"type": "string", "description": "Description or notes for the event."},
+                },
+                "required": ["title", "start_iso"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_unread_emails",
+            "description": "Get recent unread emails from macOS Mail app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of emails to retrieve (default 5).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Draft and optionally send an email using macOS Mail app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email address."},
+                    "subject": {"type": "string", "description": "Subject line."},
+                    "body": {"type": "string", "description": "Email body content."},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "memory_delete",
             "description": (
                 "Delete or forget a specific memory about the user. "
@@ -246,6 +313,23 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _tool_install_app(arguments.get("name", ""))
         elif name == "uninstall_app":
             return _tool_uninstall_app(arguments.get("name", ""))
+        elif name == "get_calendar_events":
+            return _tool_get_calendar_events(arguments.get("days", 3))
+        elif name == "create_calendar_event":
+            return _tool_create_calendar_event(
+                arguments.get("title", ""),
+                arguments.get("start_iso", ""),
+                arguments.get("duration_minutes", 60),
+                arguments.get("description", "")
+            )
+        elif name == "get_unread_emails":
+            return _tool_get_unread_emails(arguments.get("limit", 5))
+        elif name == "send_email":
+            return _tool_send_email(
+                arguments.get("to", ""),
+                arguments.get("subject", ""),
+                arguments.get("body", "")
+            )
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -338,6 +422,40 @@ def _tool_run_terminal(command: str, description: str = "") -> str:
         return "Error: command timed out after 15 seconds."
     except Exception as e:
         return f"Error: {e}"
+
+
+def _tool_get_calendar_events(days: int) -> str:
+    from src.services.system.productivity import get_calendar_events
+    logging.info(f"[tool:get_calendar_events] days={days}")
+    return get_calendar_events(days=int(days))
+
+
+def _tool_create_calendar_event(title: str, start_iso: str, duration_minutes: int, description: str) -> str:
+    from src.services.system.productivity import create_calendar_event
+    title = title.strip()
+    start_iso = start_iso.strip()
+    if not title or not start_iso:
+        return "Error: title and start_iso are required."
+    logging.info(f"[tool:create_calendar_event] title={title!r} start={start_iso}")
+    return create_calendar_event(title, start_iso, int(duration_minutes), description)
+
+
+def _tool_get_unread_emails(limit: int) -> str:
+    from src.services.system.productivity import get_unread_emails
+    logging.info(f"[tool:get_unread_emails] limit={limit}")
+    return get_unread_emails(limit=int(limit))
+
+
+def _tool_send_email(to: str, subject: str, body: str) -> str:
+    from src.services.system.productivity import send_email
+    to = to.strip()
+    subject = subject.strip()
+    body = body.strip()
+    if not to or not subject:
+        return "Error: to and subject are required."
+    logging.info(f"[tool:send_email] to={to!r} subject={subject!r}")
+    return send_email(to, subject, body)
+
 
 
 def _find_brew() -> str | None:

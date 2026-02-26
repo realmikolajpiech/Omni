@@ -194,9 +194,11 @@ class OmniWindow(QWidget):
         # Force no border/outline via style sheet and properties to kill blue ring
         self.input_field.setStyleSheet("""
             QLineEdit {
-                border: none;
+                border: 0px solid transparent;
                 outline: none;
                 background: transparent;
+                margin: 0px;
+                padding: 0px;
             }
             QLineEdit:focus {
                 border: none;
@@ -676,8 +678,15 @@ class OmniWindow(QWidget):
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
             except Exception as e:
                 logging.debug(f"SetForegroundWindow failed: {e}")
+        
+        # Aggressively kill the blue focus ring
         self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.input_field.setFocus()
+        
+        # Re-polish to ensure stylesheet is applied cleanly
+        self.input_field.style().unpolish(self.input_field)
+        self.input_field.style().polish(self.input_field)
+        self.input_field.update()
         
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -765,9 +774,25 @@ class OmniWindow(QWidget):
                 # Maybe flash the logo or UI to acknowledge?
                 self.logo_label.boost_speed()
             else:
-                # Manual toggle (hotkey/tray) — always close, preserve state for reopen
-                self._closed_by_deactivation = False
-                self.animate_close()
+                # Manual toggle (hotkey/tray)
+                # If window is visible but not focused (e.g. user clicked away or another app stole focus),
+                # bring it to front and focus it instead of closing.
+                if self.isActiveWindow():
+                    self._closed_by_deactivation = False
+                    self.animate_close()
+                else:
+                    logging.info("Window visible but not active - activating")
+                    self.activateWindow()
+                    self.raise_()
+                    
+                    # Force focus and re-apply no-focus-rect attribute
+                    self.input_field.setFocus()
+                    self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+                    
+                    # Force style re-polish to ensure no blue border
+                    self.input_field.style().unpolish(self.input_field)
+                    self.input_field.style().polish(self.input_field)
+                    self.input_field.update()
         else:
             # Window was hidden — show it.
             # If a close animation is still in progress, abort it and reopen immediately
@@ -818,7 +843,14 @@ class OmniWindow(QWidget):
                         self.logo_label.boost_speed()
                     self.adjust_window_height(animate=False, force=True)
                 self.animate_entry()
+                
+                # Force focus and styling again in the SHOW path to catch the "Blue Border"
                 self.input_field.setFocus()
+                self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+                self.input_field.style().unpolish(self.input_field)
+                self.input_field.style().polish(self.input_field)
+                self.input_field.update()
+                
                 if source == "voice":
                     self.send_udp_command("SET_MODE:LISTENING")
                     self.mic_widget.set_active(True)
@@ -965,7 +997,12 @@ class OmniWindow(QWidget):
         self.anim_group.addAnimation(anim_opa)
         self.anim_group.start()
         
+        # Ensure focus is set correctly and border suppressed during entry
         self.input_field.setFocus()
+        self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        # Re-polish just in case
+        self.input_field.style().unpolish(self.input_field)
+        self.input_field.style().polish(self.input_field)
         self.activateWindow()
         self.raise_()
 
@@ -1042,7 +1079,12 @@ class OmniWindow(QWidget):
     def on_deactivate(self):
         # Called when window loses focus
         # On macOS, clicking outside the window (e.g. on desktop) triggers this.
-        # We want to close the window, but ensure we switch back to IDLE mode.
+        
+        # If we are in the middle of executing an action (like a tool call that opens a popup),
+        # we should NOT auto-close.
+        if self.action_worker and self.action_worker.isRunning():
+            logging.info("Window deactivated but action worker is running - keeping window open.")
+            return
 
         # In conversation/follow-up mode keep the window alive so the user can
         # read, copy, and interact with responses. The shortcut still closes it.
@@ -1059,10 +1101,20 @@ class OmniWindow(QWidget):
              logging.info("Window deactivated but TTS is playing - keeping window open.")
              return
              
-        # Prevent closing if AI is thinking
-        if self.ai_worker and self.ai_worker.isRunning():
-             logging.info("Window deactivated but AI is thinking - keeping window open.")
-             return
+        # Prevent closing if AI is thinking - UNLESS we are opening a tool window
+        # The user wants Omni to close if a tool (like Calendar/Mail) pops up, so we can focus on it.
+        # But we don't know easily if a tool pop up is happening here.
+        # However, if the user explicitly switches focus (clicks away), we should close.
+        # The "AI thinking" check prevents this.
+        # Let's relax it: if AI is running, we usually stay open to show the stream.
+        # BUT if the OS focus changes, it means the user is doing something else.
+        # If we keep it open, it stays on top (WindowStaysOnTopHint) and obscures the new window.
+        # So we SHOULD close it on deactivate, even if AI is running.
+        # Exception: Voice/TTS (handled above).
+        
+        # if self.ai_worker and self.ai_worker.isRunning():
+        #      logging.info("Window deactivated but AI is thinking - keeping window open.")
+        #      return
 
         # Prevent closing if screenshot worker is running
         if hasattr(self, 'screenshot_worker') and self.screenshot_worker and self.screenshot_worker.isRunning():
@@ -2673,7 +2725,7 @@ class OmniWindow(QWidget):
             answer_widget = AnswerWidget("", query_text=current_query, chat_mode=False)
             self._streaming_answer_widget = answer_widget
 
-            if thinking:
+            if thinking and thinking.strip():
                 answer_widget.ensure_thinking_widget()
                 answer_widget.update_thinking(thinking)
                 answer_widget.set_thinking_collapsed(False)
@@ -2684,7 +2736,7 @@ class OmniWindow(QWidget):
                 self.add_list_item(answer_widget, "answer")
         else:
             # Update existing: stream thinking in collapsible, answer in main
-            if thinking:
+            if thinking and thinking.strip():
                 answer_widget.ensure_thinking_widget()
                 answer_widget.update_thinking(thinking)
 
