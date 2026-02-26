@@ -81,6 +81,12 @@ IGNORE_DIRS = {
     "Library", "Temp", "Obj", "Logs", "MemoryCaptures",
     # Flutter/Dart
     "flutter", ".fvm",
+    # macOS App Bundle internals (to avoid indexing inside .app)
+    "Contents", "Frameworks", "MacOS", "Plugins", "Resources", "XPC Services",
+    # Android / iOS / Mobile Assets
+    "res", "flutter_assets", "xcassets", "lproj",
+    # Gradle
+    "gradle",
 }
 
 # File extensions that are purely internal / developer noise
@@ -115,7 +121,22 @@ BLOCKED_EXTENSIONS = {
     ".asset", ".dwlt", ".index", ".shader", ".shadergraph", ".cginc", ".hlsl",
     
     # [JAVA/ANDROID BUILD]
-    ".aar", ".pom", ".bundle", ".iml", ".manifest"
+    ".aar", ".pom", ".bundle", ".iml", ".manifest",
+
+    # [MACOS/APP BUNDLES]
+    ".app", ".pak", ".dat", ".nib", ".icns", ".car", ".asar", ".prof", ".hprof",
+    ".lock", ".log",
+}
+
+# Files that are completely ignored (not indexed by name OR content)
+BLOCKED_FILENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Podfile.lock", "Gemfile.lock", "composer.lock",
+    "poetry.lock", "Cargo.lock", "flake.lock",
+    "pubspec.lock", "project-app.lockfile", "buildscript-gradle.lockfile",
+    "compile.lockfile", "packages-lock.json",
+    "Thumbs.db", ".DS_Store", ".env", "Desktop.ini",
+    "npm-debug.log", "yarn-error.log",
 }
 
 # Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).

@@ -19,7 +19,8 @@ if PROJECT_ROOT not in sys.path:
 from src.core.config import (
     DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS,
     INDEX_DONE_MARKER, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS,
-    CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS, INDEX_LOG_PATH
+    CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS, INDEX_LOG_PATH,
+    BLOCKED_FILENAMES
 )
 from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
@@ -157,6 +158,8 @@ def _collect_files(base_dir):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
         for file in files:
             if file.startswith("."):
+                continue
+            if file in BLOCKED_FILENAMES:
                 continue
             _, ext = os.path.splitext(file)
             if ext.lower() in BLOCKED_EXTENSIONS:
