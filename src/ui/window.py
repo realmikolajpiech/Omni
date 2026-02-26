@@ -1872,93 +1872,95 @@ class OmniWindow(QWidget):
         return str(data)
 
     def sync_list_items(self, new_items_data):
-        # 1. Index existing items
-        existing = {} 
-        
-        # Snapshot current state
-        # We iterate backwards to safely identify removals, 
-        # but for indexing we can just walk once.
-        # However, multiple items might have same key? (Shouldn't happen with our logic)
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
-            if key:
-                existing[key] = item
-
-        # 2. Remove items not in new list
-        new_keys = set(k for k, _, _ in new_items_data)
-        
-        for i in range(self.list_widget.count() - 1, -1, -1):
-            item = self.list_widget.item(i)
-            key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
-            if key not in new_keys:
-                self.list_widget.takeItem(i)
-
-        # 3. Align items with new order
-        for i, (key, data, factory) in enumerate(new_items_data):
-            # Check item at current position i
-            current_item = self.list_widget.item(i)
-            current_key = self.get_item_key(current_item.data(Qt.ItemDataRole.UserRole)) if current_item else None
+        # Block signals to prevent selection jumping/flickering during updates
+        self.list_widget.blockSignals(True)
+        try:
+            # 1. Index existing items
+            existing = {} 
             
-            if current_key == key:
-                # MATCH: Update content if needed
-                widget_container = self.list_widget.itemWidget(current_item)
-                if isinstance(widget_container, SmoothEntryWidget):
-                    real_widget = widget_container.content_widget
-                    if hasattr(real_widget, 'set_text'):
-                        # Specific logic for Ask Omni text update
-                        if key == "ask_omni":
-                            real_widget.set_text(f"Ask Omni: {data['query']}")
-                        # Apps usually don't change text
-                    elif hasattr(real_widget, 'update_content'):
-                        real_widget.update_content(data)
-                
-                # Update data just in case
-                current_item.setData(Qt.ItemDataRole.UserRole, data)
-                
+            # Snapshot current state
+            # We iterate backwards to safely identify removals, 
+            # but for indexing we can just walk once.
+            # However, multiple items might have same key? (Shouldn't happen with our logic)
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
+                if key:
+                    existing[key] = item
 
+            # 2. Remove items not in new list
+            new_keys = set(k for k, _, _ in new_items_data)
+            
+            for i in range(self.list_widget.count() - 1, -1, -1):
+                item = self.list_widget.item(i)
+                key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
+                if key not in new_keys:
+                    self.list_widget.takeItem(i)
 
+            # 3. Align items with new order
+            for i, (key, data, factory) in enumerate(new_items_data):
+                # Check item at current position i
+                current_item = self.list_widget.item(i)
+                current_key = self.get_item_key(current_item.data(Qt.ItemDataRole.UserRole)) if current_item else None
                 
-            else:
-                # MISMATCH
-                if key in existing:
-                    # Exists elsewhere: Move it here (Slide effect by skipping animation)
-                    old_item = existing[key]
-                    row = self.list_widget.row(old_item)
-                    self.list_widget.takeItem(row) # Remove from old pos
+                if current_key == key:
+                    # MATCH: Update content if needed
+                    widget_container = self.list_widget.itemWidget(current_item)
+                    if isinstance(widget_container, SmoothEntryWidget):
+                        real_widget = widget_container.content_widget
+                        if hasattr(real_widget, 'set_text'):
+                            # Specific logic for Ask Omni text update
+                            if key == "ask_omni":
+                                real_widget.set_text(f"Ask Omni: {data['query']}")
+                            # Apps usually don't change text
+                        elif hasattr(real_widget, 'update_content'):
+                            real_widget.update_content(data)
                     
-                    # Re-insert at i
-                    new_item = QListWidgetItem()
-                    widget = factory() # Recreate widget
-                    if hasattr(widget, 'set_theme'):
-                        widget.set_theme(self.current_theme)
-                    new_item.setSizeHint(widget.sizeHint())
-                    new_item.setData(Qt.ItemDataRole.UserRole, data)
-                    
-
-                    
-                    self.list_widget.insertItem(i, new_item)
-                    
-                    # Wrap with NO animation
-                    anim_w = SmoothEntryWidget(widget, animate=False)
-                    self.list_widget.setItemWidget(new_item, anim_w)
-                    
-                    # Update map for future lookups in this loop?
-                    # No need, we are linear scan.
+                    # Update data just in case
+                    current_item.setData(Qt.ItemDataRole.UserRole, data)
                     
                 else:
-                    # New Item: Insert with Animation
-                    new_item = QListWidgetItem()
-                    widget = factory()
-                    if hasattr(widget, 'set_theme'):
-                        widget.set_theme(self.current_theme)
-                    new_item.setSizeHint(widget.sizeHint())
-                    new_item.setData(Qt.ItemDataRole.UserRole, data)
-                    
-                    self.list_widget.insertItem(i, new_item)
-                    
-                    anim_w = SmoothEntryWidget(widget, animate=True)
-                    self.list_widget.setItemWidget(new_item, anim_w)
+                    # MISMATCH
+                    if key in existing:
+                        # Exists elsewhere: Move it here (Slide effect by skipping animation)
+                        old_item = existing[key]
+                        row = self.list_widget.row(old_item)
+                        self.list_widget.takeItem(row) # Remove from old pos
+                        
+                        # Re-insert at i
+                        new_item = QListWidgetItem()
+                        widget = factory() # Recreate widget
+                        if hasattr(widget, 'set_theme'):
+                            widget.set_theme(self.current_theme)
+                        new_item.setSizeHint(widget.sizeHint())
+                        new_item.setData(Qt.ItemDataRole.UserRole, data)
+                        
+                        self.list_widget.insertItem(i, new_item)
+                        
+                        # Wrap with NO animation
+                        anim_w = SmoothEntryWidget(widget, animate=False)
+                        self.list_widget.setItemWidget(new_item, anim_w)
+                        
+                    else:
+                        # New Item: Insert with Animation
+                        new_item = QListWidgetItem()
+                        widget = factory()
+                        if hasattr(widget, 'set_theme'):
+                            widget.set_theme(self.current_theme)
+                        new_item.setSizeHint(widget.sizeHint())
+                        new_item.setData(Qt.ItemDataRole.UserRole, data)
+                        
+                        self.list_widget.insertItem(i, new_item)
+                        
+                        anim_w = SmoothEntryWidget(widget, animate=True)
+                        self.list_widget.setItemWidget(new_item, anim_w)
+
+            # Always select the first item if there's a selection available
+            if self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(0)
+                
+        finally:
+            self.list_widget.blockSignals(False)
 
     def add_list_item(self, widget, data, animation="fade"):
         if hasattr(widget, 'set_theme'):
