@@ -203,250 +203,779 @@ class LinkActionWidget(QWidget):
 
 class SettingsActionWidget(QWidget):
     """
-    Inline action widget for system settings changes.
-    Visual style adapts to setting type:
-      - circular  : brightness (arc progress + sun icon)
-      - bar       : volume / mute (fill bar + speaker icon)
-      - toggle    : all boolean settings (animated pill switch)
+    Compact confirmation card for a system setting change.
+    Fixed height = 72 px → reliable sizeHint, no layout surprises.
+
+    Layout:  [icon square 42×42]  [name / status text]  [animated indicator]
+    Visual types:
+      toggle   – bool settings  (animated pill switch)
+      bar      – volume         (fill bar + speaker icon)
+      circular – brightness     (arc progress + sun icon)
     """
 
-    _CIRCULAR_SETTINGS = {"brightness"}
-    _BAR_SETTINGS = {"volume"}
+    _CIRCULAR = {"brightness"}
+    _BAR      = {"volume"}
+    _H        = 72  # fixed card height
 
     def __init__(self, setting, value, label, unit, color_hex, icon_name, success, parent=None):
         super().__init__(parent)
-        self.setting = setting
-        self.value = value
-        self.label_text = label
-        self.unit = unit
         from PyQt6.QtGui import QColor
-        self.color = QColor(color_hex)
-        self.icon_name = icon_name
-        self.success = success
+        self.setting    = setting
+        self.value      = value
+        self.label_text = label
+        self.unit       = unit
+        self.accent     = QColor(color_hex) if color_hex else QColor("#5B8DEF")
+        self.icon_name  = icon_name
+        self.success    = success
+        self.current_theme = "light"
+        self._av        = 0.0  # animated value 0.0 → 1.0
 
         self.is_numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-        self.bool_on = value if isinstance(value, bool) else True
+        self.bool_on    = value if isinstance(value, bool) else True
 
-        self._anim_value = 0.0
-        self.current_theme = "light"
+        if   setting in self._CIRCULAR: self.visual_type = "circular"
+        elif setting in self._BAR:      self.visual_type = "bar"
+        else:                           self.visual_type = "toggle"
 
-        if setting in self._CIRCULAR_SETTINGS:
-            self.visual_type = "circular"
-        elif setting in self._BAR_SETTINGS:
-            self.visual_type = "bar"
-        else:
-            self.visual_type = "toggle"
+        self._build()
+        self._animate()
 
-        self.setup_ui()
-        self.start_animation()
+    # ────────────────────────────── UI build ──────────────────────────────────
 
-    def setup_ui(self):
-        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel
+    def _build(self):
+        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QFrame
         from PyQt6.QtGui import QFont
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
 
-        self.card = QWidget()
-        self.card.setObjectName("ActionCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 4)
 
-        card_layout = QHBoxLayout(self.card)
-        card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(16)
+        self.card = QFrame()
+        self.card.setObjectName("SettingsCard")
+        self.card.setFixedHeight(self._H)
 
-        self.anim_widget = QWidget()
-        if self.visual_type == "toggle":
-            self.anim_widget.setFixedSize(58, 32)
-        else:
-            self.anim_widget.setFixedSize(48, 48)
-        self.anim_widget.paintEvent = self.paint_anim_widget
+        row = QHBoxLayout(self.card)
+        row.setContentsMargins(14, 0, 14, 0)
+        row.setSpacing(14)
 
-        text_layout = QVBoxLayout()
-        text_layout.setSpacing(2)
-        text_layout.setContentsMargins(0, 2, 0, 2)
+        # ── left: coloured icon square ──────────────────────────────────────
+        parent_ref = self
 
-        status_text = "OK" if self.success else "Failed"
-        self.top_label = QLabel(f"SETTING • {status_text}")
-        self.top_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-        self.top_label.setStyleSheet("color: #888888; letter-spacing: 0.5px;")
+        class _IconBox(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.setFixedSize(42, 42)
+            def paintEvent(self, _e):
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                parent_ref._draw_icon_box(p, self.width(), self.height())
+                p.end()
+
+        self.icon_box = _IconBox()
+
+        # ── centre: name + status ──────────────────────────────────────────
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+
+        self.name_lbl = QLabel(self.label_text)
+        self.name_lbl.setFont(QFont("Instrument Serif", 17))
 
         if self.is_numeric:
-            label_html = f"<b>{self.label_text}</b>: {self.value}{self.unit}"
+            status_str = f"{self.value}{self.unit}"
+        elif not self.success:
+            status_str = "Failed"
         else:
-            label_html = f"<b>{self.label_text}</b>"
+            status_str = "Enabled" if self.bool_on else "Disabled"
 
-        self.main_label = QLabel(label_html)
-        self.main_label.setWordWrap(True)
-        self.main_label.setFont(QFont("Instrument Serif", 18, QFont.Weight.Normal))
-        self.main_label.setStyleSheet("color: #050505; margin-top: 0px;")
-        self.main_label.setTextFormat(Qt.TextFormat.RichText)
+        self.status_lbl = QLabel(status_str)
+        self.status_lbl.setFont(QFont("Manrope", 10))
 
-        text_layout.addWidget(self.top_label)
-        text_layout.addWidget(self.main_label)
-        text_layout.addStretch()
+        col.addStretch()
+        col.addWidget(self.name_lbl)
+        col.addWidget(self.status_lbl)
+        col.addStretch()
 
-        card_layout.addWidget(self.anim_widget, 0, Qt.AlignmentFlag.AlignVCenter)
-        card_layout.addLayout(text_layout)
-        card_layout.addStretch()
+        # ── right: animated indicator ───────────────────────────────────────
+        class _Indicator(QWidget):
+            def __init__(self):
+                super().__init__()
+            def paintEvent(self, _e):
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                parent_ref._draw_indicator(p, self.width(), self.height())
+                p.end()
 
-        layout.addWidget(self.card)
-        self.update_style()
+        self.indicator = _Indicator()
+        if self.visual_type == "toggle":
+            self.indicator.setFixedSize(52, 30)
+        else:
+            self.indicator.setFixedSize(42, 42)
+
+        row.addWidget(self.icon_box,  0, Qt.AlignmentFlag.AlignVCenter)
+        row.addLayout(col, 1)
+        row.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        outer.addWidget(self.card)
+        self._apply_style()
+
+    # ────────────────────────────── theming ───────────────────────────────────
 
     def set_theme(self, theme):
         self.current_theme = theme
-        self.update_style()
+        self._apply_style()
 
-    def update_style(self):
+    def _apply_style(self):
         is_dark = self.current_theme == "dark"
-        title_color = "#FFFFFF" if is_dark else "#050505"
-        action_color = "#AAAAAA" if is_dark else "#888888"
+        r, g, b = self.accent.red(), self.accent.green(), self.accent.blue()
 
-        self.card.setStyleSheet("QWidget#ActionCard { background-color: transparent; border: none; }")
-        self.main_label.setStyleSheet(f"color: {title_color}; margin-top: 0px;")
-        self.top_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
-        self.anim_widget.update()
-
-    def _get_arc(self): return self._anim_value
-    def _set_arc(self, v):
-        self._anim_value = v
-        self.anim_widget.update()
-
-    from PyQt6.QtCore import pyqtProperty
-    arcValue = pyqtProperty(float, _get_arc, _set_arc)
-
-    def start_animation(self):
-        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
-        self.anim = QPropertyAnimation(self, b"arcValue", self)
-        self.anim.setDuration(650)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        if self.is_numeric:
-            self.anim.setStartValue(0.0)
-            self.anim.setEndValue(float(self.value) / 100.0)
-        elif self.bool_on:
-            self.anim.setStartValue(0.0)
-            self.anim.setEndValue(1.0)
+        if is_dark:
+            bg     = f"qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba({r},{g},{b},0.16), stop:1 rgba(255,255,255,0.04))"
+            border = f"rgba({r},{g},{b},0.28)"
+            nc     = "#FFFFFF"
+            sc     = "rgba(255,255,255,0.50)"
         else:
-            self.anim.setStartValue(1.0)
-            self.anim.setEndValue(0.0)
+            bg     = f"qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba({r},{g},{b},0.09), stop:1 rgba(255,255,255,0.55))"
+            border = f"rgba({r},{g},{b},0.22)"
+            nc     = "#111111"
+            sc     = "rgba(0,0,0,0.42)"
 
-        self.anim.start()
+        self.card.setStyleSheet(f"""
+            QFrame#SettingsCard {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 18px;
+            }}
+        """)
+        self.name_lbl.setStyleSheet(f"color: {nc}; background: transparent;")
+        self.status_lbl.setStyleSheet(f"color: {sc}; background: transparent;")
+        self.icon_box.update()
+        self.indicator.update()
 
-    def paint_anim_widget(self, event):
-        from PyQt6.QtGui import QPainter
-        w = self.anim_widget
-        p = QPainter(w)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        is_dark = self.current_theme == "dark"
+    # ─────────────────────────── custom painting ──────────────────────────────
 
-        if self.visual_type == "toggle":
-            self._paint_toggle(p, w, is_dark)
-        elif self.visual_type == "bar":
-            self._paint_bar(p, w, is_dark)
-        else:
-            self._paint_circular(p, w, is_dark)
-
-        p.end()
-
-    def _paint_toggle(self, p, w, is_dark):
+    def _draw_icon_box(self, p, w, h):
         from PyQt6.QtGui import QBrush, QColor, QPainterPath
-        from PyQt6.QtCore import Qt, QRectF, QPointF
-
-        W, H = float(w.width()), float(w.height())
-        pad = 1.5
-        pill_w = W - pad * 2
-        pill_h = H - pad * 2
-        radius = pill_h / 2
-
-        t = self._anim_value
-        # Interpolate track: gray (off) → setting color (on)
-        gray = (150, 152, 158)
-        cr = int(gray[0] + (self.color.red()   - gray[0]) * t)
-        cg = int(gray[1] + (self.color.green() - gray[1]) * t)
-        cb = int(gray[2] + (self.color.blue()  - gray[2]) * t)
-        track_color = QColor(max(0, min(255, cr)), max(0, min(255, cg)), max(0, min(255, cb)), 210)
-
+        from PyQt6.QtCore import QRectF
+        # Rounded-square background filled with accent colour
+        c = QColor(self.accent.red(), self.accent.green(), self.accent.blue(), 210)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(track_color))
-        pill = QPainterPath()
-        pill.addRoundedRect(QRectF(pad, pad, pill_w, pill_h), radius, radius)
-        p.drawPath(pill)
-
-        # Thumb
-        margin = 3.0
-        thumb_r = radius - margin
-        x_off = pad + margin + thumb_r
-        x_on  = pad + pill_w - margin - thumb_r
-        thumb_x = x_off + (x_on - x_off) * t
-        thumb_y = H / 2.0
-
-        # Drop shadow
-        p.setBrush(QBrush(QColor(0, 0, 0, 40)))
-        p.drawEllipse(QPointF(thumb_x, thumb_y + 1.5), thumb_r, thumb_r)
-        # White thumb
-        p.setBrush(QBrush(QColor(255, 255, 255, 245)))
-        p.drawEllipse(QPointF(thumb_x, thumb_y), thumb_r, thumb_r)
-
-    def _paint_bar(self, p, w, is_dark):
-        from PyQt6.QtGui import QBrush, QColor, QPainterPath
-        from PyQt6.QtCore import Qt, QRectF
-
-        W, H = float(w.width()), float(w.height())
-
-        # Speaker icon (upper 40%)
-        try:
-            from src.services.system.macos_settings import draw_volume
-            icon_color = self.color if self.setting != "mute" else QColor("#FF453A")
-            draw_volume(p, W / 2, H * 0.30, 8.5, icon_color)
-        except Exception:
-            pass
-
-        # Fill bar (lower 45%)
-        bar_h = 9.0
-        bar_pad = 5.0
-        bar_y = H * 0.62
-        bar_x = bar_pad
-        bar_w = W - bar_pad * 2
-
-        track_color = QColor(255, 255, 255, 22) if is_dark else QColor(0, 0, 0, 16)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(track_color))
-        track = QPainterPath()
-        track.addRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), bar_h / 2, bar_h / 2)
-        p.drawPath(track)
-
-        fill_w = bar_w * self._anim_value
-        if fill_w >= bar_h:
-            fill_color = self.color
-            p.setBrush(QBrush(fill_color))
-            fill = QPainterPath()
-            fill.addRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), bar_h / 2, bar_h / 2)
-            p.drawPath(fill)
-
-    def _paint_circular(self, p, w, is_dark):
-        from PyQt6.QtGui import QPen, QColor
-        from PyQt6.QtCore import Qt, QRectF
-
-        W, H = w.width(), w.height()
-        rect = QRectF(3, 3, W - 6, H - 6)
-        cx, cy = rect.center().x(), rect.center().y()
-
-        # Track ring
-        track_color = QColor(255, 255, 255, 20) if is_dark else QColor(0, 0, 0, 15)
-        p.setPen(QPen(track_color, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(rect, 225 * 16, -270 * 16)
-
-        # Progress arc
-        if self._anim_value > 0:
-            p.setPen(QPen(self.color, 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawArc(rect, 225 * 16, int(-270 * 16 * self._anim_value))
-
-        # Icon in centre
+        p.setBrush(QBrush(c))
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(1, 1, w - 2, h - 2), 11, 11)
+        p.drawPath(path)
+        # White icon on top
         try:
             from src.services.system.macos_settings import _ICON_DRAW_FNS, draw_brightness
-            draw_fn = _ICON_DRAW_FNS.get(self.icon_name) or draw_brightness
-            draw_fn(p, cx, cy, 10, self.color)
+            fn = _ICON_DRAW_FNS.get(self.icon_name) or draw_brightness
+            from PyQt6.QtGui import QColor as _QC
+            fn(p, w / 2, h / 2, 9, _QC(255, 255, 255, 230))
         except Exception:
             pass
+
+    def _draw_indicator(self, p, w, h):
+        is_dark = self.current_theme == "dark"
+        if   self.visual_type == "toggle":   self._draw_toggle(p, w, h)
+        elif self.visual_type == "bar":      self._draw_bar(p, w, h, is_dark)
+        else:                                self._draw_arc(p, w, h, is_dark)
+
+    def _draw_toggle(self, p, w, h):
+        from PyQt6.QtGui import QBrush, QColor, QPainterPath
+        from PyQt6.QtCore import QRectF, QPointF
+        t     = self._av
+        pad   = 1.5
+        radius = (h - pad * 2) / 2
+
+        # track colour: grey → accent
+        gray = (155, 158, 165)
+        rc = int(gray[0] + (self.accent.red()   - gray[0]) * t)
+        gc = int(gray[1] + (self.accent.green() - gray[1]) * t)
+        bc = int(gray[2] + (self.accent.blue()  - gray[2]) * t)
+        track = QColor(max(0, min(255, rc)), max(0, min(255, gc)), max(0, min(255, bc)), 220)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(track))
+        pill = QPainterPath()
+        pill.addRoundedRect(QRectF(pad, pad, w - pad * 2, h - pad * 2), radius, radius)
+        p.drawPath(pill)
+
+        # thumb
+        m      = 3.0
+        tr     = radius - m
+        x_off  = pad + m + tr
+        x_on   = pad + (w - pad * 2) - m - tr
+        tx     = x_off + (x_on - x_off) * t
+        ty     = h / 2.0
+        p.setBrush(QBrush(QColor(0, 0, 0, 35)))
+        p.drawEllipse(QPointF(tx, ty + 1.2), tr, tr)   # shadow
+        p.setBrush(QBrush(QColor(255, 255, 255, 248)))
+        p.drawEllipse(QPointF(tx, ty), tr, tr)
+
+    def _draw_bar(self, p, w, h, is_dark):
+        from PyQt6.QtGui import QBrush, QColor, QPainterPath
+        from PyQt6.QtCore import QRectF
+        try:
+            from src.services.system.macos_settings import draw_volume
+            draw_volume(p, w / 2, h * 0.30, 8, self.accent)
+        except Exception:
+            pass
+        bar_h  = 8.0;  pad = 4.0
+        bar_y  = h * 0.64;  bar_w = w - pad * 2
+        track  = QColor(255, 255, 255, 20) if is_dark else QColor(0, 0, 0, 14)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(track))
+        tp = QPainterPath()
+        tp.addRoundedRect(QRectF(pad, bar_y, bar_w, bar_h), bar_h / 2, bar_h / 2)
+        p.drawPath(tp)
+        fw = bar_w * self._av
+        if fw >= bar_h:
+            p.setBrush(QBrush(self.accent))
+            fp = QPainterPath()
+            fp.addRoundedRect(QRectF(pad, bar_y, fw, bar_h), bar_h / 2, bar_h / 2)
+            p.drawPath(fp)
+
+    def _draw_arc(self, p, w, h, is_dark):
+        from PyQt6.QtGui import QPen, QColor
+        from PyQt6.QtCore import QRectF
+        rect = QRectF(3, 3, w - 6, h - 6)
+        track = QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 12)
+        p.setPen(QPen(track, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, 225 * 16, -270 * 16)
+        if self._av > 0:
+            p.setPen(QPen(self.accent, 4.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(rect, 225 * 16, int(-270 * 16 * self._av))
+        try:
+            from src.services.system.macos_settings import _ICON_DRAW_FNS, draw_brightness
+            fn = _ICON_DRAW_FNS.get(self.icon_name) or draw_brightness
+            cx, cy = rect.center().x(), rect.center().y()
+            fn(p, cx, cy, 9, self.accent)
+        except Exception:
+            pass
+
+    # ────────────────────────────── animation ─────────────────────────────────
+
+    def _get_av(self): return self._av
+    def _set_av(self, v):
+        self._av = v
+        self.indicator.update()
+
+    from PyQt6.QtCore import pyqtProperty
+    animValue = pyqtProperty(float, _get_av, _set_av)
+
+    def _animate(self):
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        self._pa = QPropertyAnimation(self, b"animValue", self)
+        self._pa.setDuration(650)
+        self._pa.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if self.is_numeric:
+            self._pa.setStartValue(0.0)
+            self._pa.setEndValue(float(self.value) / 100.0)
+        elif self.bool_on:
+            self._pa.setStartValue(0.0)
+            self._pa.setEndValue(1.0)
+        else:
+            self._pa.setStartValue(1.0)
+            self._pa.setEndValue(0.0)
+        self._pa.start()
+
+    # ──────────────────────────────── size ────────────────────────────────────
+
+    def sizeHint(self):
+        return QSize(660, self._H + 4)
+
+
+class SettingsAnimationWidget(QWidget):
+    """
+    Compact, borderless animated confirmation for system setting changes.
+    Designed to live INSIDE an AI response bubble (appended below the text).
+
+    Layout:  ── separator ──
+             [52×52 canvas]  [Name label]
+                             [Status label]
+
+    The 52×52 canvas draws the icon-specific animation:
+      dark_mode  → sun ↔ moon morph with stars
+      brightness → sun with rays proportional to level
+      volume     → speaker with growing wave arcs
+      mute       → speaker + X drawing in / fading out
+      wifi       → arcs drawing in sequentially
+      bluetooth  → bluetooth symbol + pulse rings
+      dnd        → moon + stars
+      generic    → animated checkmark
+    """
+    _H = 68   # compact height for use inside a bubble
+
+    def __init__(self, setting, value, label, unit, color_hex, icon_name, success, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtGui import QColor
+        self.setting    = setting
+        self.value      = value
+        self.label_text = label
+        self.unit       = unit
+        self.icon_name  = icon_name
+        self.success    = success
+        self.current_theme = "light"
+        self._av          = 0.0
+        self._opacity     = 1.0   # always fully opaque; animation handles icon only
+        self._anim_started = False
+        self.is_numeric   = isinstance(value, (int, float)) and not isinstance(value, bool)
+        self.bool_on      = value if isinstance(value, bool) else True
+
+        s = (setting  or "").lower()
+        n = (icon_name or "").lower()
+        if   "dark"      in s or n == "moon":               self.anim_type = "dark_mode"
+        elif "bright"    in s or n == "brightness":          self.anim_type = "brightness"
+        elif "mute"      in s:                               self.anim_type = "mute"
+        elif "volume"    in s or n == "volume":              self.anim_type = "volume"
+        elif "wifi"      in s or "wi-fi" in s or n == "wifi": self.anim_type = "wifi"
+        elif "bluetooth" in s or n == "bluetooth":           self.anim_type = "bluetooth"
+        elif "dnd"       in s or "disturb" in s or n == "dnd": self.anim_type = "dnd"
+        elif "night"     in s:                               self.anim_type = "night_shift"
+        else:                                                self.anim_type = "generic"
+
+        self.accent = self._semantic_color()
+        self._build()
+
+    # ── accent color ──────────────────────────────────────────────────────────
+
+    def _semantic_color(self):
+        from PyQt6.QtGui import QColor
+        at = self.anim_type
+        if at == "dark_mode":   return QColor("#8A8FE0") if self.bool_on else QColor("#F5C842")
+        if at == "brightness":  return QColor("#F5A623")
+        if at == "volume":      return QColor("#4BD37B")
+        if at == "mute":        return QColor("#E05252") if self.bool_on else QColor("#4BD37B")
+        if at == "wifi":        return QColor("#3A9BD5") if self.bool_on else QColor("#888888")
+        if at == "bluetooth":   return QColor("#4A90D9") if self.bool_on else QColor("#888888")
+        if at == "dnd":         return QColor("#A070E0")
+        if at == "night_shift": return QColor("#F5826E")
+        return QColor("#5B8DEF")
+
+    # ── layout ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel
+        from PyQt6.QtGui import QFont
+        self_ref = self
+
+        # 56×56 transparent canvas — icon floats directly, no container
+        _CS = 56
+
+        class _Canvas(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.setFixedSize(_CS, _CS)
+                self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                self.setAutoFillBackground(False)
+
+            def paintEvent(self, _e):
+                from PyQt6.QtGui import QPainter, QPixmap
+                dpr = self.devicePixelRatio()
+                pm  = QPixmap(int(_CS * dpr), int(_CS * dpr))
+                pm.setDevicePixelRatio(dpr)
+                pm.fill(Qt.GlobalColor.transparent)
+                p2  = QPainter(pm)
+                p2.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self_ref._paint(p2, _CS, _CS)
+                p2.end()
+                p = QPainter(self)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                p.drawPixmap(0, 0, pm)
+                p.end()
+
+        self.canvas = _Canvas()
+
+        # Text: name + status stacked
+        if self.is_numeric:
+            name_txt   = self.label_text
+            status_txt = f"{self.value}{self.unit}"
+        elif not self.success:
+            name_txt   = self.label_text
+            status_txt = "Failed"
+        else:
+            name_txt   = self.label_text
+            status_txt = "On" if self.bool_on else "Off"
+
+        self.name_lbl = QLabel(name_txt)
+        self.name_lbl.setFont(QFont("Manrope", 13, QFont.Weight.DemiBold))
+
+        self.status_lbl = QLabel(status_txt)
+        self.status_lbl.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+        text_col.addStretch()
+        text_col.addWidget(self.name_lbl)
+        text_col.addWidget(self.status_lbl)
+        text_col.addStretch()
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(self.canvas, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addLayout(text_col, 1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(4, 10, 4, 6)
+        outer.setSpacing(0)
+        outer.addLayout(row)
+
+        self.setAutoFillBackground(False)
+        self._apply_label_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self._apply_label_style()
+        self.canvas.update()
+
+    def _apply_label_style(self):
+        dk = self.current_theme == "dark"
+        nc = "rgba(255,255,255,0.85)" if dk else "rgba(0,0,0,0.78)"
+        sc = "rgba(255,255,255,0.40)" if dk else "rgba(0,0,0,0.38)"
+        self.name_lbl.setStyleSheet(  f"color: {nc}; background: transparent;")
+        self.status_lbl.setStyleSheet(f"color: {sc}; background: transparent;")
+
+    # ── painting dispatcher ───────────────────────────────────────────────────
+
+    def _paint(self, p, w, h):
+        cx, cy = w / 2, h / 2
+        t  = self._av
+        dk = self.current_theme == "dark"
+        at = self.anim_type
+        if   at == "dark_mode":   self._p_dark(p, cx, cy, t)
+        elif at == "brightness":   self._p_bright(p, cx, cy, t)
+        elif at == "volume":       self._p_volume(p, cx, cy, t)
+        elif at == "mute":         self._p_mute(p, cx, cy, t)
+        elif at == "wifi":         self._p_wifi(p, cx, cy, t)
+        elif at == "bluetooth":    self._p_bt(p, cx, cy, t)
+        elif at == "dnd":          self._p_dnd(p, cx, cy, t)
+        elif at == "night_shift":  self._p_night(p, cx, cy, t)
+        else:                      self._p_generic(p, cx, cy, t)
+
+    @staticmethod
+    def _glow(p, cx, cy, color, r):
+        from PyQt6.QtGui import QRadialGradient, QBrush, QColor
+        from PyQt6.QtCore import QPointF
+        gr = QRadialGradient(cx, cy, r)
+        gr.setColorAt(0.0,  QColor(color.red(), color.green(), color.blue(), 58))
+        gr.setColorAt(0.55, QColor(color.red(), color.green(), color.blue(), 20))
+        gr.setColorAt(1.0,  QColor(color.red(), color.green(), color.blue(),  0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(gr))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+    # ── sun ↔ moon ────────────────────────────────────────────────────────────
+
+    def _p_dark(self, p, cx, cy, t):
+        import math
+        from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
+        from PyQt6.QtCore import QPointF
+        sz = 20   # sized to fit 56×56 canvas (center=28, max reach ≈26px)
+        def _clamp(v): return max(0.0, min(1.0, v))
+        if self.bool_on:          # enabling dark: sun fades → moon appears
+            sun_a  = _clamp(1.0 - t * 2.2)
+            moon_a = _clamp(t * 2.0 - 0.8)
+            star_a = _clamp(t * 2.5 - 1.5)
+        else:                     # disabling dark: moon fades → sun appears
+            moon_a = _clamp(1.0 - t * 2.2)
+            sun_a  = _clamp(t * 2.0 - 0.8)
+            star_a = 0.0
+
+        # sun
+        if sun_a > 0.02:
+            scale = 0.65 + 0.35 * sun_a
+            sc = QColor(255, 200, 55, int(255 * sun_a))
+            self._glow(p, cx, cy, sc, sz * (1.2 + sun_a * 0.6))
+            p.save()
+            p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
+            pen = QPen(sc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+            ri, ro = sz * 0.62, sz * (0.62 + 0.30 * sun_a)
+            for i in range(8):
+                a = math.radians(i * 45)
+                p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
+                           QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
+            p.drawEllipse(QPointF(cx, cy), sz * 0.42, sz * 0.42)
+            p.restore()
+
+        # moon crescent
+        if moon_a > 0.02:
+            scale = 0.55 + 0.45 * moon_a
+            mc = QColor(160, 185, 255, int(255 * moon_a))
+            self._glow(p, cx, cy, mc, sz * (1.0 + moon_a * 0.6))
+            p.save()
+            p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
+            path = QPainterPath()
+            path.moveTo(cx, cy - sz*0.9)
+            path.arcTo(cx - sz*0.9, cy - sz*0.9, sz*1.8,  sz*1.8,  90,  180)
+            path.arcTo(cx - sz*0.3, cy - sz*0.9, sz*1.55, sz*1.8, 270, -180)
+            path.closeSubpath()
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(mc))
+            p.drawPath(path)
+            p.restore()
+
+        # stars
+        if star_a > 0.02:
+            sc2 = QColor(200, 215, 255, int(180 * star_a))
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc2))
+            for sx, sy, sr in [(cx + sz*0.72, cy - sz*0.55, 2.0),
+                                (cx + sz*0.95, cy + sz*0.10, 1.4),
+                                (cx + sz*0.40, cy + sz*0.80, 1.7)]:
+                p.drawEllipse(QPointF(sx, sy), sr, sr)
+
+    # ── brightness ────────────────────────────────────────────────────────────
+
+    def _p_bright(self, p, cx, cy, t):
+        import math
+        from PyQt6.QtGui import QColor, QBrush, QPen
+        from PyQt6.QtCore import QPointF
+        lv  = t
+        sz  = 22  # sized to fit 56×56 canvas
+        sc  = QColor(255, int(165 + 35*lv), int(20 + 55*(1-lv)), int(215 + 40*lv))
+        self._glow(p, cx, cy, sc, sz * (1.3 + lv * 0.7))
+        ri  = sz * 0.56
+        ro  = sz * (0.70 + 0.35 * lv)
+        pen = QPen(sc, 2.5 + lv, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(8):
+            a = math.radians(i * 45)
+            p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
+                       QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
+        r = sz * (0.30 + 0.14*lv)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+    # ── volume ────────────────────────────────────────────────────────────────
+
+    def _p_volume(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
+        from PyQt6.QtCore import QPointF, QRectF
+        lv  = t
+        sc  = QColor(60, 195, 100, 225)
+        self._glow(p, cx, cy, sc, 44 * (0.5 + lv * 0.5))
+        bx  = cx - 14
+        sz  = 13
+        body = QPainterPath()
+        body.moveTo(bx - sz,        cy - sz*0.38)
+        body.lineTo(bx - sz*0.25,   cy - sz*0.38)
+        body.lineTo(bx + sz*0.58,   cy - sz)
+        body.lineTo(bx + sz*0.58,   cy + sz)
+        body.lineTo(bx - sz*0.25,   cy + sz*0.38)
+        body.lineTo(bx - sz,        cy + sz*0.38)
+        body.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
+        p.drawPath(body)
+        wx = bx + sz*0.58
+        for arc_r, spread, min_lv in [(sz*0.75, 48, 0.02), (sz*1.42, 43, 0.32), (sz*2.10, 38, 0.62)]:
+            if lv < min_lv:
+                continue
+            alp = int(min(230, 220 * min(1.0, (lv - min_lv) / 0.30)))
+            wc  = QColor(60, 195, 100, alp)
+            p.setPen(QPen(wc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            half = int(spread * 16)
+            p.drawArc(QRectF(wx - arc_r, cy - arc_r, arc_r*2, arc_r*2), -half, half*2)
+
+    # ── mute ──────────────────────────────────────────────────────────────────
+
+    def _p_mute(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
+        from PyQt6.QtCore import QPointF
+        x_t = t if self.bool_on else (1.0 - t)
+        sc  = QColor(215, 70, 70, 225)
+        self._glow(p, cx, cy, sc, 44)
+        bx = cx - 10
+        sz = 13
+        body = QPainterPath()
+        body.moveTo(bx - sz,       cy - sz*0.38)
+        body.lineTo(bx - sz*0.25,  cy - sz*0.38)
+        body.lineTo(bx + sz*0.58,  cy - sz)
+        body.lineTo(bx + sz*0.58,  cy + sz)
+        body.lineTo(bx - sz*0.25,  cy + sz*0.38)
+        body.lineTo(bx - sz,       cy + sz*0.38)
+        body.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
+        p.drawPath(body)
+        if x_t > 0:
+            xc  = bx + sz * 1.5
+            xr  = sz * 0.72
+            xc2 = QColor(215, 70, 70, int(x_t * 245))
+            pen = QPen(xc2, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            if x_t <= 0.55:
+                sub = x_t / 0.55
+                p.drawLine(QPointF(xc - xr, cy - xr),
+                           QPointF(xc - xr + xr*2*sub, cy - xr + xr*2*sub))
+            else:
+                p.drawLine(QPointF(xc - xr, cy - xr), QPointF(xc + xr, cy + xr))
+                sub = (x_t - 0.55) / 0.45
+                p.drawLine(QPointF(xc + xr, cy - xr),
+                           QPointF(xc + xr - xr*2*sub, cy - xr + xr*2*sub))
+
+    # ── wifi ──────────────────────────────────────────────────────────────────
+
+    def _p_wifi(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QBrush, QPen
+        from PyQt6.QtCore import QPointF, QRectF
+        base_c = QColor(58, 155, 213, 220) if self.bool_on else QColor(130, 130, 130, 220)
+        self._glow(p, cx, cy, base_c, 48)
+        oy = cy + 20   # wifi origin point shifted downward
+        for radius, start_t, fade_dur in [(0, 0.00, 0.30), (16, 0.22, 0.35),
+                                          (28, 0.50, 0.35), (40, 0.74, 0.26)]:
+            if t < start_t:
+                continue
+            arc_t = min(1.0, (t - start_t) / fade_dur)
+            alp   = int(220 * arc_t)
+            c     = QColor(base_c.red(), base_c.green(), base_c.blue(), alp)
+            if radius == 0:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(c))
+                p.drawEllipse(QPointF(cx, oy), 4.5, 4.5)
+            else:
+                spread = 38 + max(0, 40 - radius)
+                p.setPen(QPen(c, 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawArc(QRectF(cx - radius, oy - radius, radius*2, radius*2),
+                          (90 + spread) * 16, -spread * 2 * 16)
+        if not self.bool_on and t > 0.70:
+            xt  = min(1.0, (t - 0.70) / 0.30)
+            xr  = 22
+            p.setPen(QPen(QColor(185, 80, 80, int(185 * xt)), 3.0,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(cx - xr, cy - xr), QPointF(cx + xr, cy + xr))
+
+    # ── bluetooth ─────────────────────────────────────────────────────────────
+
+    def _p_bt(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QPen
+        from PyQt6.QtCore import QPointF
+        bc  = QColor(74, 144, 217, int(220 * min(1.0, t / 0.40)))
+        self._glow(p, cx, cy, bc, 46)
+        sz  = 20
+        pen = QPen(bc, 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(cx,          cy - sz),          QPointF(cx,          cy + sz))
+        p.drawLine(QPointF(cx,          cy - sz),          QPointF(cx + sz*0.68, cy - sz*0.38))
+        p.drawLine(QPointF(cx + sz*0.68, cy - sz*0.38),   QPointF(cx,          cy))
+        p.drawLine(QPointF(cx,          cy),               QPointF(cx + sz*0.68, cy + sz*0.38))
+        p.drawLine(QPointF(cx + sz*0.68, cy + sz*0.38),   QPointF(cx,          cy + sz))
+        if self.bool_on and t > 0.35:
+            rt = (t - 0.35) / 0.65
+            for i in range(2):
+                rr  = 36 + i*18 + rt*14
+                ral = int(100 * (1 - rt) * max(0.0, 1 - i*0.45))
+                if ral > 0:
+                    p.setPen(QPen(QColor(74, 144, 217, ral), 1.5))
+                    p.drawEllipse(QPointF(cx, cy), rr, rr)
+
+    # ── do not disturb ────────────────────────────────────────────────────────
+
+    def _p_dnd(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QBrush, QPainterPath
+        from PyQt6.QtCore import QPointF
+        sz  = 20  # sized to fit 56×56 canvas (same formula as _p_dark)
+        mc  = QColor(148, 98, 218, int(230 * t))
+        self._glow(p, cx, cy, mc, sz * (1.0 + t * 0.5))
+        scale = 0.55 + 0.45 * t
+        p.save()
+        p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
+        path = QPainterPath()
+        path.moveTo(cx, cy - sz*0.9)
+        path.arcTo(cx - sz*0.9, cy - sz*0.9, sz*1.8,  sz*1.8,  90,  180)
+        path.arcTo(cx - sz*0.3, cy - sz*0.9, sz*1.55, sz*1.8, 270, -180)
+        path.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(mc))
+        p.drawPath(path)
+        p.restore()
+        if t > 0.50:
+            sa  = int(160 * min(1.0, (t - 0.50) * 2))
+            sc2 = QColor(200, 180, 255, sa)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc2))
+            for sx, sy, sr in [(cx + sz*0.72, cy - sz*0.52, 2.2),
+                                (cx + sz*0.95, cy + sz*0.14, 1.5)]:
+                p.drawEllipse(QPointF(sx, sy), sr, sr)
+
+    # ── night shift ───────────────────────────────────────────────────────────
+
+    def _p_night(self, p, cx, cy, t):
+        import math
+        from PyQt6.QtGui import QColor, QBrush, QPen
+        from PyQt6.QtCore import QPointF
+        lv  = t
+        sc  = QColor(245, 130, 70, int(215 + 40*lv))
+        self._glow(p, cx, cy, sc, 44 * (0.6 + lv * 0.4))
+        sz  = 28
+        ri, ro = sz*0.58, sz*(0.70 + 0.25*lv)
+        pen = QPen(sc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(8):
+            a = math.radians(i * 45)
+            p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
+                       QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
+        r = sz * (0.32 + 0.12*lv)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+    # ── generic checkmark ─────────────────────────────────────────────────────
+
+    def _p_generic(self, p, cx, cy, t):
+        from PyQt6.QtGui import QColor, QPen
+        from PyQt6.QtCore import QPointF
+        c   = self.accent
+        gc  = QColor(c.red(), c.green(), c.blue(), int(220 * t))
+        self._glow(p, cx, cy, gc, 44)
+        sz  = 22
+        pen = QPen(gc, 4.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        pts = [(cx - sz*0.62, cy + sz*0.12),
+               (cx - sz*0.08, cy + sz*0.58),
+               (cx + sz*0.62, cy - sz*0.52)]
+        if t < 0.52:
+            sub = t / 0.52
+            p.drawLine(QPointF(*pts[0]),
+                       QPointF(pts[0][0] + (pts[1][0]-pts[0][0])*sub,
+                               pts[0][1] + (pts[1][1]-pts[0][1])*sub))
+        else:
+            p.drawLine(QPointF(*pts[0]), QPointF(*pts[1]))
+            sub = (t - 0.52) / 0.48
+            p.drawLine(QPointF(*pts[1]),
+                       QPointF(pts[1][0] + (pts[2][0]-pts[1][0])*sub,
+                               pts[1][1] + (pts[2][1]-pts[1][1])*sub))
+
+    # ── Qt animated properties ────────────────────────────────────────────────
+
+    def _get_av(self):    return self._av
+    def _set_av(self, v):
+        self._av = v
+        self.canvas.update()
+
+    from PyQt6.QtCore import pyqtProperty
+    animValue = pyqtProperty(float, _get_av, _set_av)
+
+    def showEvent(self, event):
+        """Start animation the first time the widget becomes visible."""
+        super().showEvent(event)
+        if not self._anim_started:
+            self._anim_started = True
+            self._opacity = 1.0   # no fade-in needed once widget is shown
+            self._start_animation()
+        else:
+            self.canvas.update()
+
+    def _start_animation(self):
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        xfm = QPropertyAnimation(self, b"animValue", self)
+        xfm.setDuration(1500)
+        xfm.setStartValue(0.0)
+        xfm.setEndValue(float(self.value) / 100.0 if self.is_numeric else 1.0)
+        xfm.setEasingCurve(QEasingCurve.Type.OutQuart)
+        self._anim = xfm
+        xfm.start()
+
+    def sizeHint(self):
+        return QSize(400, self._H + 16)
+
 
 class AppActionWidget(QWidget):
     app_accepted = pyqtSignal(str, QWidget)

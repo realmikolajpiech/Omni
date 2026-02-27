@@ -672,6 +672,7 @@ class _BubbleInner(QWidget):
         self._bg = QColor("#000000")
         self._border_color = QColor(0, 0, 0, 0)
         self._extra_top_widgets = []
+        self._bottom_widgets    = []   # settings animation widgets appended below text
         self._highlight_opacity = 0.0
         self._placeholder_shown = False  # set True below when placeholder is created
 
@@ -731,6 +732,12 @@ class _BubbleInner(QWidget):
                 self.edit.setMarkdown(text)
         elif self.label is not None:
             self.label.setText(text)
+
+    def append_settings_widget(self, widget):
+        """Append a SettingsAnimationWidget below the answer text (inside the bubble)."""
+        widget.set_theme(self.current_theme)
+        self._bottom_widgets.append(widget)
+        self.layout().addWidget(widget)
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -849,45 +856,54 @@ class _BubbleInner(QWidget):
                 else 0
             )
 
+            bottom_h = sum(w.sizeHint().height() for w in self._bottom_widgets)
+
             if has_text:
                 self.edit.document().setTextWidth(inner_w)
-                
+
                 # Fit width to content (idealWidth)
                 ideal_w = int(self.edit.document().idealWidth()) + 5
-                
+
                 min_content_w = 60
                 if placeholder_h > 0 and self.thinking_placeholder:
                     min_content_w = max(min_content_w, self.thinking_placeholder.sizeHint().width() + 10)
                 if extra_h > 0:
                     min_content_w = max(min_content_w, 200) # Give CollapsibleThinkingWidget room
-                
+                if bottom_h > 0:
+                    min_content_w = max(min_content_w, 200)
+
                 used_inner_w = max(min_content_w, min(ideal_w, inner_w))
-                
+
                 # Re-layout text edit with actual smaller width for accurate height
                 self.edit.document().setTextWidth(used_inner_w)
                 doc_h = int(self.edit.document().size().height())
-                
+
                 if doc_h <= 0:
                     doc_h = max(self.edit.fontMetrics().height() + 8, 24)
-                
+
                 self.edit.setFixedSize(used_inner_w, doc_h)
-                
+
                 used_max_w = used_inner_w + 2 * self.PADDING_H
                 self.setFixedWidth(used_max_w)
-                
-                total_h = doc_h + extra_h + placeholder_h + 2 * self.PADDING_V
+
+                total_h = doc_h + extra_h + placeholder_h + bottom_h + 2 * self.PADDING_V
                 return QSize(used_max_w, max(total_h, 36))
             elif extra_h > 0:
                 used_inner_w = min(250, inner_w)
                 used_max_w = used_inner_w + 2 * self.PADDING_H
                 self.setFixedWidth(used_max_w)
-                total_h = extra_h + 2 * self.PADDING_V
+                total_h = extra_h + bottom_h + 2 * self.PADDING_V
                 return QSize(used_max_w, max(total_h, 36))
             elif placeholder_h > 0:
                 min_content_w = max(60, self.thinking_placeholder.sizeHint().width() + 10)
                 used_max_w = min_content_w + 2 * self.PADDING_H
                 self.setFixedWidth(used_max_w)
-                total_h = placeholder_h + 2 * self.PADDING_V
+                total_h = placeholder_h + bottom_h + 2 * self.PADDING_V
+                return QSize(used_max_w, max(total_h, 36))
+            elif bottom_h > 0:
+                used_max_w = max_w
+                self.setFixedWidth(used_max_w)
+                total_h = bottom_h + 2 * self.PADDING_V
                 return QSize(used_max_w, max(total_h, 36))
             else:
                 return QSize(max_w, 0)
@@ -985,7 +1001,8 @@ class AnswerWidget(QWidget):
         # Legacy alias
         self.query_label = self.user_bubble.name_label if self.user_bubble else None
 
-        self._answer_text = text or ""
+        self._answer_text    = text or ""
+        self._settings_widgets = []   # extra widgets appended in simple mode
         if text:
             if chat_mode and self.ai_bubble:
                 # Route through proper path so thinking_placeholder is hidden
@@ -1025,6 +1042,18 @@ class AnswerWidget(QWidget):
         if self.user_bubble and self.chat_mode:
             self._show_user_bubble = visible and bool(self._query_text) and not self._query_text.startswith("[SYSTEM]")
             self.user_bubble.setVisible(self._show_user_bubble)
+
+    # ── Settings animation (injected below AI answer text) ─────────────
+
+    def append_settings_widget(self, widget):
+        """Inject a SettingsAnimationWidget inside this bubble, below the answer text."""
+        widget.set_theme(self.current_theme)
+        if self.chat_mode and self.ai_bubble:
+            self.ai_bubble.bubble.append_settings_widget(widget)
+        else:
+            self._settings_widgets.append(widget)
+            self.outer_layout.addWidget(widget)
+        self.update_item_size()
 
     # ── Thinking ───────────────────────────────────────────────────────
 
@@ -1116,6 +1145,9 @@ class AnswerWidget(QWidget):
                 if doc_h > 0:
                     self.text_edit.setFixedHeight(doc_h)
                     h += doc_h
+            # Extra widgets added to outer_layout (e.g. SettingsAnimationWidget)
+            for sw in getattr(self, '_settings_widgets', []):
+                h += sw.sizeHint().height()
 
         return QSize(w, max(h, 40))
 

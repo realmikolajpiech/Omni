@@ -24,9 +24,9 @@ class SelectiveHoverDelegate(QStyledItemDelegate):
             # No, keep it simple first.
             # print(f"DEBUG: Keyboard Locked. Removing MouseOver from row {index.row()}. New state: {option.state}")
 
-        # If it's thinking or answer, we clear the hover/selected state from option
-        # This prevents the QListWidget stylesheet from applying the background
-        if role_type in ['thinking', 'answer', 'separator', 'history_ai']:
+        # If it's thinking, answer, or a non-interactive action widget, clear hover/selected state
+        # This prevents the QListWidget stylesheet from applying the background rectangle
+        if role_type in ['thinking', 'answer', 'separator', 'history_ai', 'system_settings']:
             option.state &= ~QStyle.StateFlag.State_MouseOver
             option.state &= ~QStyle.StateFlag.State_Selected
             option.state &= ~QStyle.StateFlag.State_HasFocus

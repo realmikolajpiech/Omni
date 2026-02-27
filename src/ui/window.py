@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -1302,6 +1302,21 @@ class OmniWindow(QWidget):
                 w.set_query_visible(use_chat_mode)
                 if thinking_text:
                     w.set_thinking_collapsed(True)
+                # Re-attach any settings animation widgets stored in history
+                for act in msg.get('settings_actions', []):
+                    try:
+                        sw = SettingsAnimationWidget(
+                            setting=act.get("setting", ""),
+                            value=act.get("value", 0),
+                            label=act.get("label", ""),
+                            unit=act.get("unit", ""),
+                            color_hex=act.get("color", "#FFFFFF"),
+                            icon_name=act.get("icon", ""),
+                            success=True
+                        )
+                        w.append_settings_widget(sw)
+                    except Exception:
+                        pass
                 self.add_list_item(w, "history_ai", animation="instant")
                 first = False
 
@@ -1994,7 +2009,10 @@ class OmniWindow(QWidget):
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, data)
 
-        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+        _NON_SELECTABLE_STR = {"thinking", "answer", "separator", "history_ai"}
+        _NON_SELECTABLE_DICT_TYPES = {"system_settings"}
+        if (isinstance(data, str) and data in _NON_SELECTABLE_STR) or \
+           (isinstance(data, dict) and data.get('type') in _NON_SELECTABLE_DICT_TYPES):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
 
         if animation == "slide":
@@ -2016,7 +2034,10 @@ class OmniWindow(QWidget):
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, data)
 
-        if isinstance(data, str) and data in ["thinking", "answer", "separator", "history_ai"]:
+        _NON_SELECTABLE_STR = {"thinking", "answer", "separator", "history_ai"}
+        _NON_SELECTABLE_DICT_TYPES = {"system_settings"}
+        if (isinstance(data, str) and data in _NON_SELECTABLE_STR) or \
+           (isinstance(data, dict) and data.get('type') in _NON_SELECTABLE_DICT_TYPES):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
 
         if animation == "slide":
@@ -3058,7 +3079,7 @@ class OmniWindow(QWidget):
                             insert_pos += 1
                         elif act.get('type') == 'system_settings':
                             try:
-                                w = SettingsActionWidget(
+                                sw = SettingsAnimationWidget(
                                     setting=act.get("setting", ""),
                                     value=act.get("value", 0),
                                     label=act.get("label", ""),
@@ -3067,8 +3088,10 @@ class OmniWindow(QWidget):
                                     icon_name=act.get("icon", ""),
                                     success=True
                                 )
-                                self.insert_list_item(insert_pos, w, act, animation="slide")
-                                insert_pos += 1
+                                # Inject directly into the AI bubble instead of a separate list item
+                                widget.append_settings_widget(sw)
+                                if item is not None:
+                                    item.setSizeHint(widget.sizeHint())
                             except Exception as _te:
                                 logging.warning(f"[settings] Failed to add settings widget: {_te}")
                         elif act.get('type') == 'terminal_command':
@@ -3102,7 +3125,9 @@ class OmniWindow(QWidget):
             thinking_final = data.get("thinking", "")
             if saved_query and answer_final:
                 self.chat_history.append({"role": "user", "content": saved_query})
-                self.chat_history.append({"role": "assistant", "content": answer_final, "thinking": thinking_final})
+                settings_acts = [a for a in data.get("actions", []) if isinstance(a, dict) and a.get("type") == "system_settings"]
+                self.chat_history.append({"role": "assistant", "content": answer_final, "thinking": thinking_final,
+                                          "settings_actions": settings_acts})
 
         answer = data.get("answer", "")
         
@@ -3289,13 +3314,17 @@ class OmniWindow(QWidget):
         saved_query = getattr(self, '_current_query', self.input_field.text())
 
         # Add Answer (non-streaming path: always normal/first query → simple view)
+        _answer_bubble = None   # reference kept so system_settings can inject into it
+        settings_acts_for_history = [a for a in actions if isinstance(a, dict) and a.get("type") == "system_settings"]
         if answer:
             self.chat_history.append({"role": "user", "content": saved_query})
-            self.chat_history.append({"role": "assistant", "content": answer, "thinking": thinking})
+            self.chat_history.append({"role": "assistant", "content": answer, "thinking": thinking,
+                                      "settings_actions": settings_acts_for_history})
 
             w = AnswerWidget(answer, query_text=saved_query, thinking_text=thinking, chat_mode=False)
             add_item(w, "answer")
-            
+            _answer_bubble = w
+
             # Determine if we should rename the Reasoning process label to an action name
             action_label = None
             if actions:
@@ -3306,7 +3335,7 @@ class OmniWindow(QWidget):
             if action_label:
                 w.set_thinking_header(action_label)
             w.set_thinking_collapsed(True)
-        
+
         # Add Actions
         for act in actions:
             if isinstance(act, dict):
@@ -3364,7 +3393,7 @@ class OmniWindow(QWidget):
                     add_item(w, act, anim="fade")
                 elif act.get('type') == 'system_settings':
                     try:
-                        w = SettingsActionWidget(
+                        sw = SettingsAnimationWidget(
                             setting=act.get("setting", ""),
                             value=act.get("value", 0),
                             label=act.get("label", ""),
@@ -3373,7 +3402,11 @@ class OmniWindow(QWidget):
                             icon_name=act.get("icon", ""),
                             success=True
                         )
-                        add_item(w, act, anim="slide")
+                        if _answer_bubble is not None:
+                            _answer_bubble.append_settings_widget(sw)
+                            self.adjust_window_height()
+                        else:
+                            add_item(sw, act, anim="pop")
                     except Exception as _te:
                         logging.warning(f"[settings] Failed to show settings widget: {_te}")
                 elif act.get('type') == 'terminal_command':
