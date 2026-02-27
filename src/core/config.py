@@ -287,6 +287,7 @@ BRAIN_PORT = 5555
 BRAIN_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/ask_llm"
 SEARCH_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/search"
 ACTION_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/action"
+RESOLVE_PLACE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/resolve_place"
 INSTALL_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/install_plan"
 FIND_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/find_package"
 PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"

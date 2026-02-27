@@ -6,10 +6,9 @@ import requests
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu,
                               QFileIconProvider, QSizePolicy, QPushButton)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor
-from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer, QUrl
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor, QDesktopServices
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from src.ui.styles import THEMES
 try:
     from src.ui.widgets.math_widget import MathWidget
@@ -95,6 +94,7 @@ class LinkActionWidget(QWidget):
         self.current_theme = "light"
         self.update_style()
         
+        self.nam = QNetworkAccessManager(self)
         self.fetch_icon()
 
     def set_theme(self, theme):
@@ -163,16 +163,24 @@ class LinkActionWidget(QWidget):
                 if '.' in possible: domain = possible
             if not domain: return
             if domain.startswith("www."): domain = domain[4:]
+            
             icon_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
-            threading.Thread(target=self._download_icon, args=(icon_url,), daemon=True).start()
+            
+            req = QNetworkRequest(QUrl(icon_url))
+            req.setRawHeader(b"User-Agent", b"Mozilla/5.0")
+            
+            reply = self.nam.get(req)
+            reply.finished.connect(lambda: self._on_icon_reply(reply))
         except Exception: pass
 
-    def _download_icon(self, url):
+    def _on_icon_reply(self, reply):
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(url, headers=headers, timeout=3)
-            if r.status_code == 200: self.icon_downloaded.emit(r.content)
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                data = reply.readAll()
+                self.update_icon(data)
         except: pass
+        finally:
+            reply.deleteLater()
 
     def update_icon(self, data):
         try:
@@ -2358,10 +2366,12 @@ class PersonActionWidget(QWidget):
         
         self.current_theme = "light"
         self.update_style()
+        
+        self.nam = QNetworkAccessManager(self)
 
         if self.image_url:
             logging.info(f"Starting image download for {name}: {self.image_url}")
-            threading.Thread(target=self._download_image, daemon=True).start()
+            self._download_image()
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -2420,47 +2430,59 @@ class PersonActionWidget(QWidget):
             self.avatar.setStyleSheet("background-color: transparent;")
 
     def _download_image(self):
+        if not self.image_url or self.image_url.startswith("data:"): return
+        
+        req = QNetworkRequest(QUrl(self.image_url))
+        req.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        reply = self.nam.get(req)
+        reply.finished.connect(lambda: self._on_reply_finished(reply))
+
+    def _on_reply_finished(self, reply):
         try:
-            if self.image_url.startswith("data:"): return
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-            logging.info(f"Requesting image: {self.image_url}")
-            r = requests.get(self.image_url, headers=headers, timeout=10, verify=False)
-            logging.info(f"Image download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}, Size: {len(r.content)}")
-            if r.status_code == 200: 
-                self.image_downloaded.emit(r.content)
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                data = reply.readAll()
+                self.update_image(data)
             else:
-                logging.warning(f"Image download failed with status {r.status_code}")
+                logging.warning(f"Image download failed: {reply.errorString()}")
         except Exception as e:
             logging.error(f"Image download exception: {e}")
+        finally:
+            reply.deleteLater()
 
     def update_image(self, data):
         try:
             if not self.avatar: return
             pixmap = QPixmap()
-            success = pixmap.loadFromData(data)
-            if not success:
-                logging.warning("Failed to load pixmap from data")
-                return
+            pixmap.loadFromData(data)
             
             if not pixmap.isNull():
-                w, h = 110, 150
+                # Use current size of avatar widget instead of hardcoded 110x150
+                w, h = self.avatar.width(), self.avatar.height()
+                if w <= 0 or h <= 0: w, h = 110, 150 # Fallback
+                
                 rounded = QPixmap(w, h)
                 rounded.fill(Qt.GlobalColor.transparent)
+                
                 painter = QPainter(rounded)
                 try:
                     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                     path = QPainterPath()
                     path.addRoundedRect(0, 0, w, h, 8, 8)
                     painter.setClipPath(path)
+                    
                     scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
                     x = (scaled.width() - w) // 2
                     y = (scaled.height() - h) // 2
                     painter.drawPixmap(-x, -y, scaled)
                 finally:
                     painter.end()
+                
                 self.avatar.setPixmap(rounded)
                 self.avatar.setStyleSheet("background-color: transparent;")
-        except: pass
+                self.avatar.setText("") # Clear text if any
+        except Exception as e:
+            logging.error(f"Error updating image: {e}")
 
     def sizeHint(self):
         w = 600
@@ -2497,7 +2519,7 @@ class PlaceActionWidget(PersonActionWidget):
         if not image_url and lat and lon:
             # Styled map fetch with smaller size
             self.image_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=14&size=160x200&markers={lat},{lon},red-pushpin"
-            threading.Thread(target=self._download_image, daemon=True).start()
+            self._download_image()
 
         # Update description with category/address
         full_desc = ""

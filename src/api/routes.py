@@ -1285,8 +1285,9 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
 
             elif "PLACE:" in line:
                 name = line.split("PLACE:")[1].strip()
-                res = get_place_result(name, existing_results=search_results if name.lower() in query.lower() else None)
-                if res: actions.append(res)
+                # Return a pending placeholder so UI can show other actions (like Link) immediately
+                # The UI will call /resolve_place asynchronously
+                actions.append({"type": "place_pending", "name": name})
 
             elif "UNINSTALL:" in line:
                 app = line.split("UNINSTALL:")[1].strip()
@@ -1392,6 +1393,18 @@ Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
     except Exception as e:
         logging.error(f"Error in action_endpoint: {e}")
         return jsonify({"actions": [], "chips": [], "error": str(e)})
+
+@api_bp.route('/resolve_place', methods=['POST'])
+def resolve_place_endpoint():
+    try: req = request.get_json(force=True)
+    except: return jsonify({"error": "Bad JSON"}), 400
+    
+    name = req.get('name', '').strip()
+    if not name: return jsonify({})
+    
+    # We don't have the previous search context, but get_place_result handles that by doing a fresh map search
+    res = get_place_result(name, existing_results=None)
+    return jsonify(res if res else {})
 
 @api_bp.route('/install_plan', methods=['POST'])
 def install_plan_endpoint():

@@ -27,7 +27,7 @@ from src.ui.widgets.settings_panel import SettingsPanel
 
 from src.ui.workers.ai_worker import AIWorker
 from src.ui.workers.search_worker import SearchWorker
-from src.ui.workers.action_worker import ActionWorker
+from src.ui.workers.action_worker import ActionWorker, PlaceResolverWorker
 from src.ui.workers.screenshot_worker import ScreenshotWorker
 from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker, UninstallOrchestrator
 from src.ui.workers.file_search_worker import FileSearchWorker
@@ -835,6 +835,8 @@ class OmniWindow(QWidget):
                 # else: shortcut close — existing list/input preserved, just need height restore
                 # Mark animating early so changeEvent can't fire a spurious close during processEvents
                 self.is_entry_animating = True
+                # Suppress macOS focus ring BEFORE show() so it never appears on the initial paint
+                self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
                 self.setWindowOpacity(0.0)
                 self.show()
                 self.center()
@@ -1099,6 +1101,11 @@ class OmniWindow(QWidget):
         if hasattr(self, 'og_worker') and self.og_worker and self.og_worker.isRunning():
              logging.info("Window deactivated but OG worker is running - keeping window open.")
              return
+
+        # Prevent closing if any place resolver worker is running (fetching map/image data)
+        if hasattr(self, 'place_workers') and any(w.isRunning() for w in self.place_workers.values()):
+            logging.info("Window deactivated but place resolver is running - keeping window open.")
+            return
 
         # Grace period: if we just showed actions (within 1.5s), ignore deactivation
         # This handles race conditions where activateWindow() or UI updates cause transient focus loss
@@ -2093,16 +2100,40 @@ class OmniWindow(QWidget):
         # Discard stale action results if AI is already running
         if self.ai_worker and self.ai_worker.isRunning(): return
 
+        # --- NEW: Filter out pending places and start async workers ---
+        final_actions = []
+        has_pending_place = False
+        for a in actions:
+            if a.get('type') == 'place_pending':
+                has_pending_place = True
+                name = a.get('name')
+                if not hasattr(self, 'place_workers'): self.place_workers = {}
+                
+                # If we already have a worker for this place, skip
+                if name in self.place_workers: continue
+                
+                worker = PlaceResolverWorker(name)
+                worker.place_resolved.connect(self.on_place_resolved)
+                worker.finished.connect(lambda n=name: self.cleanup_place_worker(n))
+                self.place_workers[name] = worker
+                worker.start()
+                continue
+            final_actions.append(a)
+        actions = final_actions
+        # --------------------------------------------------------------
+
         # Sort external actions to prioritize interactive cards
         def action_priority(a):
             t = a.get('type')
             if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode'): return 0
             if t == 'link':
-                from urllib.parse import urlparse as _urlp
-                _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
-                _root = ".".join(_host.split(".")[-2:])
-                _SEARCH_HOSTS = {"duckduckgo.com", "google.com", "bing.com", "search.yahoo.com", "startpage.com", "perplexity.ai", "you.com", "kagi.com"}
-                if _root in _SEARCH_HOSTS: return 0
+                try:
+                    from urllib.parse import urlparse as _urlp
+                    _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
+                    _root = ".".join(_host.split(".")[-2:])
+                    _SEARCH_HOSTS = {"duckduckgo.com", "google.com", "bing.com", "search.yahoo.com", "startpage.com", "perplexity.ai", "you.com", "kagi.com"}
+                    if _root in _SEARCH_HOSTS: return 0
+                except: pass
             if t in ('place', 'person'): return 1
             return 2
 
@@ -2119,6 +2150,12 @@ class OmniWindow(QWidget):
 
         # For link-type actions start an OG preview fetch
         if actions and actions[0].get("type") == "link":
+            # Only start OG worker if there are no other higher-priority actions
+            # If we have a place action (or one pending), skip OG to avoid clutter
+            has_place = any(a.get('type') == 'place' for a in actions)
+            if has_place or has_pending_place:
+                return
+
             link_url = actions[0].get("url", "")
             if link_url and link_url.startswith("http"):
                 self.cleanup_worker("og_worker")
@@ -2126,6 +2163,50 @@ class OmniWindow(QWidget):
                 self.og_worker.og_result.connect(self.on_og_result)
                 self.og_worker.no_result.connect(lambda _q: None)
                 self.og_worker.start()
+
+    def on_place_resolved(self, action, original_name):
+        """Handle async place resolution."""
+        if not action or action.get('type') != 'place': return
+
+        # Reset grace period so image-download focus blips don't close the window
+        self.last_action_time = time.time()
+
+        # Check if we should add this action
+        if not hasattr(self, 'external_actions'): self.external_actions = []
+        
+        # Avoid duplicates
+        for a in self.external_actions:
+            if a.get('type') == 'place' and a.get('name') == action.get('name'):
+                return
+
+        self.external_actions.append(action)
+        
+        # Re-sort using same logic
+        def action_priority(a):
+            t = a.get('type')
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode'): return 0
+            if t == 'link':
+                try:
+                    from urllib.parse import urlparse as _urlp
+                    _host = _urlp(a.get("url", "")).netloc.lower().replace("www.", "")
+                    _root = ".".join(_host.split(".")[-2:])
+                    _SEARCH_HOSTS = {"duckduckgo.com", "google.com", "bing.com", "search.yahoo.com", "startpage.com", "perplexity.ai", "you.com", "kagi.com"}
+                    if _root in _SEARCH_HOSTS: return 0
+                except: pass
+            if t in ('place', 'person'): return 1
+            return 2
+            
+        self.external_actions.sort(key=action_priority)
+        self.refresh_list(self.input_field.text(), animate=False)
+
+        # Bring window to front if it's already showing (don't force-show a hidden window)
+        if self.isVisible() and not self.isActiveWindow():
+            self.activateWindow()
+            self.raise_()
+
+    def cleanup_place_worker(self, name):
+        if hasattr(self, 'place_workers') and name in self.place_workers:
+            del self.place_workers[name]
 
     def on_og_result(self, og_data: dict, query: str):
         """Handle Open Graph metadata — show website preview card."""
@@ -2534,7 +2615,18 @@ class OmniWindow(QWidget):
         self.cleanup_worker('search_worker')
         self.cleanup_worker('action_worker')
         self.cleanup_worker('file_search_worker')
-        
+
+        # Disconnect any pending place resolver workers so they can't show the window
+        # or update the action list while we're in AI mode
+        if hasattr(self, 'place_workers'):
+            for w in list(self.place_workers.values()):
+                for sig in ('place_resolved', 'finished'):
+                    try:
+                        getattr(w, sig).disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+            self.place_workers.clear()
+
         # Signal workers to abort if they support it
         import src.services.llm.model_manager as mm
         mm.abort_fast_event.set()
@@ -2844,7 +2936,11 @@ class OmniWindow(QWidget):
         self.input_field.clear()
         self.input_field.blockSignals(False)
         self.input_field.setPlaceholderText("Ask a follow-up...")
-        self.input_field.setFocus()
+        # Only grab focus when window is actually on screen — calling setFocus() on a hidden
+        # window causes macOS to pre-register a focus ring that appears as a blue border on
+        # the next show, even after WA_MacShowFocusRect is suppressed.
+        if self.isVisible():
+            self.input_field.setFocus()
         self.follow_up_widget.set_mode("followup")
 
         if not self.is_history_mode:
