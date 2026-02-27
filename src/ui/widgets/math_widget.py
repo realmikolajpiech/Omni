@@ -21,7 +21,7 @@ class MathWidget(QWidget):
         
         # Result label
         self.result_label = QLabel(self.result)
-        self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.result_label.setFont(self.font())
         
         # Web view for LaTeX rendering
@@ -62,7 +62,7 @@ class MathWidget(QWidget):
                     margin: 0;
                     padding: 4px 0;
                     color: {self._get_text_color()};
-                    text-align: center;
+                    text-align: left;
                 }}
                 .equation {{
                     font-size: 14px;

@@ -13,7 +13,22 @@ from src.ui.styles import THEMES
 try:
     from src.ui.widgets.math_widget import MathWidget
 except ImportError:
-    MathWidget = QWidget
+    class MathWidget(QWidget):
+        """Plain-text fallback when QWebEngineWidgets is unavailable."""
+        def __init__(self, result="", equation="", parent=None):
+            super().__init__(parent)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(2)
+            self.result_label = QLabel(str(result))
+            self.result_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.result_label.setFont(QFont("Manrope", 22, QFont.Weight.Bold))
+            self.eq_label = QLabel(str(equation))
+            self.eq_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.eq_label.setStyleSheet("color: #888888; font-size: 12px;")
+            layout.addWidget(self.result_label)
+            layout.addWidget(self.eq_label)
+        def set_theme(self, theme): pass
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)

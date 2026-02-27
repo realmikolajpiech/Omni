@@ -239,14 +239,30 @@ def perform_calculation(expression):
         for prefix in ["calculate ", "what is ", "solve "]:
             if lower_input.startswith(prefix):
                 expression = expression[len(prefix):]
+
+        # Normalise ^ → ** so SimpleEval uses exponentiation, not bitwise XOR
+        eval_expr = expression.replace('^', '**')
         s = SimpleEval()
-        result = s.eval(expression)
-        # Return both the result and a LaTeX formatted version of the equation
-        latex_expr = expression.replace("*", " \\cdot ").replace("/", " \\div ").replace("^", "^{").replace("**", "^{")
-        # Add closing brace for powers if needed
-        if "^{" in latex_expr and latex_expr.count("{") > latex_expr.count("}"):
-            latex_expr += "}"
-        return (f"Expression: {expression}\nResult: {result}\nLaTeX: ${latex_expr} = {result}$")
+        result = s.eval(eval_expr)
+
+        # Normalise result string so it matches the client-side instant-calc format:
+        # whole floats → int string ("25.0" → "25"), others → up to 10 sig-figs ("0.005").
+        if isinstance(result, float) and result.is_integer() and abs(result) < 1e15:
+            result_str = str(int(result))
+        elif isinstance(result, float):
+            result_str = f"{result:.10g}"
+        else:
+            result_str = str(result)
+
+        # Build LaTeX from the original expression.
+        # Order matters: handle ** before replacing lone *.
+        latex_expr = expression
+        latex_expr = re.sub(r'\*\*(\w+)', r'^{\1}', latex_expr)   # 5**2  → 5^{2}
+        latex_expr = re.sub(r'\^(\w+)', r'^{\1}', latex_expr)     # 5^2   → 5^{2}
+        latex_expr = latex_expr.replace('*', r' \cdot ')
+        latex_expr = latex_expr.replace('/', r' \div ')
+
+        return (f"Expression: {expression}\nResult: {result_str}\nLaTeX: ${latex_expr} = {result_str}$")
     except Exception as e:
         return f"Error calculating '{expression}': {str(e)}"
 

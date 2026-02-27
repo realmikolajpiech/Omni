@@ -35,6 +35,40 @@ from src.ui.workers.tts_worker import TTSWorker
 from src.ui.workers.og_worker import OGWorker
 
 # ---------------------------------------------------------------------------
+# Instant math-expression evaluator (client-side, zero latency)
+# ---------------------------------------------------------------------------
+import math as _math
+
+_CALC_EXPR_RE = re.compile(r'^[\d\s\.\(\)\+\-\*\/\^\%]+$')
+_SAFE_MATH_NS = {"__builtins__": {}, **{k: v for k, v in _math.__dict__.items() if not k.startswith('_')}}
+
+def _detect_calc(text: str):
+    """Return (result_str, equation_str) if *text* is a pure math expression, else None."""
+    t = text.strip()
+    if not t or ' ' not in t and len(t) < 2:
+        return None
+    if not re.search(r'\d', t):
+        return None
+    if not re.search(r'[\+\-\*\/\^\%]', t):
+        return None
+    if not _CALC_EXPR_RE.match(t):
+        return None
+    try:
+        result = eval(t.replace('^', '**'), _SAFE_MATH_NS, {})  # nosec – fully sandboxed
+        if not isinstance(result, (int, float)):
+            return None
+        if isinstance(result, float) and (result != result or result in (float('inf'), float('-inf'))):
+            return None
+        if isinstance(result, float) and result.is_integer() and abs(result) < 1e15:
+            val_str = str(int(result))
+        else:
+            val_str = f"{result:.10g}"
+        return (val_str, f"{t} = {val_str}")
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # URL / domain instant-detection helper
 # ---------------------------------------------------------------------------
 _INSTANT_URL_RE = re.compile(
@@ -335,6 +369,7 @@ class OmniWindow(QWidget):
         self.local_file_results = []
         self.og_data = None        # Open Graph website preview data
         self.instant_url = None    # (url, domain) when query is a URL/domain — shown instantly
+        self.instant_calc = None   # (val_str, eq_str) when query is a pure math expression
 
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
@@ -1645,6 +1680,7 @@ class OmniWindow(QWidget):
             self.local_file_results = []
             self.og_data = None
             self.instant_url = None
+            self.instant_calc = None
             self.refresh_list("", animate=True)
             self.frame.set_minimal_mode(True)
             self.follow_up_widget.set_mode("hidden")
@@ -1656,6 +1692,7 @@ class OmniWindow(QWidget):
         self.local_file_results = []
         self.fast_chips = []
         self.og_data = None
+        self.instant_calc = _detect_calc(text.strip())
 
         # Detect URL/domain instantly — no debounce, no API call needed
         detected = _detect_url(text.strip())
@@ -1684,6 +1721,7 @@ class OmniWindow(QWidget):
             self.local_file_results = []
             self.og_data = None
             self.instant_url = None
+            self.instant_calc = None
             self.adjust_window_height(animate)
             return
 
@@ -1714,6 +1752,22 @@ class OmniWindow(QWidget):
 
             og_item_data = {"type": "og_preview", "url": og_url}
             new_items_data.append((og_key, og_item_data, create_og_widget))
+
+        # 0.7. Instant calc — shown immediately from client-side eval, no server round-trip needed.
+        #      Uses the same key as the server's calc action so the widget is reused (not recreated)
+        #      when the server response arrives with the identical result.
+        if self.instant_calc:
+            _ic_val, _ic_eq = self.instant_calc
+            # Only show if external_actions doesn't already have a calc (server result takes precedence)
+            _has_server_calc = any(a.get('type') == 'calc' for a in self.external_actions)
+            if not _has_server_calc:
+                _ic_data = {"type": "calc", "content": _ic_val, "equation": _ic_eq}
+                _ic_key = f"calc:{_ic_val}"
+
+                def _create_ic_widget(val=_ic_val, eq=_ic_eq):
+                    return CalcActionWidget(val, eq)
+
+                new_items_data.append((_ic_key, _ic_data, _create_ic_widget))
 
         # 1. External Actions (from LLM/Fast Search) — always before Wikipedia
         for act in self.external_actions:
