@@ -21,13 +21,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 
 try:
     from src.core.config import (
-        IPC_PORT, GROQ_API_KEY, GROQ_WHISPER_MODEL,
+        IPC_PORT,
         OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD
     )
 except ImportError:
     IPC_PORT = 5556
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-    GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"
     OWW_WAKE_WORD_MODEL = "Hey_Omni"
     OWW_CUSTOM_MODEL_PATH = ""
     OWW_DETECTION_THRESHOLD = 0.5
@@ -104,16 +102,6 @@ class VoiceService:
             self.oww_model = None
             self._oww_key = None
 
-        # 2. Groq client for Whisper transcription
-        if not GROQ_API_KEY:
-            logger.error("GROQ_API_KEY not set - transcription will not work!")
-        try:
-            from groq import Groq
-            self.groq_client = Groq(api_key=GROQ_API_KEY)
-            logger.info(f"Groq client initialized (model: {GROQ_WHISPER_MODEL}).")
-        except Exception as e:
-            logger.error(f"Groq Init Failed: {e}")
-            self.groq_client = None
 
     def setup_udp(self):
         try:
@@ -146,9 +134,7 @@ class VoiceService:
                 elif msg == "STOP_LISTENING":
                     self.set_mode("PAUSED")
                 elif msg == "COMMIT_AUDIO":
-                    logger.info("Manual Commit Requested")
-                    if self.state["mode"] == "LISTENING":
-                        self.process_buffer()
+                    logger.info("Manual Commit Requested (Transcription Disabled)")
                     self.set_mode("PAUSED")
                 elif msg == "SET_MODE:IDLE":
                     self.set_mode("IDLE")
@@ -333,98 +319,20 @@ class VoiceService:
 
         # 3. End-of-utterance detection
         if self.is_speaking and self.silence_frames > self.max_silence_frames:
-            logger.info("End of utterance detected. Transcribing...")
-            self.process_buffer()
+            logger.info("End of utterance detected.")
+            self.audio_buffer = []
+            self.is_speaking = False
+            self.silence_frames = 0
+            self.set_mode("PAUSED")
 
         # 4. Safety timeout at 15s
         if len(self.audio_buffer) * BLOCK_SIZE > 15 * SAMPLE_RATE:
-            logger.warning("Max duration reached. Transcribing...")
-            self.process_buffer()
+            logger.warning("Max duration reached.")
+            self.audio_buffer = []
+            self.is_speaking = False
+            self.silence_frames = 0
+            self.set_mode("PAUSED")
 
-    def process_buffer(self):
-        if not self.audio_buffer:
-            return
-
-        full_audio = np.concatenate(self.audio_buffer)
-        self.audio_buffer = []
-        self.is_speaking = False
-        self.silence_frames = 0
-
-        # Ignore clips shorter than 0.2s
-        if len(full_audio) < SAMPLE_RATE * 0.2:
-            return
-
-        if not self.groq_client:
-            logger.error("Groq client not initialized - cannot transcribe.")
-            return
-
-        # Smart normalization: boost quiet signal but cap gain to avoid amplifying noise
-        max_val = np.max(np.abs(full_audio))
-        if max_val > 0:
-            if 0.02 < max_val < 0.9:
-                gain = min(0.9 / max_val, 3.0)
-                full_audio = full_audio * gain
-                logger.info(f"Audio boosted {gain:.2f}x")
-            elif max_val <= 0.02:
-                logger.info("Audio too quiet, skipping boost.")
-
-        # Run transcription in a thread so audio loop stays responsive
-        audio_snapshot = full_audio.copy()
-        thread = threading.Thread(target=self._transcribe_and_send, args=(audio_snapshot,), daemon=True)
-        thread.start()
-
-    def _transcribe_and_send(self, full_audio: np.ndarray):
-        """Send audio to Groq Whisper API and dispatch result via IPC."""
-        try:
-            # Encode audio as WAV in-memory (PCM 16-bit)
-            wav_buffer = io.BytesIO()
-            sf.write(wav_buffer, full_audio, SAMPLE_RATE, format="WAV", subtype="PCM_16")
-            wav_buffer.seek(0)
-
-            import src.core.settings_store as settings_store
-            lang_setting = settings_store.get("transcription_language", "auto")
-            lang_param = None if (not lang_setting or lang_setting == "auto") else lang_setting
-
-            logger.info(f"Sending {len(full_audio)/SAMPLE_RATE:.2f}s audio to Groq Whisper ({GROQ_WHISPER_MODEL}, lang={lang_param or 'auto'})...")
-            transcription_kwargs: dict = {
-                "file": ("audio.wav", wav_buffer.read()),
-                "model": GROQ_WHISPER_MODEL,
-                "response_format": "text",
-            }
-            if lang_param:
-                transcription_kwargs["language"] = lang_param
-            transcription = self.groq_client.audio.transcriptions.create(**transcription_kwargs)
-
-            # Groq returns the text directly as a string when response_format="text"
-            text = transcription.strip() if isinstance(transcription, str) else (transcription.text or "").strip()
-            logger.info(f"Transcribed: {text}")
-
-            if not text:
-                return
-
-            # Filter common Whisper hallucinations
-            hallucinations = {
-                "i", "i!", "i.", "you", "thanks", "thank you", "bye", ".", "...!",
-                "...", "..!", "...?", "?", "!", "you.", "thank you.", "subtitles by",
-                "mbc", "o!", "o.", "oh!", "oh.", "o", "oh", "a", "a!", "a.", "ok", "ok."
-            }
-            if text.lower() in hallucinations:
-                logger.info(f"Ignored hallucination: '{text}'")
-                return
-
-            if not re.search(r'[a-zA-Z0-9]', text):
-                logger.info(f"Ignored non-alphanumeric: '{text}'")
-                return
-
-            if len(text) > 1 and not text.startswith("..."):
-                self.send_ipc(f"QUERY:VOICE:{text}".encode('utf-8'))
-                self.play_cue(active=False)
-                self.set_mode("PAUSED")
-            else:
-                logger.info(f"Ignored too-short text: '{text}'")
-
-        except Exception as e:
-            logger.error(f"Transcription Failed: {e}")
 
 
 if __name__ == "__main__":

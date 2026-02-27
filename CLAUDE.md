@@ -32,7 +32,7 @@ A local HTTP server that handles all heavy computation. Key endpoints in `src/ap
 | `OGWorker` | Open Graph fetch | `OGPreviewWidget` |
 
 ### 3. Voice Listener (`src/services/voice/listener.py`) — subprocess
-Launched as a separate subprocess from `main.py`. Continuously listens for the wake word "Hey Omni" (OpenWakeWord + custom ONNX model at `assets/Voice_Activation/Hey_Omni.onnx`), then records speech and transcribes via Groq Whisper. Results are sent back to the UI via the IPC socket (port 5556).
+Launched as a separate subprocess from `main.py`. Continuously listens for the wake word "Hey Omni" (OpenWakeWord + custom ONNX model at `assets/Voice_Activation/Hey_Omni.onnx`), and toggles the UI via the IPC socket (port 5556). Transcription is currently unused.
 
 ### IPC (`src/core/ipc.py`)
 TCP socket on port 5556. Commands: `TOGGLE`, `TOGGLE_MANUAL`, `QUERY:<text>`, `PARTIAL:<text>`, `STATUS:<text>`. A second instance of the app sends `TOGGLE_MANUAL` to the first and exits — mimicking Spotlight's toggle-on-relaunch behavior.
@@ -49,7 +49,7 @@ TCP socket on port 5556. Commands: `TOGGLE`, `TOGGLE_MANUAL`, `QUERY:<text>`, `P
 - **Main model**: xAI `grok-4-1-fast-reasoning` — used for full AI chat
 - **Embedding model**: `BAAI/bge-m3` via fastembed
 - **TTS**: `hexgrad/Kokoro-82M`
-- **ASR**: Groq Whisper `whisper-large-v3-turbo`
+- **ASR**: (Currently unused)
 
 ### Styles & Theming (`src/ui/styles.py`)
 Themes (light/dark) are defined in `THEMES` dict. The window detects macOS system appearance via `NSUserDefaults` and applies the corresponding theme. `get_style_sheet()` generates the full Qt stylesheet.

@@ -274,12 +274,12 @@ EMBED_MODEL_PATH = os.path.join(MODEL_DIR, EMBED_MODEL_FILENAME)
 EMBED_MODEL_URL = "" 
 
 # Voice Models
-GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"  # Fast + accurate; alternatives: whisper-large-v3, distil-whisper-large-v3-en
 OWW_WAKE_WORD_MODEL = "Hey_Omni"  # Custom wake word; set OWW_CUSTOM_MODEL_PATH to load local .onnx
 OWW_CUSTOM_MODEL_PATH = os.path.join(PROJECT_ROOT, "assets", "Voice_Activation", "Hey_Omni.onnx")
 OWW_DETECTION_THRESHOLD = 0.3  # Wake word confidence threshold (0.0 - 1.0)
 
-TTS_MODEL_ID = "hexgrad/Kokoro-82M"
+TTS_MODEL_ID = "edge-tts"
+TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-AriaNeural")
 
 # URLs
 BRAIN_HOST = "127.0.0.1"

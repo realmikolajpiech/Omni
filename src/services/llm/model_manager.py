@@ -394,33 +394,8 @@ def ensure_model_loaded():
 
 def ensure_tts_model():
     global tts_model
-
-    from src.core.config import TTS_MODEL_ID, PROJECT_ROOT
-
-    if not TTS_MODEL_ID:
-        return
-
+    # edge-tts is API-based — no local model to load
     with tts_lock:
-        if tts_model:
-            return
-        logging.info(f"Loading TTS Model: {TTS_MODEL_ID}")
-        try:
-            if "kokoro" in TTS_MODEL_ID.lower():
-                os.environ["HF_HOME"] = os.path.join(PROJECT_ROOT, "data", "hf_cache")
-                from kokoro import KPipeline
-                pipeline = KPipeline(lang_code="a")
-                tts_model = {"pipeline": pipeline, "type": "kokoro"}
-                logging.info("Kokoro TTS Model Loaded.")
-                # Pre-warm: generate a silent frame so the voice file is downloaded
-                # and the model is JIT-compiled before first real use
-                try:
-                    logging.info("Warming up Kokoro voice (downloading af_bella if needed)...")
-                    for _gs, _ps, _audio in pipeline("Hi.", voice="af_bella", speed=1):
-                        break  # discard — just trigger the lazy download
-                    logging.info("Kokoro warm-up done.")
-                except Exception as e:
-                    logging.warning(f"Kokoro warm-up failed (non-fatal): {e}")
-            else:
-                logging.warning(f"Unknown TTS model: {TTS_MODEL_ID}, skipping.")
-        except Exception as e:
-            logging.error(f"TTS Model Load Error: {e}")
+        if not tts_model:
+            tts_model = {"type": "edge-tts"}
+            logging.info("TTS set to edge-tts (no local model required).")

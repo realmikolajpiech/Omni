@@ -32,8 +32,8 @@ LANGUAGES = [
 _PRIVACY_ITEMS = [
     (
         "Voice transcription",
-        "Audio is sent to the Groq Whisper API solely to convert speech to text. "
-        "Groq does not store audio data for API users — processing is ephemeral "
+        "Audio is sent to the transcription service solely to convert speech to text. "
+        "Your audio data is not stored — processing is ephemeral "
         "and never feeds into any model training pipeline.",
     ),
     (
@@ -56,7 +56,7 @@ _PRIVACY_ITEMS = [
         "API keys",
         "Keys are stored locally in your .env file and ~/.config/omni/settings.json. "
         "They are only sent as authorization headers to their respective services "
-        "(Groq, xAI) — nowhere else.",
+        "— nowhere else.",
     ),
     (
         "No telemetry",
@@ -169,7 +169,7 @@ class SettingsPanel(QWidget):
         self.content_stack.setObjectName("SettingsContent")
 
         # ── Build Pages ──────────────────────────────────────────────
-        self._add_page("Transcription", self._build_transcription())
+        self._add_page("Language", self._build_transcription())
         self._add_page("AI Model", self._build_model())
         self._add_page("Privacy", self._build_privacy())
 
@@ -192,10 +192,10 @@ class SettingsPanel(QWidget):
     # ── Section builders ─────────────────────────────────────────────
 
     def _build_transcription(self) -> QWidget:
-        page = SettingsPage("Transcription")
+        page = SettingsPage("Language")
 
         page.add_widget(self._desc(
-            "Default language for Whisper speech recognition. "
+            "Default language for speech recognition. "
             "Picking a specific language makes transcription faster and more accurate."
         ))
 

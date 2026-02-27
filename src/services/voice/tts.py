@@ -1,99 +1,191 @@
 import sys
 import logging
+import asyncio
+import tempfile
+import os
 import subprocess
-import queue
 import threading
-import src.services.llm.model_manager as model_manager
 
-# Audio queue + background player for Kokoro (streams chunks in real time)
-_audio_queue = queue.Queue()
-_player_thread = None
-_player_running = False
+_stop_event = threading.Event()
+
+# Map ISO 639-1 language codes to natural-sounding edge-tts voices
+VOICE_MAP = {
+    "pl": "pl-PL-ZofiaNeural",
+    "en": "en-US-AriaNeural",
+    "de": "de-DE-KatjaNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "es": "es-ES-ElviraNeural",
+    "it": "it-IT-ElsaNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "pt": "pt-BR-FranciscaNeural",
+    "nl": "nl-NL-ColetteNeural",
+    "tr": "tr-TR-EmelNeural",
+    "ar": "ar-SA-ZariyahNeural",
+    "hi": "hi-IN-SwaraNeural",
+}
+
+_POLISH_CHARS = frozenset("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
+_CJK_RANGES = [(0x4E00, 0x9FFF), (0x3040, 0x30FF), (0xAC00, 0xD7AF)]
 
 
-def _tts_player_worker():
-    global _player_running
-    import sounddevice as sd
-    logging.info("TTS Player Worker Started")
+def _detect_voice(text: str) -> str:
+    """Detect language and return matching edge-tts voice."""
+    from src.core.config import TTS_VOICE
 
-    while _player_running:
+    # Polish: definitive via unique characters
+    if any(c in _POLISH_CHARS for c in text):
+        return VOICE_MAP["pl"]
+
+    # CJK: check unicode ranges
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in _CJK_RANGES):
+            # rough split: hiragana/katakana → ja, hangul → ko, else zh
+            if 0x3040 <= cp <= 0x30FF:
+                return VOICE_MAP["ja"]
+            if 0xAC00 <= cp <= 0xD7AF:
+                return VOICE_MAP["ko"]
+            return VOICE_MAP["zh"]
+
+    # Use langdetect for everything else
+    try:
+        from langdetect import detect
+        lang = detect(text)
+        return VOICE_MAP.get(lang, TTS_VOICE)
+    except Exception:
+        return TTS_VOICE
+
+
+def _get_stdin_player_cmd():
+    """
+    Return a command list for a player that reads MP3 from stdin, or None.
+    Streaming to stdin means audio starts playing before generation is complete.
+    """
+    if sys.platform == "win32":
+        return None  # Windows: temp-file fallback
+
+    candidates = [
+        # ffplay (ffmpeg suite) — most reliable MP3 stdin playback
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-i", "pipe:0"],
+        # sox play
+        ["play", "-q", "-t", "mp3", "-"],
+        # mpv
+        ["mpv", "--no-video", "--really-quiet", "-"],
+        # mpg123
+        ["mpg123", "-q", "-"],
+    ]
+    for cmd in candidates:
+        result = subprocess.run(["which", cmd[0]], capture_output=True)
+        if result.returncode == 0:
+            return cmd
+    return None
+
+
+async def _run_tts(text: str, voice: str, stop_event: threading.Event):
+    import edge_tts
+    communicate = edge_tts.Communicate(text, voice=voice)
+
+    stdin_cmd = _get_stdin_player_cmd()
+
+    if stdin_cmd:
+        # Streaming mode: audio starts playing as first chunks arrive from the API
+        proc = subprocess.Popen(
+            stdin_cmd,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
         try:
-            with sd.OutputStream(samplerate=24000, channels=1, dtype='float32') as stream:
-                logging.info("TTS Audio Stream Opened")
-                while _player_running:
+            async for chunk in communicate.stream():
+                if stop_event.is_set():
+                    proc.terminate()
+                    return
+                if chunk["type"] == "audio":
                     try:
-                        chunk = _audio_queue.get(timeout=0.5)
-                        if chunk is None:
-                            continue
-                        stream.write(chunk)
-                        _audio_queue.task_done()
-                    except queue.Empty:
-                        continue
-                    except Exception as e:
-                        logging.error(f"TTS Stream Write Error: {e}")
+                        proc.stdin.write(chunk["data"])
+                    except BrokenPipeError:
                         break
-        except Exception as e:
-            logging.error(f"TTS Player Init/Stream Error: {e}")
-            if _player_running:
-                import time
-                time.sleep(1)
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        proc.wait()
+    else:
+        # Temp-file fallback (Windows or no suitable stdin player found)
+        tmp = tempfile.mktemp(suffix=".mp3")
+        await communicate.save(tmp)
+        try:
+            _play_file(tmp, stop_event)
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
-    logging.info("TTS Player Worker Stopped")
 
+def _play_file(path: str, stop_event: threading.Event):
+    """Play an audio file, polling stop_event to allow early termination."""
+    import time
 
-def _ensure_player_running():
-    global _player_thread, _player_running
-    if not _player_running or not _player_thread or not _player_thread.is_alive():
-        _player_running = True
-        _player_thread = threading.Thread(target=_tts_player_worker, daemon=True)
-        _player_thread.start()
+    if sys.platform == "darwin":
+        proc = subprocess.Popen(["afplay", path], stderr=subprocess.DEVNULL)
+    elif sys.platform == "win32":
+        proc = subprocess.Popen(
+            ["powershell", "-c",
+             f'(New-Object System.Media.SoundPlayer "{path}").PlaySync()'],
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        player = _get_stdin_player_cmd()
+        cmd = [player[0], path] if player else None
+        if not cmd:
+            logging.warning("No audio player found for temp-file playback.")
+            return
+        proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+
+    while proc.poll() is None:
+        if stop_event.is_set():
+            proc.terminate()
+            break
+        time.sleep(0.05)
 
 
 def stop_playback():
-    """Clear the audio queue to interrupt current speech."""
-    global _audio_queue
-    with _audio_queue.mutex:
-        _audio_queue.queue.clear()
+    """Interrupt current speech immediately."""
+    _stop_event.set()
 
 
-def speak(text):
-    if not text:
+def speak(text: str, voice: str = None):
+    if not text or not text.strip():
         return
 
-    logging.info(f"Speaking: {text[:60]}...")
+    _stop_event.clear()
 
-    # Lazy-load Kokoro on first use
-    if not model_manager.tts_model:
-        logging.info("TTS Model not loaded. Lazy-loading...")
-        model_manager.ensure_tts_model()
+    if voice is None:
+        voice = _detect_voice(text)
 
-    if model_manager.tts_model and model_manager.tts_model.get("type") == "kokoro":
-        try:
-            _ensure_player_running()
-            pipeline = model_manager.tts_model["pipeline"]
-            # speed=1.2 → szybsza mowa i krótsze odczucie pauz między zdaniami
-            for _gs, _ps, audio in pipeline(text, voice='af_bella', speed=1.2):
-                if audio is not None:
-                    _audio_queue.put(audio)
-            return
-        except Exception as e:
-            logging.error(f"Kokoro TTS Error: {e}")
-            # fall through to system TTS
+    logging.info(f"TTS [{voice}]: {text[:60]}...")
 
-    # System TTS fallback (szybsze tempo: mniej wolno się słucha)
+    try:
+        asyncio.run(_run_tts(text, voice, _stop_event))
+    except Exception as e:
+        logging.error(f"edge-tts error: {e}")
+        _fallback_speak(text)
+
+
+def _fallback_speak(text: str):
     if sys.platform == "darwin":
-        try:
-            # -r 200: szybsze tempo (domyślnie ~175), mniejsze przerwy między zdaniami
-            subprocess.run(["say", "-r", "200", text], check=False)
-        except Exception as e:
-            logging.error(f"macOS TTS error: {e}")
+        subprocess.run(["say", "-r", "200", text], check=False)
     elif sys.platform == "win32":
         try:
             import win32com.client
             speaker = win32com.client.Dispatch("SAPI.SpVoice")
-            speaker.Rate = 1   # 0 = normal, zakres ok. -10..10, dodatnie = szybciej
+            speaker.Rate = 1
             speaker.Speak(text)
         except Exception as e:
-            logging.error(f"Win32 TTS error: {e}")
+            logging.error(f"Win32 TTS fallback error: {e}")
     else:
-        logging.warning(f"No TTS available on platform: {sys.platform}")
+        logging.warning(f"No TTS fallback available on platform: {sys.platform}")
