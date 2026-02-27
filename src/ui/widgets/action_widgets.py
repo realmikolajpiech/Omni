@@ -519,6 +519,7 @@ class SettingsAnimationWidget(QWidget):
         self._anim_started = False
         self.is_numeric   = isinstance(value, (int, float)) and not isinstance(value, bool)
         self.bool_on      = value if isinstance(value, bool) else True
+        self._intro       = 0.0
 
         s = (setting  or "").lower()
         n = (icon_name or "").lower()
@@ -640,219 +641,229 @@ class SettingsAnimationWidget(QWidget):
     def _paint(self, p, w, h):
         cx, cy = w / 2, h / 2
         t  = self._av
+        intro = self._intro
         dk = self.current_theme == "dark"
         at = self.anim_type
-        if   at == "dark_mode":   self._p_dark(p, cx, cy, t)
-        elif at == "brightness":   self._p_bright(p, cx, cy, t)
-        elif at == "volume":       self._p_volume(p, cx, cy, t)
-        elif at == "mute":         self._p_mute(p, cx, cy, t)
-        elif at == "wifi":         self._p_wifi(p, cx, cy, t)
-        elif at == "bluetooth":    self._p_bt(p, cx, cy, t)
-        elif at == "dnd":          self._p_dnd(p, cx, cy, t)
-        elif at == "night_shift":  self._p_night(p, cx, cy, t)
-        else:                      self._p_generic(p, cx, cy, t)
 
-    @staticmethod
-    def _glow(p, cx, cy, color, r):
-        from PyQt6.QtGui import QRadialGradient, QBrush, QColor
-        from PyQt6.QtCore import QPointF
-        gr = QRadialGradient(cx, cy, r)
-        gr.setColorAt(0.0,  QColor(color.red(), color.green(), color.blue(), 58))
-        gr.setColorAt(0.55, QColor(color.red(), color.green(), color.blue(), 20))
-        gr.setColorAt(1.0,  QColor(color.red(), color.green(), color.blue(),  0))
+        # Draw a beautiful minimalist squircle background
+        p.save()
+        p.translate(cx, cy)
+        # intro scaling for a slight pop effect
+        scale = 0.85 + 0.15 * intro
+        p.scale(scale, scale)
+        p.translate(-cx, -cy)
+
+        bg_alpha = 35 if dk else 20
+        c = self.accent
+        from PyQt6.QtGui import QColor, QPainterPath
+        from PyQt6.QtCore import QRectF
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(gr))
-        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setBrush(QColor(c.red(), c.green(), c.blue(), bg_alpha))
+        pad = 4
+        # draw a squircle (rounded rect with high border radius)
+        p.drawRoundedRect(QRectF(pad, pad, w - pad*2, h - pad*2), 14, 14)
+
+        # Draw icon
+        if   at == "dark_mode":   self._p_dark(p, cx, cy, t, intro)
+        elif at == "brightness":  self._p_bright(p, cx, cy, t, intro)
+        elif at == "volume":      self._p_volume(p, cx, cy, t, intro)
+        elif at == "mute":        self._p_mute(p, cx, cy, t, intro)
+        elif at == "wifi":        self._p_wifi(p, cx, cy, t, intro)
+        elif at == "bluetooth":   self._p_bt(p, cx, cy, t, intro)
+        elif at == "dnd":         self._p_dnd(p, cx, cy, t, intro)
+        elif at == "night_shift": self._p_night(p, cx, cy, t, intro)
+        else:                     self._p_generic(p, cx, cy, t, intro)
+
+        p.restore()
 
     # ── sun ↔ moon ────────────────────────────────────────────────────────────
 
-    def _p_dark(self, p, cx, cy, t):
+    def _p_dark(self, p, cx, cy, t, intro):
         import math
         from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
         from PyQt6.QtCore import QPointF
-        sz = 20   # sized to fit 56×56 canvas (center=28, max reach ≈26px)
+        sz = 14
         def _clamp(v): return max(0.0, min(1.0, v))
-        if self.bool_on:          # enabling dark: sun fades → moon appears
+        if self.bool_on:
             sun_a  = _clamp(1.0 - t * 2.2)
-            moon_a = _clamp(t * 2.0 - 0.8)
-            star_a = _clamp(t * 2.5 - 1.5)
-        else:                     # disabling dark: moon fades → sun appears
+            moon_a = _clamp(t * 2.0 - 0.8) * intro
+            star_a = _clamp(t * 2.5 - 1.5) * intro
+        else:
             moon_a = _clamp(1.0 - t * 2.2)
-            sun_a  = _clamp(t * 2.0 - 0.8)
+            sun_a  = _clamp(t * 2.0 - 0.8) * intro
             star_a = 0.0
 
-        # sun
         if sun_a > 0.02:
-            scale = 0.65 + 0.35 * sun_a
-            sc = QColor(255, 200, 55, int(255 * sun_a))
-            self._glow(p, cx, cy, sc, sz * (1.2 + sun_a * 0.6))
+            sc = QColor(255, 180, 50, int(255 * sun_a))
             p.save()
+            scale = 0.5 + 0.5 * sun_a
             p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
-            pen = QPen(sc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-            ri, ro = sz * 0.62, sz * (0.62 + 0.30 * sun_a)
+            p.setPen(QPen(sc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            ri, ro = sz * 0.55, sz * 0.9
             for i in range(8):
                 a = math.radians(i * 45)
                 p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
                            QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
-            p.drawEllipse(QPointF(cx, cy), sz * 0.42, sz * 0.42)
+            p.drawEllipse(QPointF(cx, cy), sz * 0.38, sz * 0.38)
             p.restore()
 
-        # moon crescent
         if moon_a > 0.02:
-            scale = 0.55 + 0.45 * moon_a
-            mc = QColor(160, 185, 255, int(255 * moon_a))
-            self._glow(p, cx, cy, mc, sz * (1.0 + moon_a * 0.6))
+            mc = QColor(140, 160, 255, int(255 * moon_a))
             p.save()
+            scale = 0.5 + 0.5 * moon_a
             p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
             path = QPainterPath()
-            path.moveTo(cx, cy - sz*0.9)
-            path.arcTo(cx - sz*0.9, cy - sz*0.9, sz*1.8,  sz*1.8,  90,  180)
-            path.arcTo(cx - sz*0.3, cy - sz*0.9, sz*1.55, sz*1.8, 270, -180)
+            path.moveTo(cx, cy - sz*0.8)
+            path.arcTo(cx - sz*0.8, cy - sz*0.8, sz*1.6, sz*1.6, 90, 180)
+            path.arcTo(cx - sz*0.2, cy - sz*0.8, sz*1.4, sz*1.6, 270, -180)
             path.closeSubpath()
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(mc))
             p.drawPath(path)
             p.restore()
 
-        # stars
         if star_a > 0.02:
             sc2 = QColor(200, 215, 255, int(180 * star_a))
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc2))
-            for sx, sy, sr in [(cx + sz*0.72, cy - sz*0.55, 2.0),
-                                (cx + sz*0.95, cy + sz*0.10, 1.4),
-                                (cx + sz*0.40, cy + sz*0.80, 1.7)]:
+            for sx, sy, sr in [(cx + sz*0.6, cy - sz*0.5, 1.5),
+                               (cx + sz*0.9, cy + sz*0.1, 1.0)]:
                 p.drawEllipse(QPointF(sx, sy), sr, sr)
 
     # ── brightness ────────────────────────────────────────────────────────────
 
-    def _p_bright(self, p, cx, cy, t):
+    def _p_bright(self, p, cx, cy, t, intro):
         import math
         from PyQt6.QtGui import QColor, QBrush, QPen
         from PyQt6.QtCore import QPointF
-        lv  = t
-        sz  = 22  # sized to fit 56×56 canvas
-        sc  = QColor(255, int(165 + 35*lv), int(20 + 55*(1-lv)), int(215 + 40*lv))
-        self._glow(p, cx, cy, sc, sz * (1.3 + lv * 0.7))
-        ri  = sz * 0.56
-        ro  = sz * (0.70 + 0.35 * lv)
-        pen = QPen(sc, 2.5 + lv, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        lv  = t * intro
+        sz  = 14
+        sc  = QColor(self.accent)
+        sc.setAlpha(255)
+        ri  = sz * 0.45
+        ro  = sz * (0.60 + 0.40 * lv)
+        pen = QPen(sc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         for i in range(8):
             a = math.radians(i * 45)
             p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
                        QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
-        r = sz * (0.30 + 0.14*lv)
+        r = sz * (0.28 + 0.10 * lv)
         p.drawEllipse(QPointF(cx, cy), r, r)
 
     # ── volume ────────────────────────────────────────────────────────────────
 
-    def _p_volume(self, p, cx, cy, t):
+    def _p_volume(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
         from PyQt6.QtCore import QPointF, QRectF
-        lv  = t
-        sc  = QColor(60, 195, 100, 225)
-        self._glow(p, cx, cy, sc, 44 * (0.5 + lv * 0.5))
-        bx  = cx - 14
-        sz  = 13
+        lv  = t * intro
+        sc  = QColor(self.accent)
+        sc.setAlpha(255)
+        bx  = cx - 8
+        sz  = 10
         body = QPainterPath()
-        body.moveTo(bx - sz,        cy - sz*0.38)
-        body.lineTo(bx - sz*0.25,   cy - sz*0.38)
-        body.lineTo(bx + sz*0.58,   cy - sz)
-        body.lineTo(bx + sz*0.58,   cy + sz)
-        body.lineTo(bx - sz*0.25,   cy + sz*0.38)
-        body.lineTo(bx - sz,        cy + sz*0.38)
+        body.moveTo(bx - sz*0.8,    cy - sz*0.4)
+        body.lineTo(bx - sz*0.2,    cy - sz*0.4)
+        body.lineTo(bx + sz*0.6,    cy - sz*0.9)
+        body.lineTo(bx + sz*0.6,    cy + sz*0.9)
+        body.lineTo(bx - sz*0.2,    cy + sz*0.4)
+        body.lineTo(bx - sz*0.8,    cy + sz*0.4)
         body.closeSubpath()
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
         p.drawPath(body)
-        wx = bx + sz*0.58
-        for arc_r, spread, min_lv in [(sz*0.75, 48, 0.02), (sz*1.42, 43, 0.32), (sz*2.10, 38, 0.62)]:
+        
+        wx = bx + sz*0.6
+        p.setPen(QPen(sc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        
+        for i, (arc_r, spread, min_lv) in enumerate([(sz*0.6, 45, 0.05), (sz*1.1, 40, 0.35), (sz*1.6, 35, 0.65)]):
             if lv < min_lv:
                 continue
-            alp = int(min(230, 220 * min(1.0, (lv - min_lv) / 0.30)))
-            wc  = QColor(60, 195, 100, alp)
-            p.setPen(QPen(wc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.setBrush(Qt.BrushStyle.NoBrush)
+            alp = int(255 * min(1.0, (lv - min_lv) / 0.2))
+            wc = QColor(sc.red(), sc.green(), sc.blue(), alp)
+            p.setPen(QPen(wc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             half = int(spread * 16)
             p.drawArc(QRectF(wx - arc_r, cy - arc_r, arc_r*2, arc_r*2), -half, half*2)
 
     # ── mute ──────────────────────────────────────────────────────────────────
 
-    def _p_mute(self, p, cx, cy, t):
+    def _p_mute(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QBrush, QPen, QPainterPath
         from PyQt6.QtCore import QPointF
         x_t = t if self.bool_on else (1.0 - t)
-        sc  = QColor(215, 70, 70, 225)
-        self._glow(p, cx, cy, sc, 44)
-        bx = cx - 10
-        sz = 13
+        sc  = QColor(self.accent)
+        sc.setAlpha(255)
+        bx = cx - 6
+        sz = 10
         body = QPainterPath()
-        body.moveTo(bx - sz,       cy - sz*0.38)
-        body.lineTo(bx - sz*0.25,  cy - sz*0.38)
-        body.lineTo(bx + sz*0.58,  cy - sz)
-        body.lineTo(bx + sz*0.58,  cy + sz)
-        body.lineTo(bx - sz*0.25,  cy + sz*0.38)
-        body.lineTo(bx - sz,       cy + sz*0.38)
+        body.moveTo(bx - sz*0.8,   cy - sz*0.4)
+        body.lineTo(bx - sz*0.2,   cy - sz*0.4)
+        body.lineTo(bx + sz*0.6,   cy - sz*0.9)
+        body.lineTo(bx + sz*0.6,   cy + sz*0.9)
+        body.lineTo(bx - sz*0.2,   cy + sz*0.4)
+        body.lineTo(bx - sz*0.8,   cy + sz*0.4)
         body.closeSubpath()
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
         p.drawPath(body)
+        
         if x_t > 0:
-            xc  = bx + sz * 1.5
-            xr  = sz * 0.72
-            xc2 = QColor(215, 70, 70, int(x_t * 245))
-            pen = QPen(xc2, 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            xc  = bx + sz * 1.6
+            xr  = sz * 0.5
+            xc2 = QColor(sc.red(), sc.green(), sc.blue(), int(x_t * 255))
+            pen = QPen(xc2, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
-            if x_t <= 0.55:
-                sub = x_t / 0.55
+            # draw X
+            if x_t <= 0.5:
+                sub = x_t / 0.5
                 p.drawLine(QPointF(xc - xr, cy - xr),
                            QPointF(xc - xr + xr*2*sub, cy - xr + xr*2*sub))
             else:
                 p.drawLine(QPointF(xc - xr, cy - xr), QPointF(xc + xr, cy + xr))
-                sub = (x_t - 0.55) / 0.45
+                sub = (x_t - 0.5) / 0.5
                 p.drawLine(QPointF(xc + xr, cy - xr),
                            QPointF(xc + xr - xr*2*sub, cy - xr + xr*2*sub))
 
     # ── wifi ──────────────────────────────────────────────────────────────────
 
-    def _p_wifi(self, p, cx, cy, t):
+    def _p_wifi(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QBrush, QPen
         from PyQt6.QtCore import QPointF, QRectF
-        base_c = QColor(58, 155, 213, 220) if self.bool_on else QColor(130, 130, 130, 220)
-        self._glow(p, cx, cy, base_c, 48)
-        oy = cy + 20   # wifi origin point shifted downward
-        for radius, start_t, fade_dur in [(0, 0.00, 0.30), (16, 0.22, 0.35),
-                                          (28, 0.50, 0.35), (40, 0.74, 0.26)]:
+        base_c = self.accent
+        oy = cy + 14 
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(base_c))
+        p.drawEllipse(QPointF(cx, oy), 3.0, 3.0)
+        
+        for radius, start_t, fade_dur in [(10, 0.1, 0.3), (18, 0.4, 0.3), (26, 0.7, 0.3)]:
             if t < start_t:
                 continue
             arc_t = min(1.0, (t - start_t) / fade_dur)
-            alp   = int(220 * arc_t)
-            c     = QColor(base_c.red(), base_c.green(), base_c.blue(), alp)
-            if radius == 0:
-                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(c))
-                p.drawEllipse(QPointF(cx, oy), 4.5, 4.5)
-            else:
-                spread = 38 + max(0, 40 - radius)
-                p.setPen(QPen(c, 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawArc(QRectF(cx - radius, oy - radius, radius*2, radius*2),
-                          (90 + spread) * 16, -spread * 2 * 16)
+            alp   = int(255 * arc_t) * intro
+            c     = QColor(base_c.red(), base_c.green(), base_c.blue(), int(alp))
+            
+            spread = 40
+            p.setPen(QPen(c, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(cx - radius, oy - radius, radius*2, radius*2),
+                      (90 + spread) * 16, -spread * 2 * 16)
+                      
         if not self.bool_on and t > 0.70:
             xt  = min(1.0, (t - 0.70) / 0.30)
-            xr  = 22
-            p.setPen(QPen(QColor(185, 80, 80, int(185 * xt)), 3.0,
+            xr  = 16
+            p.setPen(QPen(QColor(185, 80, 80, int(255 * xt)), 2.0,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(cx - xr, cy - xr), QPointF(cx + xr, cy + xr))
 
     # ── bluetooth ─────────────────────────────────────────────────────────────
 
-    def _p_bt(self, p, cx, cy, t):
+    def _p_bt(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QPen
         from PyQt6.QtCore import QPointF
-        bc  = QColor(74, 144, 217, int(220 * min(1.0, t / 0.40)))
-        self._glow(p, cx, cy, bc, 46)
-        sz  = 20
-        pen = QPen(bc, 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        bc = QColor(self.accent)
+        al = int(255 * intro * min(1.0, t / 0.40))
+        bc.setAlpha(al)
+        sz = 14
+        pen = QPen(bc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawLine(QPointF(cx,          cy - sz),          QPointF(cx,          cy + sz))
         p.drawLine(QPointF(cx,          cy - sz),          QPointF(cx + sz*0.68, cy - sz*0.38))
@@ -862,116 +873,131 @@ class SettingsAnimationWidget(QWidget):
         if self.bool_on and t > 0.35:
             rt = (t - 0.35) / 0.65
             for i in range(2):
-                rr  = 36 + i*18 + rt*14
-                ral = int(100 * (1 - rt) * max(0.0, 1 - i*0.45))
+                rr  = 22 + i*10 + rt*8
+                ral = int(120 * (1 - rt) * max(0.0, 1 - i*0.4))
                 if ral > 0:
-                    p.setPen(QPen(QColor(74, 144, 217, ral), 1.5))
+                    p.setPen(QPen(QColor(bc.red(), bc.green(), bc.blue(), ral), 1.5))
                     p.drawEllipse(QPointF(cx, cy), rr, rr)
 
     # ── do not disturb ────────────────────────────────────────────────────────
 
-    def _p_dnd(self, p, cx, cy, t):
+    def _p_dnd(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QBrush, QPainterPath
         from PyQt6.QtCore import QPointF
-        sz  = 20  # sized to fit 56×56 canvas (same formula as _p_dark)
-        mc  = QColor(148, 98, 218, int(230 * t))
-        self._glow(p, cx, cy, mc, sz * (1.0 + t * 0.5))
-        scale = 0.55 + 0.45 * t
+        sz  = 14
+        mc  = QColor(self.accent)
+        mc.setAlpha(int(255 * intro))
+        scale = 0.65 + 0.35 * t
         p.save()
         p.translate(cx, cy); p.scale(scale, scale); p.translate(-cx, -cy)
         path = QPainterPath()
-        path.moveTo(cx, cy - sz*0.9)
-        path.arcTo(cx - sz*0.9, cy - sz*0.9, sz*1.8,  sz*1.8,  90,  180)
-        path.arcTo(cx - sz*0.3, cy - sz*0.9, sz*1.55, sz*1.8, 270, -180)
+        path.moveTo(cx, cy - sz*0.8)
+        path.arcTo(cx - sz*0.8, cy - sz*0.8, sz*1.6, sz*1.6, 90, 180)
+        path.arcTo(cx - sz*0.2, cy - sz*0.8, sz*1.4, sz*1.6, 270, -180)
         path.closeSubpath()
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(mc))
         p.drawPath(path)
         p.restore()
+        
         if t > 0.50:
-            sa  = int(160 * min(1.0, (t - 0.50) * 2))
-            sc2 = QColor(200, 180, 255, sa)
+            sa  = int(200 * min(1.0, (t - 0.50) * 2)) * intro
+            sc2 = QColor(mc.red(), mc.green(), min(255, mc.blue()+30), int(sa))
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc2))
-            for sx, sy, sr in [(cx + sz*0.72, cy - sz*0.52, 2.2),
-                                (cx + sz*0.95, cy + sz*0.14, 1.5)]:
+            for sx, sy, sr in [(cx + sz*0.6, cy - sz*0.5, 1.8),
+                               (cx + sz*0.9, cy + sz*0.1, 1.2)]:
                 p.drawEllipse(QPointF(sx, sy), sr, sr)
 
     # ── night shift ───────────────────────────────────────────────────────────
 
-    def _p_night(self, p, cx, cy, t):
+    def _p_night(self, p, cx, cy, t, intro):
         import math
         from PyQt6.QtGui import QColor, QBrush, QPen
         from PyQt6.QtCore import QPointF
-        lv  = t
-        sc  = QColor(245, 130, 70, int(215 + 40*lv))
-        self._glow(p, cx, cy, sc, 44 * (0.6 + lv * 0.4))
-        sz  = 28
-        ri, ro = sz*0.58, sz*(0.70 + 0.25*lv)
-        pen = QPen(sc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        lv  = t * intro
+        sc  = QColor(self.accent)
+        sc.setAlpha(255)
+        sz  = 16
+        ri, ro = sz*0.55, sz*(0.65 + 0.25*lv)
+        pen = QPen(sc, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         for i in range(8):
             a = math.radians(i * 45)
             p.drawLine(QPointF(cx + math.cos(a)*ri, cy + math.sin(a)*ri),
                        QPointF(cx + math.cos(a)*ro, cy + math.sin(a)*ro))
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(sc))
-        r = sz * (0.32 + 0.12*lv)
+        r = sz * (0.3 + 0.12*lv)
         p.drawEllipse(QPointF(cx, cy), r, r)
 
     # ── generic checkmark ─────────────────────────────────────────────────────
 
-    def _p_generic(self, p, cx, cy, t):
+    def _p_generic(self, p, cx, cy, t, intro):
         from PyQt6.QtGui import QColor, QPen
         from PyQt6.QtCore import QPointF
         c   = self.accent
-        gc  = QColor(c.red(), c.green(), c.blue(), int(220 * t))
-        self._glow(p, cx, cy, gc, 44)
-        sz  = 22
-        pen = QPen(gc, 4.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        gc  = QColor(c.red(), c.green(), c.blue(), int(255 * intro))
+        sz  = 12
+        pen = QPen(gc, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                    Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         pts = [(cx - sz*0.62, cy + sz*0.12),
                (cx - sz*0.08, cy + sz*0.58),
                (cx + sz*0.62, cy - sz*0.52)]
-        if t < 0.52:
-            sub = t / 0.52
+        if t < 0.5:
+            sub = t / 0.5
             p.drawLine(QPointF(*pts[0]),
                        QPointF(pts[0][0] + (pts[1][0]-pts[0][0])*sub,
                                pts[0][1] + (pts[1][1]-pts[0][1])*sub))
         else:
             p.drawLine(QPointF(*pts[0]), QPointF(*pts[1]))
-            sub = (t - 0.52) / 0.48
+            sub = (t - 0.5) / 0.5
             p.drawLine(QPointF(*pts[1]),
                        QPointF(pts[1][0] + (pts[2][0]-pts[1][0])*sub,
                                pts[1][1] + (pts[2][1]-pts[1][1])*sub))
 
     # ── Qt animated properties ────────────────────────────────────────────────
 
+    from PyQt6.QtCore import pyqtProperty
+    
     def _get_av(self):    return self._av
     def _set_av(self, v):
         self._av = v
         self.canvas.update()
-
-    from PyQt6.QtCore import pyqtProperty
     animValue = pyqtProperty(float, _get_av, _set_av)
+
+    def _get_intro(self): return self._intro
+    def _set_intro(self, v):
+        self._intro = v
+        self.canvas.update()
+    introValue = pyqtProperty(float, _get_intro, _set_intro)
 
     def showEvent(self, event):
         """Start animation the first time the widget becomes visible."""
         super().showEvent(event)
         if not self._anim_started:
             self._anim_started = True
-            self._opacity = 1.0   # no fade-in needed once widget is shown
             self._start_animation()
         else:
             self.canvas.update()
 
     def _start_animation(self):
-        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+        from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+        self._anim_group = QParallelAnimationGroup(self)
+        
+        intro_anim = QPropertyAnimation(self, b"introValue", self)
+        intro_anim.setDuration(450)
+        intro_anim.setStartValue(0.0)
+        intro_anim.setEndValue(1.0)
+        intro_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+        
         xfm = QPropertyAnimation(self, b"animValue", self)
-        xfm.setDuration(1500)
+        xfm.setDuration(750)
         xfm.setStartValue(0.0)
         xfm.setEndValue(float(self.value) / 100.0 if self.is_numeric else 1.0)
-        xfm.setEasingCurve(QEasingCurve.Type.OutQuart)
-        self._anim = xfm
-        xfm.start()
+        xfm.setEasingCurve(QEasingCurve.Type.OutExpo)
+        
+        self._anim_group.addAnimation(intro_anim)
+        self._anim_group.addAnimation(xfm)
+        self._anim_group.start()
 
     def sizeHint(self):
         return QSize(400, self._H + 16)

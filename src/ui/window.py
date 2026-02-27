@@ -2943,6 +2943,12 @@ class OmniWindow(QWidget):
                 new_w.set_query_visible(bool(query_text))
                 if thinking_text:
                     new_w.set_thinking_collapsed(True)
+
+                # Transfer settings widgets so they persist into follow-up mode
+                for sw in list(getattr(w, '_settings_widgets', [])):
+                    w.outer_layout.removeWidget(sw)
+                    new_w.append_settings_widget(sw)
+
                 self.list_widget.takeItem(i)
                 self.insert_list_item(i, new_w, "answer", animation="instant")
                 new_item = self.list_widget.item(i)
