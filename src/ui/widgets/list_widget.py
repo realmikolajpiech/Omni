@@ -26,7 +26,7 @@ class SelectiveHoverDelegate(QStyledItemDelegate):
 
         # If it's thinking, answer, or a non-interactive action widget, clear hover/selected state
         # This prevents the QListWidget stylesheet from applying the background rectangle
-        if role_type in ['thinking', 'answer', 'separator', 'history_ai', 'system_settings']:
+        if role_type in ['thinking', 'answer', 'separator', 'history_ai', 'system_settings', 'trust_permission', 'terminal_command']:
             option.state &= ~QStyle.StateFlag.State_MouseOver
             option.state &= ~QStyle.StateFlag.State_Selected
             option.state &= ~QStyle.StateFlag.State_HasFocus

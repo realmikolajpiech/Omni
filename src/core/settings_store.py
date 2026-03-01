@@ -14,6 +14,7 @@ _DEFAULTS: dict = {
     "custom_api_key": "",
     "custom_model": "",
     "personality_mode": "professional",
+    "trust_level": 1,  # 1=Assistant, 2=Automation, 3=Full Control
 }
 
 _lock = threading.Lock()

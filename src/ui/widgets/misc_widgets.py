@@ -1085,15 +1085,27 @@ class AnswerWidget(QWidget):
 
     def set_answer(self, text):
         """Set the AI answer text through the proper path (hides Thinking… placeholder)."""
+        self._answer_text = text  # save it
+        visible = getattr(self, '_answer_visible', True)
+        text_to_show = text if visible else ""
+        
         if self.chat_mode and self.ai_bubble is not None:
-            self.ai_bubble.bubble.set_text(text)
+            self.ai_bubble.bubble.set_text(text_to_show)
+            self.ai_bubble.setVisible(True)
         elif self.text_edit is not None:
-            has_text = bool(text and text.strip())
+            has_text = bool(text_to_show and text_to_show.strip())
             self.text_edit.setVisible(has_text)
-            if text:
-                self.text_edit.setMarkdown(text)
+            if text_to_show:
+                self.text_edit.setMarkdown(text_to_show)
         # Always update item size so the list allocates correct height
         self.update_item_size()
+
+    def set_answer_visible(self, visible):
+        """Toggle the visibility of the text block by rendering empty text when hidden. This shrinks the bubble correctly without leaving empty space."""
+        self._answer_visible = visible
+        # Re-apply the stored text (or empty string if we shouldn't show it)
+        text = getattr(self, '_answer_text', '')
+        self.set_answer(text)
 
     def set_thinking_header(self, text):
         if self.thinking_widget is not None:
@@ -1541,4 +1553,210 @@ class GradientBorderFrame(QFrame):
             painter.setOpacity(self._mode_progress)
             painter.strokePath(border_path, QPen(QBrush(grad), 3))
             painter.setOpacity(1.0)
+
+
+# ── Inline trust-permission chat widget ───────────────────────────────────────
+
+class TrustPermissionChatWidget(QWidget):
+    """
+    Minimalistic inline permission card shown directly in the chat list.
+
+    pending  → subtle card: lock icon + description + Allow / Cancel buttons
+    allowed  → compact green row: ✓ Permission granted
+    denied   → compact red row:  ✕ Denied — please do this yourself.
+    """
+
+    allowed       = pyqtSignal()
+    denied        = pyqtSignal()
+    open_settings = pyqtSignal()
+
+    def __init__(self, required_level: int, description: str,
+                 theme: str = "dark", parent=None):
+        super().__init__(parent)
+        self._theme  = theme
+        self._state  = "pending"
+
+        self.setStyleSheet("background: transparent;")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 4, 16, 4)
+        outer.setSpacing(0)
+
+        # ── Card (pending) ────────────────────────────────────────────────────
+        self._card = QWidget(self)
+        self._card.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(self._card)
+        cl.setContentsMargins(16, 12, 16, 12)
+        cl.setSpacing(0)
+
+        # Description row: 🔒 + text
+        dr = QHBoxLayout()
+        dr.setSpacing(8)
+        lock = QLabel("🔒")
+        lock.setFont(QFont("", 13))
+        lock.setStyleSheet("background: transparent;")
+        lock.setFixedWidth(20)
+        lock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        dc = "#DDDDDD" if theme == "dark" else "#333333"
+        desc = QLabel(f"Omni wants to {description}")
+        desc.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        desc.setStyleSheet(f"background: transparent; color: {dc};")
+        desc.setWordWrap(True)
+
+        dr.addWidget(lock)
+        dr.addWidget(desc, 1)
+        cl.addLayout(dr)
+        cl.addSpacing(10)
+
+        # Button row
+        br = QHBoxLayout()
+        br.setSpacing(8)
+
+        self._allow_btn = QPushButton("Allow once")
+        self._allow_btn.setObjectName("TrustAllowBtn_chat")
+        self._allow_btn.setFixedHeight(28)
+        self._allow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._allow_btn.clicked.connect(self._on_allow)
+
+        self._deny_btn = QPushButton("Cancel")
+        self._deny_btn.setObjectName("TrustCancelBtn_chat")
+        self._deny_btn.setFixedHeight(28)
+        self._deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._deny_btn.clicked.connect(self._on_deny)
+
+        self._allow_btn.setStyleSheet("""
+            QPushButton#TrustAllowBtn_chat {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #5B21B6, stop:1 #C026D3);
+                color: #FFFFFF; border: none; border-radius: 7px;
+                font-family: Manrope; font-size: 10px; font-weight: 700;
+                padding: 0 12px;
+            }
+            QPushButton#TrustAllowBtn_chat:hover {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #6D28D9, stop:1 #D946EF);
+            }
+        """)
+        cc  = "#AAAAAA" if theme == "dark" else "#666666"
+        self._deny_btn.setStyleSheet(f"""
+            QPushButton#TrustCancelBtn_chat {{
+                background: transparent; color: {cc};
+                border: none;
+                font-family: Manrope; font-size: 10px; font-weight: 500;
+                padding: 0 8px;
+            }}
+            QPushButton#TrustCancelBtn_chat:hover {{
+                color: {'#FFFFFF' if theme == 'dark' else '#111111'};
+            }}
+        """)
+
+        br.addWidget(self._allow_btn)
+        br.addWidget(self._deny_btn)
+        br.addStretch()
+        cl.addLayout(br)
+
+        outer.addWidget(self._card)
+
+        # ── Result row (shown after interaction) ──────────────────────────────
+        self._result = QWidget(self)
+        self._result.setStyleSheet("background: transparent;")
+        self._result.hide()
+        rl = QHBoxLayout(self._result)
+        rl.setContentsMargins(16, 8, 16, 8)
+        rl.setSpacing(8)
+        self._r_icon = QLabel()
+        self._r_icon.setFont(QFont("", 12))
+        self._r_icon.setStyleSheet("background: transparent;")
+        self._r_icon.setFixedWidth(20)
+        self._r_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._r_text = QLabel()
+        self._r_text.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        self._r_text.setStyleSheet("background: transparent;")
+        self._r_text.setWordWrap(True)
+        rl.addWidget(self._r_icon)
+        rl.addWidget(self._r_text, 1)
+        outer.addWidget(self._result)
+
+    # ── Paint (subtle card bg only in pending state) ──────────────────────────
+
+    def paintEvent(self, event):
+        if self._state != "pending":
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self._card.geometry())
+        # Subtle fill
+        bg = QColor(255, 255, 255, 10) if self._theme == "dark" else QColor(0, 0, 0, 8)
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        painter.fillPath(path, bg)
+        # Subtle border
+        bc = QColor(255, 255, 255, 28) if self._theme == "dark" else QColor(0, 0, 0, 22)
+        painter.setPen(QPen(bc, 1.0))
+        bp = QPainterPath()
+        bp.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 9.5, 9.5)
+        painter.drawPath(bp)
+
+    # ── State transition ───────────────────────────────────────────────────────
+
+    def _show_result(self, is_allowed: bool):
+        self._state = "allowed" if is_allowed else "denied"
+        self._card.hide()
+        if is_allowed:
+            self._r_icon.setText("✓")
+            self._r_icon.setStyleSheet("background: transparent; color: #4ADE80;")
+            self._r_text.setText("Permission granted")
+            self._r_text.setStyleSheet(
+                "background: transparent; color: #4ADE80; font-family: Manrope; font-weight: 600;"
+            )
+        else:
+            self._r_icon.setText("✕")
+            self._r_icon.setStyleSheet("background: transparent; color: #F87171;")
+            self._r_text.setText("Permission denied — please do this yourself.")
+            self._r_text.setStyleSheet(
+                "background: transparent; color: #F87171; font-family: Manrope; font-weight: 600;"
+            )
+        self._result.show()
+        self.update()
+
+        def _resize():
+            try:
+                win = self.window()
+                if win is None:
+                    return
+                lw = getattr(win, 'list_widget', None)
+                if lw is not None:
+                    for i in range(lw.count()):
+                        iw = lw.itemWidget(lw.item(i))
+                        actual = getattr(iw, 'content_widget', iw)
+                        if actual is self:
+                            lw.item(i).setSizeHint(self.sizeHint())
+                            break
+                if hasattr(win, 'adjust_window_height'):
+                    win.adjust_window_height()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(40, _resize)
+
+    # ── Button handlers ────────────────────────────────────────────────────────
+
+    def _on_allow(self):
+        if self._state != "pending":
+            return
+        self._show_result(True)
+        # Emit after a brief pause so user sees "Permission granted" before action runs
+        QTimer.singleShot(350, self.allowed.emit)
+
+    def _on_deny(self):
+        if self._state != "pending":
+            return
+        self._show_result(False)
+        self.denied.emit()
+
+    # ── Theme ──────────────────────────────────────────────────────────────────
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.update()
 

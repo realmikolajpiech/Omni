@@ -8,7 +8,7 @@ from flask import jsonify
 
 from src.services.llm import model_manager
 from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_lock, main_lock, abort_fast_event
-from src.services.llm.tools import TOOL_SCHEMAS, execute_tool
+from src.services.llm.tools import TOOL_SCHEMAS, execute_tool, flush_pending_trust_requests
 from src.services.search.web_search import perform_web_search
 from src.services.search.local_search import perform_file_search, should_search_files
 from src.services.search.image_search import perform_image_search_with_fallback, should_search_images
@@ -21,6 +21,7 @@ import src.core.settings_store as settings_store
 # ── Tool call display helpers ─────────────────────────────────────────────────
 
 _TOOL_META = {
+    "request_permission": {"icon": "🔐", "label": "Permission"},
     "search_web":    {"icon": "🌐", "label": "Web search"},
     "search_files":  {"icon": "📂", "label": "File search"},
     "calculate":     {"icon": "🧮", "label": "Calculate"},
@@ -38,6 +39,15 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
     """Return a one-liner header for a tool call, e.g. '🌐 Web search  "query..."'."""
     meta = _TOOL_META.get(tool_name, {"icon": "⚙", "label": tool_name})
     icon, label = meta["icon"], meta["label"]
+
+    if tool_name == "request_permission":
+        lvl = args.get("required_level", 2)
+        desc = args.get("description", "")
+        if len(desc) > 60:
+            desc = desc[:57] + "…"
+        lvl_name = {2: "Automation", 3: "Full Control"}.get(lvl, str(lvl))
+        arg_part = f"{lvl_name} — {desc}"
+        return f"{icon}  {label}  {arg_part}"
 
     if tool_name in ("search_web", "search_files", "search_images", "memory_recall", "memory_delete"):
         q = args.get("query", "")
@@ -69,6 +79,13 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
 
 def _tool_result_summary(tool_name: str, result: str) -> str:
     """One-line summary of what the tool returned."""
+    if tool_name == "request_permission":
+        if "Permission granted" in result:
+            return "granted"
+        if "[Permission required]" in result:
+            return "awaiting user approval"
+        return result.strip()[:60]
+
     if tool_name == "calculate":
         if "Result: " in result:
             val = result.split("Result: ")[1].split("\n")[0].strip()
@@ -664,6 +681,7 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
 Location: {user_loc} | Date: {current_date}
 
 ## Tools available (use via function calling when needed)
+- **request_permission** — request elevated trust from the user before doing anything that modifies the system. Call FIRST when about to write/delete files, change settings, or install software. Level 2=Automation (writes, settings), Level 3=Full Control (deletions, installs). If granted → proceed immediately. If denied → stop gracefully.
 - **search_web** — current events, news, prices, weather, people, any up-to-date info
 - **search_files** — user's local documents, notes, code files, PDFs on this machine
 - **calculate** — precise arithmetic or algebraic expressions
@@ -715,19 +733,9 @@ Available settings and values:
 {{"type": "qrcode", "data": "https://..."}}
 
 **Open a local file** — when user asks to find, open, show, or locate a file:
-→ Call search_files to find it, then IMMEDIATELY open the best match:
-{{"type": "terminal_command", "command": "open \"/path/to/file\"", "description": "Open file"}}
+→ Call search_files to find it, then IMMEDIATELY use the run_terminal tool to `open "/path/to/file"`
 → Always pick the most relevant result (prefer PDFs/documents over source code for document queries).
 → NEVER just report the path or save it to memory — always open the file right away.
-→ If multiple results found, open the most likely match (e.g. Downloads PDF > source code file).
-
-**Terminal command** — use for ANY shell/system task that's not in the built-in settings list
-{{"type": "terminal_command", "command": "defaults write com.apple.dock autohide -bool false && killall Dock", "description": "Disable Dock autohide"}}
-→ CRITICAL: NEVER tell user to open Terminal, paste commands, or run anything manually.
-→ NEVER write "Wklej i enter:" or "Open Terminal and run:". That is FORBIDDEN.
-→ The command runs automatically in the background. Just tell him what you did in 1 sentence.
-→ Useful macOS tools: defaults write | osascript -e '...' | networksetup | pmset | diskutil | killall | launchctl
-→ System info: battery → pmset -g batt | CPU/RAM → top -l 1 | disk → df -h / | uptime → uptime
 
 **Computer control** (only when user explicitly says click/type/scroll/press)
 {{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}
@@ -743,9 +751,11 @@ Available settings and values:
 - For any command: just DO it. Never ask "would you like me to…?" — act immediately.
 - NEVER instruct user to open Terminal or manually run commands. Always use run_terminal tool.
 - NEVER tell user to install anything manually. Always use install_app / uninstall_app tools.
+- Before modifying files, system settings, or running destructive terminal commands: call **request_permission** first. If it returns "granted", proceed immediately with the action. If it returns "[Permission required]", STOP — the user will be prompted, and you'll be given another chance to complete the task once they approve.
 - If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
-- "Find / open / show me [file]" → search_files THEN immediately open the best match with terminal_command `open "/path"`. Never just report the path.
+- "Find / open / show me [file]" → search_files THEN immediately open the best match with the run_terminal tool. Never just report the path.
+- **CRITICAL PERMISSION RULE**: If a tool returns `[Permission required]`, DO NOT write texts like "Please grant permission", "I created it, accept the popup", or mention "Automation trust". The UI handles this seamlessly. Simply state your intended action in the present continuous tense (e.g. "Creating the file", "Running the command") or write a concise, elegant response as if the action is executing perfectly. Do not mention the existence of permissions or popups.
 """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -859,6 +869,7 @@ Available settings and values:
                 model_reasoning = ""   # Accumulated LLM reasoning_content tokens (all iterations)
                 tool_records: list = []  # Completed tool-call entries for display
                 all_answer_text = ""   # Accumulated answer text across iterations
+                has_pending_trust = False  # Track if any tool needs permission
 
                 while tool_iter < max_tool_iters:
                     iter_start_time = time.time()
@@ -938,7 +949,10 @@ Available settings and values:
                                 model_reasoning + iter_reasoning, tool_records, inline_thinking
                             )
                             if combined_thinking or full_display_answer:
-                                yield ("partial", {"thinking": combined_thinking, "answer": full_display_answer})
+                                yield ("partial", {
+                                    "thinking": combined_thinking, 
+                                    "answer": "" if has_pending_trust else full_display_answer
+                                })
 
                     # Persist this iteration's reasoning tokens
                     model_reasoning += iter_reasoning
@@ -980,6 +994,8 @@ Available settings and values:
                             })
 
                             result = execute_tool(tool_name, args)
+                            if result and "[Permission required]" in str(result):
+                                has_pending_trust = True
                             tool_dur = time.time() - tool_start
                             logging.info(f"[tool:{tool_name}] result length={len(result)} (took {tool_dur:.4f}s)")
 
@@ -1023,6 +1039,7 @@ Available settings and values:
                     
                     if auto_actions:
                         actions.extend(auto_actions)
+                    actions.extend(flush_pending_trust_requests())
                     _postprocess_actions(actions, final_full_answer)
                     logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(final_full_answer)}, actions={len(actions)}")
 
@@ -1104,6 +1121,7 @@ Available settings and values:
 
                 if auto_actions:
                     actions.extend(auto_actions)
+                actions.extend(flush_pending_trust_requests())
                 _postprocess_actions(actions, answer)
 
                 return {"answer": answer, "actions": actions, "thinking": thinking_content}

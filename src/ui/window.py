@@ -21,7 +21,7 @@ from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
-from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, FollowUpWidget, AnswerWidget, StandardItemWidget, RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget)
+from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, FollowUpWidget, AnswerWidget, StandardItemWidget, RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget, TrustPermissionChatWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 from src.ui.widgets.settings_panel import SettingsPanel
 
@@ -33,6 +33,9 @@ from src.ui.workers.install_worker import InstallOrchestrator, InstallWorker, Un
 from src.ui.workers.file_search_worker import FileSearchWorker
 from src.ui.workers.tts_worker import TTSWorker
 from src.ui.workers.og_worker import OGWorker
+from src.ui.workers.computer_control_worker import ComputerControlWorker
+from src.ui.widgets.trust_permission_popup import TrustPermissionPopup
+import src.core.settings_store as settings_store
 
 # ---------------------------------------------------------------------------
 # Instant math-expression evaluator (client-side, zero latency)
@@ -337,6 +340,8 @@ class OmniWindow(QWidget):
         self.chat_history = []
         self.is_history_mode = False
         self._streaming_answer_widget = None  # tracks widget currently being streamed
+        self._continuation_thinking_prefix = ""  # thinking text prepended on request_permission re-run
+        self._continuation_pending = False  # True while waiting for user to approve request_permission
         self.is_settings_mode = False
         self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
 
@@ -914,18 +919,18 @@ class OmniWindow(QWidget):
         else:
             self.frame.set_minimal_mode(True)
         self.input_field.setPlaceholderText("Ask a follow-up...")
-        # Rebuild list so items are visible, then let adjust_window_height size the window
-        # before animate_entry fires (so the entry animation starts at the correct height).
-        self._rebuild_history_list()
-        if ai_active:
-            # _streaming_answer_widget still points to a widget from the old list (now cleared).
-            # Reset it so on_partial_response() creates a fresh widget in the rebuilt list.
-            self._streaming_answer_widget = None
-            # Re-add the thinking indicator so the user sees activity while waiting.
-            self.add_list_item(ThinkingWidget(), "thinking", animation="instant")
-            self.adjust_window_height(animate=False, force=True)
-            self.logo_label.boost_speed()
-        # Re-assert input focus after list rebuild — list widget may have grabbed it transiently
+        
+        # Don't destroy the dynamically created action widgets/cards (like TrustPermissionChatWidget).
+        # We just need to trigger a layout pass to ensure they fit properly after the window resize.
+        QApplication.processEvents()
+        for _i in range(self.list_widget.count()):
+            _item = self.list_widget.item(_i)
+            _w = self.list_widget.itemWidget(_item)
+            if _w is not None:
+                _w.updateGeometry()
+                _item.setSizeHint(_w.sizeHint())
+                
+        self.adjust_window_height(animate=False, force=True)
         self.input_field.setFocus()
 
     def send_udp_command(self, command):
@@ -1795,11 +1800,25 @@ class OmniWindow(QWidget):
                     return LinkActionWidget(a['title'], a['url'], a['description'])
                 elif a.get('type') == 'install':
                     w = InstallActionWidget(a['name'], a.get('website'))
-                    w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
+                    def _make_install_fast_cb(name, _w):
+                        def _cb(n, _widget):
+                            self._check_trust_or_prompt(
+                                3, f"install {name}",
+                                lambda: self.start_install(name, source_widget=_w),
+                            )
+                        return _cb
+                    w.install_accepted.connect(_make_install_fast_cb(a['name'], w))
                     return w
                 elif a.get('type') == 'uninstall':
                     w = UninstallActionWidget(a['name'])
-                    w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
+                    def _make_uninstall_fast_cb(name, _w):
+                        def _cb(n, _widget):
+                            self._check_trust_or_prompt(
+                                3, f"uninstall {name}",
+                                lambda: self.start_uninstall(name, source_widget=_w),
+                            )
+                        return _cb
+                    w.uninstall_accepted.connect(_make_uninstall_fast_cb(a['name'], w))
                     return w
                 elif a.get('type') == 'open_app':
                     return AppActionWidget(a['name'])
@@ -2469,6 +2488,79 @@ class OmniWindow(QWidget):
         except Exception as e:
             logging.error(f"Error toggling preview: {e}")
 
+    # ── Trust level helpers ───────────────────────────────────────────────────
+
+    def _check_trust_or_prompt(self, required_level: int, description: str, on_allow):
+        """Show a permission popup if the current trust level is below *required_level*.
+
+        If trust is sufficient, calls *on_allow* immediately.
+        If not, shows TrustPermissionPopup; calls *on_allow* only if the user clicks
+        "Allow once", and opens Trust settings on the "Always allow" link.
+        """
+        current = settings_store.get("trust_level", 1)
+        if current >= required_level:
+            on_allow()
+            return
+
+        theme = getattr(self, "current_theme", "dark")
+        popup = TrustPermissionPopup(
+            required_level=required_level,
+            description=description,
+            theme=theme,
+            parent=self.frame,
+        )
+        popup.setGeometry(self.frame.rect())
+        popup.allowed.connect(on_allow)
+        popup.open_settings.connect(self._navigate_to_trust_settings)
+        popup.show_animated()
+
+    def _navigate_to_trust_settings(self):
+        """Open settings panel and navigate to the Trust page."""
+        if not self.is_settings_mode:
+            self.enter_settings_mode()
+        QTimer.singleShot(120, lambda: self._focus_settings_page("Trust"))
+
+    def _focus_settings_page(self, page_name: str):
+        """Select a page by name in the settings sidebar."""
+        try:
+            panel = self.settings_panel
+            for i in range(panel.sidebar.count()):
+                if panel.sidebar.item(i).text() == page_name:
+                    panel.sidebar.setCurrentRow(i)
+                    break
+        except Exception:
+            pass
+
+    # ── Trusted terminal execution (one-time permission) ──────────────────────
+
+    def _run_trusted_terminal(self, command: str, insert_pos: int = -1):
+        """Run a terminal command granted one-time trust silently."""
+        import subprocess
+        import logging
+        try:
+            proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
+            if proc.returncode != 0:
+                logging.error(f"Trusted terminal command failed with exit code {proc.returncode}: {proc.stderr}")
+        except Exception as e:
+            logging.error(f"Error executing trusted terminal command: {e}")
+
+    # ── Computer control execution ────────────────────────────────────────────
+
+    def _execute_computer_control(self, act: dict):
+        """Close the window then run a single computer_control action."""
+        # Wrap single action in a list for the worker
+        actions = [act]
+
+        def _run():
+            self._cc_worker = ComputerControlWorker(actions, delay_before_start=0.3)
+            self._cc_worker.all_done.connect(lambda: logging.info("[CC] All actions done"))
+            self._cc_worker.error.connect(lambda e: logging.error(f"[CC] Error: {e}"))
+            self._cc_worker.start()
+
+        # Close window first so it doesn't block the screen, then run
+        self.animate_close()
+        QTimer.singleShot(500, _run)
+
     def start_install(self, app_name, source_widget=None):
         if not source_widget:
             self.list_widget.clear()
@@ -2825,6 +2917,7 @@ class OmniWindow(QWidget):
             self.start_ai_worker(self.input_field.text(), None)
 
     def start_ai_worker(self, query, screenshot_b64):
+        self._last_ai_query = query  # stored so request_permission can re-run if user grants
         self.cleanup_worker('ai_worker')
         self.ai_worker = AIWorker(query, self.chat_history, screenshot_b64)
         self.ai_worker.finished.connect(self.on_ai_response)
@@ -2846,7 +2939,14 @@ class OmniWindow(QWidget):
 
         thinking = data.get("thinking", "")
         answer = data.get("answer", "")
-        
+
+        # Prepend thinking from the previous (pre-permission) AI turn so the
+        # reasoning section appears as one continuous block after re-run.
+        if self._continuation_thinking_prefix and thinking:
+            thinking = self._continuation_thinking_prefix + "\n\n" + thinking
+        elif self._continuation_thinking_prefix and not thinking:
+            thinking = self._continuation_thinking_prefix
+
         if self.voice_triggered_query and answer:
             if not self.tts_worker or not self.tts_worker.isRunning():
                 self.cleanup_worker('tts_worker')
@@ -3011,7 +3111,13 @@ class OmniWindow(QWidget):
 
     def _finalize_response_ui(self):
         """Called once after every AI response (streaming or non-streaming) to tidy the UI."""
+        if self._continuation_pending:
+            # A request_permission popup is waiting for user approval.
+            # Keep the widget reference, input lock, and UI state intact until the user
+            # either allows (→ continuation re-run) or denies (→ manual finalize).
+            return
         self._streaming_answer_widget = None  # clear tracking after response completes
+        self._continuation_thinking_prefix = ""  # clear any request_permission continuation prefix
         self.input_field.setReadOnly(False)
         self.input_field.blockSignals(True)
         self.input_field.clear()
@@ -3031,6 +3137,10 @@ class OmniWindow(QWidget):
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
 
+        # Clear any temporary trust boost that was set for a request_permission re-run
+        from src.services.llm.tools import clear_trust_boost
+        clear_trust_boost()
+
         # Use the tracked streaming widget (set during on_partial_response)
         has_streaming_answer = False
         widget = self._streaming_answer_widget
@@ -3039,26 +3149,7 @@ class OmniWindow(QWidget):
             thinking = data.get("thinking", "")
             actions = data.get("actions", [])
 
-            if thinking:
-                widget.ensure_thinking_widget()
-                widget.update_thinking(thinking)
-                widget.set_thinking_collapsed(True)
-
-            widget.set_answer(answer)
-
-            # Determine label for the collapsed thinking block
-            # Priority: thinking_header from backend > terminal_command description > None
-            action_label = data.get("thinking_header") or None
-            if not action_label and actions:
-                for act in actions:
-                    if isinstance(act, dict) and act.get('type') == 'terminal_command' and act.get('description'):
-                        action_label = str(act.get('description')).strip().capitalize()
-                        break
-
-            # Collapse thinking from bubble and play "done" highlight (optionally rename label)
-            QTimer.singleShot(80, lambda w=widget, lbl=action_label: w.hide_thinking_and_play_done(lbl) if hasattr(w, 'hide_thinking_and_play_done') else None)
-
-            # Find list item for this widget
+            # ── Find list item early (needed for permission suppression) ──────
             item = None
             insert_pos = 0
             for i in range(self.list_widget.count()):
@@ -3067,6 +3158,31 @@ class OmniWindow(QWidget):
                     item = candidate
                     insert_pos = i + 1
                     break
+
+            # ── Detect if any action will show a permission card ──────────────
+            _trust = settings_store.get("trust_level", 1)
+
+            # Normal flow: show thinking + finalize answer text
+            if thinking:
+                widget.ensure_thinking_widget()
+                widget.update_thinking(thinking)
+                widget.set_thinking_collapsed(True)
+
+            widget.set_answer(answer)
+
+            # Determine label for the collapsed thinking block
+            action_label = data.get("thinking_header") or None
+            if not action_label and actions:
+                for act in actions:
+                    if isinstance(act, dict) and act.get('type') == 'terminal_command' and act.get('description'):
+                        action_label = str(act.get('description')).strip().capitalize()
+                        break
+
+            QTimer.singleShot(80, lambda w=widget, lbl=action_label: (
+                w.hide_thinking_and_play_done(lbl)
+                if hasattr(w, 'hide_thinking_and_play_done') and not self._continuation_pending
+                else None
+            ))
 
             if actions and item is not None:
                 for act in actions:
@@ -3085,14 +3201,133 @@ class OmniWindow(QWidget):
                             insert_pos += 1
                         elif act.get('type') == 'install':
                             w = InstallActionWidget(act['name'], act.get('website'))
-                            w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
+                            def _make_install_cb(name, _w):
+                                def _cb(n, _widget):
+                                    self._check_trust_or_prompt(
+                                        3,
+                                        f"install {name}",
+                                        lambda: self.start_install(name, source_widget=_w),
+                                    )
+                                return _cb
+                            w.install_accepted.connect(_make_install_cb(act['name'], w))
                             self.insert_list_item(insert_pos, w, act, animation="fade")
                             insert_pos += 1
                         elif act.get('type') == 'uninstall':
                             w = UninstallActionWidget(act['name'])
-                            w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
+                            def _make_uninstall_cb(name, _w):
+                                def _cb(n, _widget):
+                                    self._check_trust_or_prompt(
+                                        3,
+                                        f"uninstall {name}",
+                                        lambda: self.start_uninstall(name, source_widget=_w),
+                                    )
+                                return _cb
+                            w.uninstall_accepted.connect(_make_uninstall_cb(act['name'], w))
                             self.insert_list_item(insert_pos, w, act, animation="fade")
                             insert_pos += 1
+                        elif act.get('type') == 'computer_control':
+                            cc_action  = act.get('action', '')
+                            cc_desc    = act.get('description') or cc_action or 'control your computer'
+                            cc_act_ref = dict(act)
+                            if settings_store.get("trust_level", 1) >= 2:
+                                self._execute_computer_control(cc_act_ref)
+                            else:
+                                perm = TrustPermissionChatWidget(2, cc_desc, getattr(self, "current_theme", "dark"))
+                                self._perm_widget = perm  # keep strong ref
+                                widget.set_answer_visible(False)
+                                def _make_cc_allow_cb(_action_ref, _perm_widget, _w):
+                                    def _cb():
+                                        _w.set_answer_visible(True)
+                                        self._execute_computer_control(_action_ref)
+                                    return _cb
+                                def _make_cc_deny_cb(_w):
+                                    def _cb():
+                                        _w.set_answer("Akcja anulowana.")
+                                        _w.set_answer_visible(True)
+                                    return _cb
+                                perm.allowed.connect(_make_cc_allow_cb(cc_act_ref, perm, widget))
+                                perm.denied.connect(_make_cc_deny_cb(widget))
+                                perm.open_settings.connect(self._navigate_to_trust_settings)
+                                self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
+                                insert_pos += 1
+                        elif act.get('type') == 'trust_request':
+                            req_level  = act.get('required_level', 2)
+                            cmd        = act.get('command', '')
+                            desc       = act.get('description', cmd)[:80]
+                            is_rerun   = act.get('source') == 'request_permission'
+                            if settings_store.get("trust_level", 1) >= req_level:
+                                if cmd:
+                                    self._run_trusted_terminal(cmd, insert_pos)
+                                    insert_pos += 1
+                            else:
+                                if is_rerun:
+                                    # Pause all finalization — keep widget alive + input locked
+                                    self._continuation_pending = True
+                                perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
+                                self._perm_widget = perm  # keep strong ref
+                                widget.set_answer_visible(False)
+                                def _make_tr_allow_cb(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking):
+                                    def _cb():
+                                        if _rerun:
+                                            # ── In-place continuation ───────────────────────────
+                                            # Clear the flag — finalize runs normally after continuation
+                                            self._continuation_pending = False
+                                            # Remove the permission widget from the list
+                                            for _i in range(self.list_widget.count() - 1, -1, -1):
+                                                _itm = self.list_widget.item(_i)
+                                                _w_itm = self.list_widget.itemWidget(_itm)
+                                                if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                                    self.list_widget.takeItem(_i)
+                                                    break
+                                            # Pop the incomplete pre-permission exchange from history
+                                            if (len(self.chat_history) >= 2 and
+                                                    self.chat_history[-1].get('role') == 'assistant' and
+                                                    self.chat_history[-2].get('role') == 'user'):
+                                                self.chat_history.pop()
+                                                self.chat_history.pop()
+                                            # The existing widget is already _streaming_answer_widget
+                                            # (finalize was skipped so the ref was never cleared)
+                                            self._continuation_thinking_prefix = _prior_thinking
+                                            _w.set_answer("")
+                                            _w.set_answer_visible(True)
+                                            _w.set_thinking_collapsed(False)
+                                            # Boost trust and re-run — widget updates in-place
+                                            from src.services.llm.tools import set_trust_boost
+                                            set_trust_boost(_lvl)
+                                            QTimer.singleShot(100, lambda: self.start_ai_worker(
+                                                getattr(self, '_last_ai_query', ''), None
+                                            ))
+                                        else:
+                                            _w.set_answer_visible(True)
+                                            _row = -1
+                                            for _i in range(self.list_widget.count()):
+                                                _itm = self.list_widget.item(_i)
+                                                _w_itm = self.list_widget.itemWidget(_itm)
+                                                if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                                    _row = _i + 1
+                                                    break
+                                            self._run_trusted_terminal(_cmd, _row)
+                                    return _cb
+                                def _make_tr_deny_cb(_w, _rerun):
+                                    def _cb():
+                                        if _rerun:
+                                            self._continuation_pending = False
+                                            self._finalize_response_ui()  # run the cleanup we held back
+                                        _w.set_answer("Akcja anulowana.")
+                                        _w.set_answer_visible(True)
+                                    return _cb
+                                def _make_tr_settings_cb(_rerun):
+                                    def _cb():
+                                        if _rerun:
+                                            self._continuation_pending = False
+                                            self._finalize_response_ui()
+                                        self._navigate_to_trust_settings()
+                                    return _cb
+                                perm.allowed.connect(_make_tr_allow_cb(cmd, perm, widget, req_level, is_rerun, data.get("thinking", "")))
+                                perm.denied.connect(_make_tr_deny_cb(widget, is_rerun))
+                                perm.open_settings.connect(_make_tr_settings_cb(is_rerun))
+                                self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
+                                insert_pos += 1
                         elif act.get('type') == 'open_app':
                             w = AppActionWidget(act['name'])
                             def launch_app(name, widget):
@@ -3423,6 +3658,77 @@ class OmniWindow(QWidget):
                     w = UninstallActionWidget(act['name'])
                     w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
                     add_item(w, act, anim="fade")
+                elif act.get('type') == 'trust_request':
+                    req_level = act.get('required_level', 2)
+                    cmd       = act.get('command', '')
+                    desc      = act.get('description', cmd)[:80]
+                    is_rerun  = act.get('source') == 'request_permission'
+                    if settings_store.get("trust_level", 1) >= req_level:
+                        if cmd:
+                            self._run_trusted_terminal(cmd)
+                    else:
+                        if is_rerun and _answer_bubble:
+                            self._continuation_pending = True
+                            self._streaming_answer_widget = _answer_bubble  # make widget reusable
+                        perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
+                        if _answer_bubble:
+                            _answer_bubble.set_answer_visible(False)
+                        def _make_tr_allow_non_stream(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking):
+                            def _cb():
+                                if _rerun:
+                                    self._continuation_pending = False
+                                    for _i in range(self.list_widget.count() - 1, -1, -1):
+                                        _itm = self.list_widget.item(_i)
+                                        _w_itm = self.list_widget.itemWidget(_itm)
+                                        if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                            self.list_widget.takeItem(_i)
+                                            break
+                                    if (len(self.chat_history) >= 2 and
+                                            self.chat_history[-1].get('role') == 'assistant' and
+                                            self.chat_history[-2].get('role') == 'user'):
+                                        self.chat_history.pop()
+                                        self.chat_history.pop()
+                                    self._continuation_thinking_prefix = _prior_thinking
+                                    if _w:
+                                        _w.set_answer("")
+                                        _w.set_answer_visible(True)
+                                        _w.set_thinking_collapsed(False)
+                                    from src.services.llm.tools import set_trust_boost
+                                    set_trust_boost(_lvl)
+                                    QTimer.singleShot(100, lambda: self.start_ai_worker(
+                                        getattr(self, '_last_ai_query', ''), None
+                                    ))
+                                else:
+                                    if _w: _w.set_answer_visible(True)
+                                    _row = -1
+                                    for _i in range(self.list_widget.count()):
+                                        _itm = self.list_widget.item(_i)
+                                        _w_itm = self.list_widget.itemWidget(_itm)
+                                        if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                            _row = _i + 1
+                                            break
+                                    self._run_trusted_terminal(_cmd, _row)
+                            return _cb
+                        def _make_tr_deny_non_stream(_w, _rerun):
+                            def _cb():
+                                if _rerun:
+                                    self._continuation_pending = False
+                                    self._finalize_response_ui()
+                                if _w:
+                                    _w.set_answer("Akcja anulowana.")
+                                    _w.set_answer_visible(True)
+                            return _cb
+                        def _make_tr_settings_ns_cb(_rerun):
+                            def _cb():
+                                if _rerun:
+                                    self._continuation_pending = False
+                                    self._finalize_response_ui()
+                                self._navigate_to_trust_settings()
+                            return _cb
+                        perm.allowed.connect(_make_tr_allow_non_stream(cmd, perm, _answer_bubble, req_level, is_rerun, thinking))
+                        perm.denied.connect(_make_tr_deny_non_stream(_answer_bubble, is_rerun))
+                        perm.open_settings.connect(_make_tr_settings_ns_cb(is_rerun))
+                        add_item(perm, {"type": "trust_permission"}, anim="pop")
                 elif act.get('type') == 'open_app':
                     w = AppActionWidget(act['name'])
                     def launch_app(name, widget):

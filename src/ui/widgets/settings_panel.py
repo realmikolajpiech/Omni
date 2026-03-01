@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
     QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QFont, QIcon, QColor, QPainter
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
 
 from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
@@ -65,6 +65,324 @@ _PRIVACY_ITEMS = [
         "The app is open-source — you can verify this yourself.",
     ),
 ]
+
+
+# ── Trust level data ─────────────────────────────────────────────────────────
+
+_TRUST_NAMES = {1: "Assistant", 2: "Automation", 3: "Full Control"}
+
+# Cumulative capabilities introduced at each level
+_ALL_CAPS = {
+    1: [
+        "AI chat & web search",
+        "File & semantic search",
+        "Read-only terminal  (battery, disk, memory…)",
+        "Open files & apps",
+        "Calculator, translate, weather & more",
+    ],
+    2: [
+        "Create, copy & move files",
+        "Computer control  (click, type, scroll)",
+        "System modifications  (Dock, network, power…)",
+    ],
+    3: [
+        "Install & uninstall apps",
+        "Privileged commands  (sudo, rm, brew…)",
+    ],
+}
+
+_GRAD_COLORS = ["#2E5CB8", "#6A0DAD", "#D92E87", "#FF8533"]
+
+
+# ── Custom trust slider ───────────────────────────────────────────────────────
+
+class _TrustSlider(QWidget):
+    """
+    3-stop custom slider drawn entirely in paintEvent.
+    Animates the knob position smoothly between stops.
+    """
+    level_changed = pyqtSignal(int)
+
+    _MARGIN   = 20   # px from each edge to first/last stop
+    _TRACK_H  = 6    # track height
+    _KNOB_R   = 10   # knob radius
+
+    def __init__(self, level: int = 1, theme: str = "dark", parent=None):
+        super().__init__(parent)
+        self._level  = level
+        self._theme  = theme
+        self._knob_t = float(level - 1) / 2   # 0.0 → 0.5 → 1.0
+        self._anim = None  # type: QPropertyAnimation | None
+        self.setFixedHeight(72)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    # ── Qt property for animation ─────────────────────────────────────────────
+
+    @pyqtProperty(float)
+    def knob_t(self) -> float:
+        return self._knob_t
+
+    @knob_t.setter
+    def knob_t(self, val: float):
+        self._knob_t = val
+        self.update()
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def set_level(self, level: int, animate: bool = True):
+        if level == self._level and abs(self._knob_t - float(level - 1) / 2) < 0.01:
+            return
+        self._level = level
+        target = float(level - 1) / 2
+        if animate:
+            if self._anim:
+                self._anim.stop()
+            self._anim = QPropertyAnimation(self, b"knob_t")
+            self._anim.setDuration(300)
+            self._anim.setStartValue(self._knob_t)
+            self._anim.setEndValue(target)
+            self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._anim.start()
+        else:
+            self._knob_t = target
+            self.update()
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self.update()
+
+    # ── Geometry helpers ──────────────────────────────────────────────────────
+
+    def _track_x0(self) -> float:
+        return float(self._MARGIN)
+
+    def _track_x1(self) -> float:
+        return float(self.width() - self._MARGIN)
+
+    def _track_y(self) -> float:          # center y of track
+        return float(self._KNOB_R + 4)
+
+    def _stop_x(self, level: int) -> float:
+        return self._track_x0() + (level - 1) * (self._track_x1() - self._track_x0()) / 2
+
+    def _current_knob_x(self) -> float:
+        return self._track_x0() + self._knob_t * (self._track_x1() - self._track_x0())
+
+    # ── Input ─────────────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            x = event.position().x()
+            dists = [(abs(x - self._stop_x(l)), l) for l in [1, 2, 3]]
+            new_level = min(dists)[1]
+            if new_level != self._level:
+                self.set_level(new_level)
+                self.level_changed.emit(new_level)
+        super().mousePressEvent(event)
+
+    # ── Paint ─────────────────────────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        dark = self._theme == "dark"
+        x0   = self._track_x0()
+        x1   = self._track_x1()
+        ty   = self._track_y()
+        th   = float(self._TRACK_H)
+        kr   = float(self._KNOB_R)
+        kx   = self._current_knob_x()
+
+        # ── Track background ──────────────────────────────────────────
+        track_rect = QRectF(x0, ty - th / 2, x1 - x0, th)
+        track_path = QPainterPath()
+        track_path.addRoundedRect(track_rect, th / 2, th / 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(track_path, QColor(255, 255, 255, 30 if dark else 40))
+
+        # ── Filled portion (gradient left → knob) ─────────────────────
+        fill_w = kx - x0
+        if fill_w > 1:
+            grad = QLinearGradient(x0, 0, x1, 0)
+            for i, c in enumerate(_GRAD_COLORS):
+                grad.setColorAt(i / (len(_GRAD_COLORS) - 1), QColor(c))
+            fill_path = QPainterPath()
+            fill_path.addRoundedRect(QRectF(x0, ty - th / 2, fill_w, th), th / 2, th / 2)
+            painter.fillPath(fill_path, QBrush(grad))
+
+        # ── Stop dots ─────────────────────────────────────────────────
+        for l in [1, 2, 3]:
+            sx = self._stop_x(l)
+            on_track = sx <= kx + 1
+            dot_alpha = 220 if on_track else (60 if dark else 80)
+            painter.setBrush(QColor(255, 255, 255, dot_alpha) if (on_track or dark)
+                             else QColor(0, 0, 0, dot_alpha))
+            painter.drawEllipse(QRectF(sx - 3, ty - 3, 6, 6))
+
+        # ── Knob shadow ───────────────────────────────────────────────
+        painter.setBrush(QColor(0, 0, 0, 35))
+        painter.drawEllipse(QRectF(kx - kr + 1, ty - kr + 2, kr * 2, kr * 2))
+
+        # ── Knob gradient ring ────────────────────────────────────────
+        knob_grad = QLinearGradient(kx - kr, ty - kr, kx + kr, ty + kr)
+        for i, c in enumerate(_GRAD_COLORS[:3]):
+            knob_grad.setColorAt(i / 2, QColor(c))
+        painter.setBrush(QBrush(knob_grad))
+        painter.drawEllipse(QRectF(kx - kr, ty - kr, kr * 2, kr * 2))
+
+        # ── Knob inner white circle ───────────────────────────────────
+        ir = kr - 2.5
+        painter.setBrush(QColor(255, 255, 255) if dark else QColor(252, 250, 255))
+        painter.drawEllipse(QRectF(kx - ir, ty - ir, ir * 2, ir * 2))
+
+        # ── Labels ────────────────────────────────────────────────────
+        label_y = ty + kr + 8
+        label_data = [(1, "1", "Assistant"), (2, "2", "Automation"), (3, "3", "Full Control")]
+
+        for l, num, name in label_data:
+            sx      = self._stop_x(l)
+            active  = (l == self._level)
+            tc      = QColor(255, 255, 255) if dark else QColor(17, 17, 17)
+            sc      = QColor(130, 130, 130) if dark else QColor(140, 140, 140)
+            col     = tc if active else sc
+
+            # Number  (Instrument Serif, bolder when active)
+            num_font = QFont("Instrument Serif", 11)
+            num_font.setBold(active)
+            painter.setFont(num_font)
+            painter.setPen(col)
+            fm = painter.fontMetrics()
+            painter.drawText(int(sx - fm.horizontalAdvance(num) / 2),
+                             int(label_y + fm.ascent()), num)
+
+            # Name (Manrope, smaller)
+            name_font = QFont("Manrope", 8)
+            painter.setFont(name_font)
+            fm2 = painter.fontMetrics()
+            name_y = int(label_y + fm.height() + 2 + fm2.ascent())
+            painter.drawText(int(sx - fm2.horizontalAdvance(name) / 2), name_y, name)
+
+
+# ── Capability panel ─────────────────────────────────────────────────────────
+
+class _TrustCapabilityPanel(QWidget):
+    """
+    Glass card showing what the AI can do at the current trust level,
+    plus what the next level would unlock.
+    Rebuilt dynamically when set_level() is called.
+    """
+
+    def __init__(self, level: int = 1, theme: str = "dark", parent=None):
+        super().__init__(parent)
+        self._level = level
+        self._theme = theme
+        self._inner = QVBoxLayout(self)
+        self._inner.setContentsMargins(20, 16, 20, 16)
+        self._inner.setSpacing(0)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._rebuild()
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def set_level(self, level: int):
+        self._level = level
+        self._rebuild()
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self._rebuild()
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _rebuild(self):
+        # Clear
+        while self._inner.count():
+            item = self._inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
+        dark     = self._theme == "dark"
+        primary  = "#FFFFFF" if dark else "#111111"
+        secondary= "#AAAAAA" if dark else "#777777"
+        accent   = "#C084FC" if dark else "#7C3AED"
+
+        def _lbl(text, font_family, size, color, bold=False, italic=False, wrap=False):
+            l = QLabel(text)
+            f = QFont(font_family, size)
+            f.setBold(bold)
+            f.setItalic(italic)
+            l.setFont(f)
+            l.setStyleSheet(f"background: transparent; color: {color};")
+            if wrap:
+                l.setWordWrap(True)
+            return l
+
+        def _row(icon, text, icon_color, text_color, font_size=10):
+            w = QWidget()
+            w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(9)
+            dot = _lbl(icon, "Manrope", font_size, icon_color, bold=True)
+            dot.setFixedWidth(14)
+            cap = _lbl(text, "Manrope", font_size, text_color)
+            h.addWidget(dot)
+            h.addWidget(cap)
+            h.addStretch()
+            return w
+
+        def _divider():
+            f = QFrame()
+            f.setFixedHeight(1)
+            f.setStyleSheet(
+                f"background: {'rgba(255,255,255,0.10)' if dark else 'rgba(0,0,0,0.08)'};"
+            )
+            return f
+
+        # Level name header
+        self._inner.addWidget(_lbl(_TRUST_NAMES[self._level], "Instrument Serif", 15, primary))
+        self._inner.addSpacing(12)
+
+        # All enabled capabilities (cumulative)
+        for l in range(1, self._level + 1):
+            for cap in _ALL_CAPS[l]:
+                self._inner.addWidget(_row("✓", cap, accent, primary))
+                self._inner.addSpacing(5)
+
+        self._inner.addStretch()
+        self.adjustSize()
+        self.update()
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    # ── Paint ─────────────────────────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self._theme == "dark"
+        r    = QRectF(self.rect())
+
+        bg = QColor(12, 10, 18, 210) if dark else QColor(248, 246, 252, 200)
+        bg_path = QPainterPath()
+        bg_path.addRoundedRect(r, 14, 14)
+        painter.fillPath(bg_path, bg)
+
+        grad = QLinearGradient(0, 0, self.width(), self.height())
+        for i, c in enumerate(_GRAD_COLORS):
+            grad.setColorAt(i / (len(_GRAD_COLORS) - 1), QColor(c))
+        painter.setPen(QPen(QBrush(grad), 1.0))
+        bpath = QPainterPath()
+        bpath.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 13.5, 13.5)
+        painter.drawPath(bpath)
 
 
 def _font(family: str, size: int, bold: bool = False, italic: bool = False) -> QFont:
@@ -171,6 +489,7 @@ class SettingsPanel(QWidget):
         # ── Build Pages ──────────────────────────────────────────────
         self._add_page("Language", self._build_transcription())
         self._add_page("AI Model", self._build_model())
+        self._add_page("Trust", self._build_trust())
         self._add_page("Privacy", self._build_privacy())
 
         root.addWidget(self.sidebar)
@@ -338,6 +657,30 @@ class SettingsPanel(QWidget):
         page.add_stretch()
         return page
 
+    def _build_trust(self) -> QWidget:
+        page = SettingsPage("Trust")
+
+        page.add_widget(self._desc(
+            "Control what Omni is allowed to do on your behalf. "
+            "You can always grant one-time permission for a single action "
+            "without changing the global level."
+        ))
+        page.add_spacing(20)
+
+        saved_level = settings_store.get("trust_level", 1)
+
+        self._trust_slider = _TrustSlider(level=saved_level, theme=self.current_theme)
+        self._trust_slider.level_changed.connect(self._on_trust_changed)
+        page.add_widget(self._trust_slider)
+
+        page.add_spacing(20)
+
+        self._trust_cap_panel = _TrustCapabilityPanel(level=saved_level, theme=self.current_theme)
+        page.add_widget(self._trust_cap_panel)
+
+        page.add_stretch()
+        return page
+
     # ── Widget factories ─────────────────────────────────────────────
 
     def _desc(self, text: str) -> QLabel:
@@ -371,6 +714,13 @@ class SettingsPanel(QWidget):
 
     def _on_lang_changed(self, index: int):
         settings_store.set("transcription_language", self.lang_combo.itemData(index))
+
+    def _on_trust_changed(self, level: int):
+        settings_store.set("trust_level", level)
+        if hasattr(self, "_trust_slider"):
+            self._trust_slider.set_level(level)
+        if hasattr(self, "_trust_cap_panel"):
+            self._trust_cap_panel.set_level(level)
 
     def _on_personality_changed(self):
         btn = self.personality_group.checkedButton()
@@ -439,6 +789,12 @@ class SettingsPanel(QWidget):
 
         reset_color    = secondary
         combo_popup_bg = "#1c1c1c" if dark else "#f3f3f3"
+
+        # Propagate theme to trust widgets
+        if hasattr(self, "_trust_slider"):
+            self._trust_slider.set_theme(theme_name)
+        if hasattr(self, "_trust_cap_panel"):
+            self._trust_cap_panel.set_theme(theme_name)
 
         # Apply to pages
         for name, page in self._pages.items():

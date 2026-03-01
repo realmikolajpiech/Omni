@@ -1,10 +1,84 @@
 """Tool definitions and execution for function calling with the main LLM."""
 import json
 import logging
+import re
+import threading
+
+# ── Per-request trust-request collector ──────────────────────────────────────
+# Each Flask request runs in its own thread, so threading.local() keeps
+# the pending list isolated per request.
+_tls = threading.local()
+
+
+def _get_pending() -> list:
+    if not hasattr(_tls, "trust_requests"):
+        _tls.trust_requests = []
+    return _tls.trust_requests
+
+
+def flush_pending_trust_requests() -> list:
+    """Return and clear all trust_request actions accumulated this request."""
+    reqs = list(_get_pending())
+    _tls.trust_requests = []
+    return reqs
+
+
+# ── Temporary trust boost (set by UI on "Allow once" for request_permission) ─
+# Raised to the required level for a single AI turn; cleared in on_ai_response.
+_trust_boost: int = 0
+
+
+def set_trust_boost(level: int) -> None:
+    """Temporarily elevate effective trust level for the current AI turn."""
+    global _trust_boost
+    _trust_boost = level
+
+
+def clear_trust_boost() -> None:
+    """Clear the temporary trust boost after a request completes."""
+    global _trust_boost
+    _trust_boost = 0
+
+
+def get_effective_trust() -> int:
+    """Return the higher of the user's configured trust level and any active boost."""
+    import src.core.settings_store as _ss
+    return max(_ss.get("trust_level", 1), _trust_boost)
 
 # ── Tool Schemas ─────────────────────────────────────────────────────────────
 
 TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "request_permission",
+            "description": (
+                "Request elevated trust permission from the user before performing an action "
+                "that requires Automation (level 2) or Full Control (level 3) trust. "
+                "Call this FIRST when you're about to do something that modifies system state, "
+                "files, or settings, or installs/removes software — especially if trust may be insufficient. "
+                "Level 2 (Automation): file writes, system settings changes, process management. "
+                "Level 3 (Full Control): file deletions, package installs/uninstalls, sudo commands. "
+                "If permission is granted, proceed immediately with the actual action. "
+                "If denied, stop and inform the user gracefully."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "required_level": {
+                        "type": "integer",
+                        "enum": [2, 3],
+                        "description": "Minimum trust level needed: 2=Automation (writes/settings), 3=Full Control (deletions/installs).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable description of what you want to do, e.g. 'delete old log files from Desktop'.",
+                    },
+                },
+                "required": ["required_level", "description"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -319,7 +393,12 @@ TOOL_SCHEMAS = [
 def execute_tool(name: str, arguments: dict) -> str:
     """Dispatch a tool call by name and return the result as a plain string."""
     try:
-        if name == "search_web":
+        if name == "request_permission":
+            return _tool_request_permission(
+                arguments.get("required_level", 2),
+                arguments.get("description", ""),
+            )
+        elif name == "search_web":
             return _tool_search_web(arguments.get("query", ""))
         elif name == "search_files":
             return _tool_search_files(arguments.get("query", ""))
@@ -428,11 +507,124 @@ def _tool_memory_delete(query: str) -> str:
     return f"Deleted memories matching: {query}" if ok else "No matching memories found to delete."
 
 
+# ── Terminal trust classification ─────────────────────────────────────────────
+
+# Patterns that require trust level 3 (destructive / privileged)
+_TERMINAL_L3 = [
+    r'\brm\s',           # delete files
+    r'\bsudo\b',         # privilege escalation
+    r'\bchmod\b',        # permission change
+    r'\bchown\b',        # ownership change
+    r'\bdd\b',           # raw disk operations
+    r'\bmkfs\b',         # format filesystem
+    r'\bfdisk\b',        # disk partitioning
+    r'diskutil\s+(erase|format|partition|zeroDisk|secureErase)',
+    r'\bbrew\s+install\b',
+    r'\bbrew\s+uninstall\b',
+    r'\bnpm\s+install\b',
+    r'\bpip\d?\s+install\b',
+    r'\bapt(-get)?\s+install\b',
+    r'\byum\s+install\b',
+    r'\bdnf\s+install\b',
+]
+
+# Patterns that require trust level 2 (write to filesystem or system state)
+_TERMINAL_L2 = [
+    # ── File system writes ────────────────────────────────────────────────────
+    r'\btouch\b',            # create / update file timestamp
+    r'\bmkdir\b',            # create directory
+    r'\bcp\b',               # copy file
+    r'\bmv\b',               # move / rename file
+    r'\btee\b',              # write to file while piping
+    r'\bwget\b',             # download file to disk
+    r'\bcurl\b.*\s-[a-z]*o', # curl saving output (-o / -O)
+    r'(?<![=<>!])>{1,2}(?![>=])',  # shell redirect  >  or  >>
+    # ── System state modifications ────────────────────────────────────────────
+    r'\bdefaults\s+write\b',
+    r'\bdefaults\s+delete\b',
+    r'\bkillall\b',
+    r'\bkill\s+(-\d+\s+)?\d+',
+    r'\bosascript\b',
+    r'\blaunchctl\b',
+    r'\bpmset\b',
+    r'\bnetworksetup\b',
+    r'\bscutil\s+--set\b',
+    r'\bsystemsetup\b',
+]
+
+
+def _terminal_required_trust_level(command: str) -> int:
+    """Return the minimum trust level needed to run this terminal command.
+
+    1 — read-only            (ioreg, df, system_profiler, sw_vers, cat, ls, …)
+    2 — filesystem / system  (touch, mkdir, cp, mv, defaults write, killall, …)
+    3 — destructive/privileged (rm, sudo, brew install, …)
+    """
+    lower = command.lower()
+    for pat in _TERMINAL_L3:
+        if re.search(pat, lower):
+            return 3
+    for pat in _TERMINAL_L2:
+        if re.search(pat, lower):
+            return 2
+    return 1
+
+
+def _tool_request_permission(required_level: int, description: str) -> str:
+    """Check / request elevated trust from the user.
+
+    Returns "Permission granted." when effective trust >= required_level,
+    otherwise queues a trust_request action (source="request_permission") for
+    the UI to show a popup, and returns a [Permission required] message so the
+    AI knows to stop and wait.
+    """
+    _LEVEL_NAMES = {1: "Assistant", 2: "Automation", 3: "Full Control"}
+    required_level = max(2, min(3, int(required_level)))  # clamp to 2-3
+    current = get_effective_trust()
+
+    if current >= required_level:
+        return f"Permission granted. Trust level: {_LEVEL_NAMES[current]}. Proceed with the action."
+
+    description = (description or "perform this action").strip()
+    _get_pending().append({
+        "type":             "trust_request",
+        "required_level":   required_level,
+        "command":          "",   # no command — UI will re-run the AI query
+        "description":      description,
+        "source":           "request_permission",
+    })
+    logging.info(f"[tool:request_permission] queued trust_request level={required_level} desc={description!r}")
+    return (
+        f"[Permission required] '{_LEVEL_NAMES[required_level]}' trust is needed to {description}. "
+        f"Current trust: '{_LEVEL_NAMES[current]}'. "
+        f"A permission request has been sent to the user — do not attempt the action now."
+    )
+
+
 def _tool_run_terminal(command: str, description: str = "") -> str:
     import subprocess
+
     command = command.strip()
     if not command:
         return "Error: empty command."
+
+    required = _terminal_required_trust_level(command)
+    current  = get_effective_trust()
+
+    if current < required:
+        # Queue a trust_request action so the UI can show a permission popup
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": required,
+            "command":        command,
+            "description":    description or command,
+        })
+        level_names = {1: "Assistant", 2: "Automation", 3: "Full Control"}
+        return (
+            f"[Permission required] '{level_names[required]}' trust is needed for this command. "
+            f"The user is being prompted for one-time permission."
+        )
+
     logging.info(f"[tool:run_terminal] {description or command!r}")
     try:
         proc = subprocess.run(
