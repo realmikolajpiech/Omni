@@ -4,23 +4,26 @@ import concurrent.futures
 
 import httpx
 
-from src.core.config import SERPER_MAIN_API_KEY, SERPER_FAST_API_KEY
+from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID
 from src.services.system.location import get_system_location, get_ip_location, get_search_locale
 
 # ---------------------------------------------------------------------------
-# Persistent HTTP clients (connection reuse, HTTP/2 for Serper)
+# Persistent HTTP clients
 # ---------------------------------------------------------------------------
-_serper_main_client = httpx.Client(
-    base_url="https://google.serper.dev",
+# All search requests go through the Omni Worker backend — no API keys in-app.
+_backend_client = httpx.Client(
+    base_url=BACKEND_URL,
     timeout=4.0,
-    http2=True,
-) if SERPER_MAIN_API_KEY else None
+    headers={
+        "X-Omni-Secret": OMNI_SECRET,
+        "X-Device-ID":   DEVICE_ID,
+        "Content-Type":  "application/json",
+    },
+)
 
-_serper_fast_client = httpx.Client(
-    base_url="https://google.serper.dev",
-    timeout=2.0,
-    http2=True,
-) if SERPER_FAST_API_KEY else None
+# Keep a slow alias for non-fast calls (same client, different timeout passed per-call)
+_serper_main_client = _backend_client
+_serper_fast_client = _backend_client
 
 _local_client = httpx.Client(
     timeout=3.0,
@@ -106,38 +109,31 @@ _SERPER_TYPE_MAP = {
 
 def _serper_search(query: str, categories: str = 'general', count: int = 5, fast: bool = False) -> list:
     """
-    Hit Serper.dev and normalize results to the same shape as SearXNG
-    (dicts with 'title', 'url', 'content' keys).
-    Uses SERPER_FAST_API_KEY when fast=True, SERPER_MAIN_API_KEY otherwise.
+    Search via the Omni Worker backend (which forwards to Serper.dev).
+    The real Serper API key lives on the Worker — never in the app binary.
     """
-    if fast:
-        client, api_key = _serper_fast_client, SERPER_FAST_API_KEY
-    else:
-        client, api_key = _serper_main_client, SERPER_MAIN_API_KEY
-
-    if not client:
-        return []
-
     endpoint = _SERPER_TYPE_MAP.get(categories, '/search')
-    loc = get_search_locale()
+    loc      = get_search_locale()
+    timeout  = 2.0 if fast else 4.0
 
     payload = {
-        "q": query,
+        "_endpoint": endpoint,   # tells the Worker which Serper endpoint to hit
+        "_fast":     fast,       # tells the Worker which API key to use
+        "q":   query,
         "num": count,
-        "gl": loc[:2] if loc else "us",
-        "hl": loc[:2] if loc else "en"  # Use host language based on locale
+        "gl":  loc[:2] if loc else "us",
+        "hl":  loc[:2] if loc else "en",
     }
 
     try:
-        r = client.post(
-            endpoint,
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json=payload,
-        )
+        logging.info(f"[search] POST {BACKEND_URL}/v1/search payload={payload}")
+        r = _backend_client.post("/v1/search", json=payload, timeout=timeout)
+        logging.info(f"[search] response status={r.status_code} body={r.text[:500]!r}")
         r.raise_for_status()
         data = r.json()
+        logging.info(f"[search] parsed JSON keys={list(data.keys())}")
     except Exception as e:
-        logging.warning(f"Serper request failed: {e}")
+        logging.warning(f"[search] Serper request failed ({type(e).__name__}): {e}")
         return []
 
     # Normalize different Serper response shapes into uniform dicts
@@ -182,6 +178,7 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
                 'content': item.get('snippet', ''),
             })
 
+    logging.info(f"[search] normalized {len(results)} results for category={categories!r}")
     return results
 
 
@@ -198,12 +195,10 @@ def search_api(query: str, categories: str = 'general', fast: bool = False) -> l
         return cached
 
     t0 = time.time()
-    results = []
 
-    if (fast and SERPER_FAST_API_KEY) or (not fast and SERPER_MAIN_API_KEY):
-        results = _serper_search(query, categories, fast=fast)
-        dt = time.time() - t0
-        logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
+    results = _serper_search(query, categories, fast=fast)
+    dt = time.time() - t0
+    logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
 
     if not results:
         logging.warning(f"Serper returned 0 results for '{query}'")

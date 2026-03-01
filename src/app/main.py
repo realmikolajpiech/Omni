@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon, QFontDatabase
 from src.core.logger import setup_logging, setup_exception_hook
 from src.ui.window import OmniWindow
-from src.core.config import LOGO_PATH
+from src.core.config import LOGO_PATH, APP_VERSION
 
 def load_fonts():
     """Load custom fonts from assets directory"""
@@ -142,6 +142,43 @@ def main():
     window.show()
     window.center()
 
+    # ── Background update check ───────────────────────────────────────────────
+    from PyQt6.QtCore import QObject, pyqtSignal as _Signal
+
+    class _UpdateSignal(QObject):
+        found = _Signal(str, str, str)   # tag, zipball_url, changelog
+
+    _upd = _UpdateSignal()
+
+    def _show_update_dialog(tag, url, body):
+        from src.ui.update_dialog import UpdateDialog
+        dlg = UpdateDialog(APP_VERSION, tag, url, body)
+        if dlg.exec():   # accepted → user clicked Update Now
+            QApplication.instance().quit()
+
+    _upd.found.connect(_show_update_dialog)
+
+    def _bg_update_check():
+        from src.core.updater import check_update
+        try:
+            tag, url, body = check_update(APP_VERSION)
+            if tag:
+                _upd.found.emit(tag, url, body)
+        except Exception as e:
+            logging.debug(f"Update check error: {e}")
+
+    import threading as _threading
+    _threading.Thread(target=_bg_update_check, daemon=True).start()
+
+    # ── Auth: load saved session + start memory sync ──────────────────────────
+    from src.core import auth as _auth
+    from src.core import subscription as _subscription
+    from src.services.sync import memory_sync as _memory_sync
+
+    _auth.load_saved_session()
+    _subscription.refresh_status()
+    _memory_sync.start(_auth.get_access_token)
+
     # Global Hotkey Setup
     def toggle_omni():
         try:
@@ -255,28 +292,55 @@ def main():
 
     # Global Hotkey Registration
     if sys.platform == "darwin":
+
+        # Request Accessibility permission via pure ctypes — no PyObjC import
+        # needed, so this always runs even if PyObjC bindings are incomplete.
+        # Calling AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=True
+        # registers this app in System Settings → Accessibility and shows the
+        # "wants to control your computer" system prompt if not yet approved.
+        def _request_ax_permission():
+            import ctypes, ctypes.util
+            try:
+                libobjc = ctypes.CDLL(ctypes.util.find_library("objc"))
+                libobjc.objc_getClass.restype   = ctypes.c_void_p
+                libobjc.objc_getClass.argtypes  = [ctypes.c_char_p]
+                libobjc.sel_registerName.restype  = ctypes.c_void_p
+                libobjc.sel_registerName.argtypes = [ctypes.c_char_p]
+                msg = libobjc.objc_msgSend
+
+                # [NSNumber numberWithBool:YES]
+                msg.restype  = ctypes.c_void_p
+                msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+                yes = msg(libobjc.objc_getClass(b"NSNumber"),
+                          libobjc.sel_registerName(b"numberWithBool:"), True)
+
+                # [NSString stringWithUTF8String:"AXTrustedCheckOptionPrompt"]
+                msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+                key = msg(libobjc.objc_getClass(b"NSString"),
+                          libobjc.sel_registerName(b"stringWithUTF8String:"),
+                          b"AXTrustedCheckOptionPrompt")
+
+                # [NSDictionary dictionaryWithObject:yes forKey:key]
+                msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                ctypes.c_void_p, ctypes.c_void_p]
+                opts = msg(libobjc.objc_getClass(b"NSDictionary"),
+                           libobjc.sel_registerName(b"dictionaryWithObject:forKey:"),
+                           yes, key)
+
+                ax = ctypes.CDLL(
+                    "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+                ax.AXIsProcessTrustedWithOptions.restype  = ctypes.c_bool
+                ax.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+                ax.AXIsProcessTrustedWithOptions(opts)
+            except Exception as e:
+                logging.debug(f"[accessibility] {e}")
+
+        QTimer.singleShot(500, _request_ax_permission)
+
         # macOS: Use Native NSEvent for reliable global hotkeys (requires Accessibility permissions)
         try:
             import AppKit
             from AppKit import NSEvent, NSKeyDownMask, NSFlagsChangedMask
-            from ApplicationServices import AXIsProcessTrusted
-            
-            # 1. Check Permissions
-            def check_permissions():
-                if not AXIsProcessTrusted():
-                    logging.warning("Accessibility permissions missing!")
-                    # Show Dialog on Main Thread
-                    from PyQt6.QtWidgets import QMessageBox
-                    msg = QMessageBox()
-                    msg.setIcon(QMessageBox.Icon.Warning)
-                    msg.setWindowTitle("Permissions Needed")
-                    msg.setText("Global Hotkeys require Accessibility Permissions")
-                    msg.setInformativeText("To use the 'Option + Command' shortcut globally:\n\n1. Open System Settings\n2. Go to Privacy & Security > Accessibility\n3. Grant permission to your Terminal (e.g., iTerm, Terminal) or 'Omni'\n4. Restart the app.")
-                    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                    msg.exec()
-            
-            # Run check shortly after startup
-            QTimer.singleShot(1000, check_permissions)
 
             # 2. Hotkey Logic
             # We need to track state to detect "Empty" Cmd+Opt presses

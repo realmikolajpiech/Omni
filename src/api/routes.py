@@ -1582,6 +1582,8 @@ def classify_files_endpoint():
             return jsonify({"error": "Fast model returned no response"}), 503
 
         raw = result["choices"][0]["message"]["content"].strip()
+        if not raw:
+            return jsonify({"decisions": [1] * len(files)})
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
 

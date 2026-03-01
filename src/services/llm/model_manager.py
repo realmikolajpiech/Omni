@@ -30,6 +30,9 @@ from src.core.config import (
     EMBED_MODEL_URL,
     EMBED_MODEL_HF_ID,
     DB_PATH,
+    BACKEND_URL,
+    OMNI_SECRET,
+    DEVICE_ID,
 )
 
 # Re-export for API status
@@ -107,26 +110,31 @@ def unload_main_model():
     pass
 
 
-def _create_groq_client():
-    """Create Groq client (OpenAI-compatible)."""
+def _backend_client():
+    """OpenAI-compatible client pointed at the Omni Worker backend.
+
+    The Worker holds the real API keys — the app only needs the shared
+    OMNI_SECRET and the device ID, both embedded in the binary.
+    """
     from openai import OpenAI
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY not set. Set it in environment.")
     return OpenAI(
-        api_key=GROQ_API_KEY,
-        base_url="https://api.groq.com/openai/v1",
+        api_key="omni-proxy",          # dummy — Worker ignores this field
+        base_url=BACKEND_URL + "/v1",
+        default_headers={
+            "X-Omni-Secret": OMNI_SECRET,
+            "X-Device-ID":   DEVICE_ID,
+        },
     )
+
+
+def _create_groq_client():
+    """Groq client — routed through the Omni Worker."""
+    return _backend_client()
 
 
 def _create_xai_client():
-    """Create xAI client (OpenAI-compatible)."""
-    from openai import OpenAI
-    if not XAI_API_KEY:
-        raise ValueError("XAI_API_KEY not set. Set it in environment.")
-    return OpenAI(
-        api_key=XAI_API_KEY,
-        base_url="https://api.x.ai/v1",
-    )
+    """xAI client — routed through the Omni Worker."""
+    return _backend_client()
 
 
 def _get_custom_client_and_model():
@@ -299,6 +307,32 @@ class XAIMainWrapper:
         }
 
 
+class _PplxEmbedWrapper:
+    """Wraps perplexity-ai/pplx-embed-context-v1-0.6b to match the SentenceTransformer .encode() interface.
+
+    The pplx model takes list[list[str]] (documents → chunks) and returns
+    list[np.ndarray] with shape (num_chunks, 1024).  We treat each input text
+    as a single-chunk document and L2-normalise the output so the existing
+    LanceDB L2-distance threshold (~1.1) stays meaningful.
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    def encode(self, texts):
+        import numpy as np
+        single = isinstance(texts, str)
+        if single:
+            texts = [texts]
+        doc_chunks = [[t] for t in texts]
+        raw = self.model.encode(doc_chunks)          # list of (1, 1024) arrays
+        vecs = np.array([emb[0] for emb in raw])    # (N, 1024)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        normed = vecs / norms
+        return normed[0] if single else normed
+
+
 def ensure_fast_model():
     """Load fast model (Groq GPT-OSS 20B)."""
     global fast_model, init_error
@@ -335,16 +369,14 @@ def ensure_resources():
 
         if embed_model is None:
             try:
-                from sentence_transformers import SentenceTransformer
+                import numpy as np
+                from transformers import AutoModel
                 model_id = EMBED_MODEL_HF_ID
-                device = "cpu"
-                logging.info(f"Loading Embedding Model ({model_id}) on {device}...")
+                logging.info(f"Loading Embedding Model ({model_id})...")
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-                try:
-                    embed_model = SentenceTransformer(model_id, device=device, trust_remote_code=True)
-                except Exception as e:
-                    logging.warning(f"Failed to load {model_id}: {e}")
-                    embed_model = SentenceTransformer(model_id, device="cpu", trust_remote_code=True)
+                _raw = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+                embed_model = _PplxEmbedWrapper(_raw)
+                logging.info("Embedding Model loaded.")
             except Exception as e:
                 logging.error(f"Embeddings Error: {e}")
 

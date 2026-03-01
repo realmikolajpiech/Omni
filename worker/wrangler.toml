@@ -1,0 +1,33 @@
+name            = "omni-backend"
+main            = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# KV namespaces — run these commands to create them, then paste the IDs below:
+#   wrangler kv:namespace create USAGE
+#   wrangler kv:namespace create SUBSCRIPTIONS
+#   wrangler kv:namespace create LICENSE_KEYS
+
+[[kv_namespaces]]
+binding = "USAGE"
+id      = "882c1a06981c43c48bff6f5a2e42be76"
+
+[[kv_namespaces]]
+binding = "SUBSCRIPTIONS"
+id      = "16c95122c7834f06b3939a21b2156dad"
+
+[[kv_namespaces]]
+binding = "LICENSE_KEYS"
+id      = "a855aebfb1c84020b402e99cef0791e7"
+
+# KV namespace — LICENSE_KEYS no longer used; can be kept or removed.
+
+# Secrets — set these with:
+#   wrangler secret put OMNI_SECRET
+#   wrangler secret put XAI_API_KEY
+#   wrangler secret put GROQ_API_KEY
+#   wrangler secret put SERPER_MAIN_API_KEY
+#   wrangler secret put SERPER_FAST_API_KEY
+#   wrangler secret put PAYMENT_WEBHOOK_SECRET
+#   wrangler secret put SUPABASE_URL            ← https://xxxx.supabase.co
+#   wrangler secret put SUPABASE_ANON_KEY       ← Settings → API → anon/publishable key
+#   wrangler secret put SUPABASE_SERVICE_KEY    ← Settings → API → service_role key

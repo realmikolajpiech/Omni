@@ -258,6 +258,20 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
+# App version (used for update checks)
+APP_VERSION = "0.5.0"
+
+# Backend (Cloudflare Worker) — all AI/search calls are proxied through here
+BACKEND_URL = os.environ.get("OMNI_BACKEND_URL", "https://omni-backend.heyomni.workers.dev")
+OMNI_SECRET = os.environ.get("OMNI_SECRET", "928623c24271f389cb638ce1853f0386b3728c0c8d50c3ea08166186580b3c2f")
+
+from src.core.device import get_device_id
+DEVICE_ID = get_device_id()
+
+# Supabase — auth + storage
+SUPABASE_URL      = os.environ.get("SUPABASE_URL",      "https://jfefwydquwvwuaeegbic.supabase.co")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmZWZ3eWRxdXd2d3VhZWVnYmljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4NjQ5ODAsImV4cCI6MjA4NzQ0MDk4MH0.EVzcMxAMkGlJAJPz4PP75Cfn-QgooJIbi8BCv0FT-0s")
+
 # Models (API-based, no local LLMs)
 # Fast model: Groq GPT-OSS 20B (low-latency intents/actions)
 FAST_MODEL_GROQ = "openai/gpt-oss-20b"
@@ -268,10 +282,10 @@ MAIN_MODEL_XAI = "grok-4-1-fast-reasoning"
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 # Embedding Model
-EMBED_MODEL_HF_ID = "BAAI/bge-m3" # Multi-functionality embedding model (Dense, Sparse, ColBERT)
-EMBED_MODEL_FILENAME = "bge-m3.onnx" # Placeholder
+EMBED_MODEL_HF_ID = "perplexity-ai/pplx-embed-context-v1-0.6b"  # 1024-dim, 32K context, contextualized
+EMBED_MODEL_FILENAME = "pplx-embed-context-v1-0.6b"
 EMBED_MODEL_PATH = os.path.join(MODEL_DIR, EMBED_MODEL_FILENAME)
-EMBED_MODEL_URL = "" 
+EMBED_MODEL_URL = ""
 
 # Voice Models
 OWW_WAKE_WORD_MODEL = "Hey_Omni"  # Custom wake word; set OWW_CUSTOM_MODEL_PATH to load local .onnx

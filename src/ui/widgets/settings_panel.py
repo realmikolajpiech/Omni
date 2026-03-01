@@ -11,6 +11,8 @@ from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGra
 
 from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
+import src.core.subscription as subscription
+import src.core.auth as auth
 
 LANGUAGES = [
     ("auto", "Auto — detect language"),
@@ -395,6 +397,54 @@ def _font(family: str, size: int, bold: bool = False, italic: bool = False) -> Q
 
 
 # ---------------------------------------------------------------------------
+# Usage Bar
+# ---------------------------------------------------------------------------
+
+class _UsageBar(QWidget):
+    """Thin horizontal progress bar for daily usage."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0   # 0–100
+        self.setFixedHeight(6)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._track_color  = QColor(255, 255, 255, 30)
+        self._fill_color   = QColor(255, 255, 255, 180)
+
+    def set_fraction(self, used: int, total: int):
+        if total <= 0:
+            self._value = 0
+        else:
+            self._value = max(0, min(100, int(used * 100 / total)))
+        # colour: green → yellow at 80 % → red at 100 %
+        if self._value >= 100:
+            self._fill_color = QColor("#ff5f5f")
+        elif self._value >= 80:
+            self._fill_color = QColor("#f5c542")
+        else:
+            self._fill_color = QColor(255, 255, 255, 180)
+        self.update()
+
+    def set_dark(self, dark: bool):
+        self._track_color = QColor(255, 255, 255, 30) if dark else QColor(0, 0, 0, 25)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = 3.0
+        rect = QRectF(0, 0, self.width(), self.height())
+        path = QPainterPath()
+        path.addRoundedRect(rect, r, r)
+        p.fillPath(path, QBrush(self._track_color))
+        fill_w = self.width() * self._value / 100
+        if fill_w > 0:
+            fill = QPainterPath()
+            fill.addRoundedRect(QRectF(0, 0, fill_w, self.height()), r, r)
+            p.fillPath(fill, QBrush(self._fill_color))
+
+
+# ---------------------------------------------------------------------------
 # Settings Page Base
 # ---------------------------------------------------------------------------
 
@@ -491,6 +541,7 @@ class SettingsPanel(QWidget):
         self._add_page("AI Model", self._build_model())
         self._add_page("Trust", self._build_trust())
         self._add_page("Privacy", self._build_privacy())
+        self._add_page("Account", self._build_account())
 
         root.addWidget(self.sidebar)
         root.addWidget(self.content_stack)
@@ -656,7 +707,6 @@ class SettingsPanel(QWidget):
             
         page.add_stretch()
         return page
-
     def _build_trust(self) -> QWidget:
         page = SettingsPage("Trust")
 
@@ -681,6 +731,178 @@ class SettingsPanel(QWidget):
         page.add_stretch()
         return page
 
+    def _build_account(self) -> QWidget:
+        page = SettingsPage("Account")
+
+        # ── Auth stack (logged-out / logged-in) ───────────────────────
+        self.account_stack = QStackedWidget()
+        self.account_stack.addWidget(self._build_auth_form())    # index 0 — logged out
+        self.account_stack.addWidget(self._build_account_info()) # index 1 — logged in
+        page.add_widget(self.account_stack)
+
+        # ── Shared status label ───────────────────────────────────────
+        self.account_status_lbl = QLabel("")
+        self.account_status_lbl.setObjectName("AccountStatusLbl")
+        self.account_status_lbl.setFont(_font("Manrope", 10))
+        self.account_status_lbl.setWordWrap(True)
+        page.add_widget(self.account_status_lbl)
+
+        page.add_stretch()
+        return page
+
+    # ── Logged-out: sign-in / sign-up form ───────────────────────────
+
+    def _build_auth_form(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+
+        lay.addWidget(self._desc(
+            "Sign in to sync your memory across devices and unlock Pro features."
+        ))
+
+        self.auth_email_edit = self._edit("Email")
+        self.auth_email_edit.setObjectName("SettingsEdit")
+        lay.addWidget(self.auth_email_edit)
+
+        self.auth_pass_edit = self._edit("Password", password=True)
+        self.auth_pass_edit.setObjectName("SettingsEdit")
+        self.auth_pass_edit.returnPressed.connect(self._do_sign_in)
+        lay.addWidget(self.auth_pass_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_row.setSpacing(8)
+
+        self.sign_in_btn = QPushButton("Sign In")
+        self.sign_in_btn.setObjectName("SaveBtn")
+        self.sign_in_btn.setFixedHeight(38)
+        self.sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_in_btn.clicked.connect(self._do_sign_in)
+
+        self.sign_up_btn = QPushButton("Sign Up")
+        self.sign_up_btn.setObjectName("ResetBtn")
+        self.sign_up_btn.setFixedHeight(38)
+        self.sign_up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_up_btn.clicked.connect(self._do_sign_up)
+
+        btn_row.addWidget(self.sign_in_btn)
+        btn_row.addWidget(self.sign_up_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        sep_row = QHBoxLayout()
+        sep_row.setContentsMargins(0, 8, 0, 8)
+        sep_l = QFrame(); sep_l.setFrameShape(QFrame.Shape.HLine)
+        sep_l.setObjectName("SepLine")
+        sep_r = QFrame(); sep_r.setFrameShape(QFrame.Shape.HLine)
+        sep_r.setObjectName("SepLine")
+        sep_lbl = QLabel("or")
+        sep_lbl.setObjectName("DescLbl")
+        sep_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sep_lbl.setFixedWidth(24)
+        sep_row.addWidget(sep_l)
+        sep_row.addWidget(sep_lbl)
+        sep_row.addWidget(sep_r)
+        lay.addLayout(sep_row)
+
+        self.google_btn = QPushButton("Continue with Google")
+        self.google_btn.setObjectName("OAuthBtn")
+        self.google_btn.setFixedHeight(38)
+        self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.google_btn.clicked.connect(lambda: self._do_oauth("google"))
+        lay.addWidget(self.google_btn)
+
+        self.github_btn = QPushButton("Continue with GitHub")
+        self.github_btn.setObjectName("OAuthBtn")
+        self.github_btn.setFixedHeight(38)
+        self.github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
+        lay.addWidget(self.github_btn)
+
+        return w
+
+    # ── Logged-in: account info ───────────────────────────────────────
+
+    def _build_account_info(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+
+        # Email + plan badge row
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(10)
+
+        self.account_email_lbl = QLabel("")
+        self.account_email_lbl.setObjectName("FieldLbl")
+        self.account_email_lbl.setFont(_font("Manrope", 11))
+
+        self.plan_badge = QLabel("FREE")
+        self.plan_badge.setObjectName("PlanBadgeFree")
+        self.plan_badge.setFont(_font("Manrope", 10, bold=True))
+        self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.plan_badge.setFixedHeight(28)
+        self.plan_badge.setFixedWidth(60)
+
+        self.refresh_btn = QPushButton("↻")
+        self.refresh_btn.setObjectName("RefreshBtn")
+        self.refresh_btn.setFixedSize(28, 28)
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.setToolTip("Refresh plan status")
+        self.refresh_btn.clicked.connect(self.refresh_account)
+
+        info_row.addWidget(self.account_email_lbl)
+        info_row.addStretch()
+        info_row.addWidget(self.plan_badge)
+        info_row.addWidget(self.refresh_btn)
+        lay.addLayout(info_row)
+
+        # Usage bar + count (hidden for pro)
+        self.usage_bar = _UsageBar()
+        lay.addWidget(self.usage_bar)
+
+        self.usage_lbl = QLabel("0 / 10 requests today")
+        self.usage_lbl.setObjectName("UsageLbl")
+        self.usage_lbl.setFont(_font("Manrope", 10))
+        lay.addWidget(self.usage_lbl)
+
+        lay.addSpacing(6)
+
+        # Sync status row
+        sync_row = QHBoxLayout()
+        sync_row.setContentsMargins(0, 0, 0, 0)
+        sync_row.setSpacing(8)
+
+        self.sync_status_lbl = QLabel("Memory sync: —")
+        self.sync_status_lbl.setObjectName("UsageLbl")
+        self.sync_status_lbl.setFont(_font("Manrope", 10))
+
+        self.sync_btn = QPushButton("Sync Now")
+        self.sync_btn.setObjectName("ResetBtn")
+        self.sync_btn.setFixedHeight(32)
+        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_btn.clicked.connect(self._do_sync_now)
+
+        sync_row.addWidget(self.sync_status_lbl)
+        sync_row.addStretch()
+        sync_row.addWidget(self.sync_btn)
+        lay.addLayout(sync_row)
+
+        lay.addSpacing(16)
+
+        # Sign out
+        self.sign_out_btn = QPushButton("Sign Out")
+        self.sign_out_btn.setObjectName("ResetBtn")
+        self.sign_out_btn.setFixedHeight(38)
+        self.sign_out_btn.setFixedWidth(100)
+        self.sign_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_out_btn.clicked.connect(self._do_sign_out)
+        lay.addWidget(self.sign_out_btn)
+
+        return w
     # ── Widget factories ─────────────────────────────────────────────
 
     def _desc(self, text: str) -> QLabel:
@@ -711,6 +933,9 @@ class SettingsPanel(QWidget):
         row = self.sidebar.currentRow()
         if row >= 0:
             self.content_stack.setCurrentIndex(row)
+            item = self.sidebar.item(row)
+            if item and item.text() == "Account":
+                self.refresh_account()
 
     def _on_lang_changed(self, index: int):
         settings_store.set("transcription_language", self.lang_combo.itemData(index))
@@ -757,6 +982,166 @@ class SettingsPanel(QWidget):
         self.status_lbl.style().unpolish(self.status_lbl)
         self.status_lbl.style().polish(self.status_lbl)
         QTimer.singleShot(6000, lambda: self.status_lbl.setText(""))
+
+    # ── Account tab ──────────────────────────────────────────────────
+
+    def refresh_account(self):
+        """Refresh both auth state and subscription status."""
+        # Show correct stack page
+        logged_in = auth.is_logged_in()
+        self.account_stack.setCurrentIndex(1 if logged_in else 0)
+
+        if logged_in:
+            user = auth.get_user() or {}
+            self.account_email_lbl.setText(user.get("email", ""))
+            self.refresh_btn.setEnabled(False)
+            self.refresh_btn.setText("…")
+
+            def _on_done(status):
+                QTimer.singleShot(0, lambda: self._update_account_ui(status))
+
+            subscription.refresh_status(callback=_on_done)
+
+        # Hook sync status updates
+        from src.services.sync import memory_sync
+        memory_sync.add_listener(lambda s: QTimer.singleShot(0, lambda: self._update_sync_ui(s)))
+        self._update_sync_ui(memory_sync.get_state())
+
+    def _update_account_ui(self, status: dict):
+        self.refresh_btn.setEnabled(True)
+        self.refresh_btn.setText("↻")
+
+        plan        = status.get("plan", "free")
+        daily_usage = status.get("daily_usage", 0)
+        daily_limit = status.get("daily_limit", 10)
+        error       = status.get("error")
+        is_pro      = (plan == "pro")
+
+        if is_pro:
+            self.plan_badge.setText("PRO")
+            self.plan_badge.setObjectName("PlanBadgePro")
+        else:
+            self.plan_badge.setText("FREE")
+            self.plan_badge.setObjectName("PlanBadgeFree")
+        self.plan_badge.style().unpolish(self.plan_badge)
+        self.plan_badge.style().polish(self.plan_badge)
+
+        self.usage_bar.setVisible(not is_pro)
+        self.usage_lbl.setVisible(not is_pro)
+        if not is_pro:
+            self.usage_bar.set_fraction(daily_usage, daily_limit)
+            self.usage_lbl.setText(f"{daily_usage} / {daily_limit} requests today")
+
+        if error:
+            self._account_status(f"Could not refresh: {error}", error=True)
+        else:
+            self.account_status_lbl.setText("")
+
+    def _update_sync_ui(self, state: dict):
+        s = state.get("state", "idle")
+        last = state.get("last_synced")
+        err  = state.get("error")
+        if s == "syncing":
+            self.sync_status_lbl.setText("Memory sync: syncing…")
+        elif s == "synced" and last:
+            self.sync_status_lbl.setText(f"Memory sync: last synced {last}")
+        elif s == "error":
+            self.sync_status_lbl.setText(f"Memory sync: {err or 'error'}")
+        else:
+            self.sync_status_lbl.setText("Memory sync: —")
+
+    # ── Auth actions ─────────────────────────────────────────────────
+
+    def _set_auth_busy(self, busy: bool):
+        for w in (self.sign_in_btn, self.sign_up_btn, self.google_btn, self.github_btn,
+                  self.auth_email_edit, self.auth_pass_edit):
+            w.setEnabled(not busy)
+        if busy:
+            self.sign_in_btn.setText("…")
+        else:
+            self.sign_in_btn.setText("Sign In")
+
+    def _do_sign_in(self):
+        email = self.auth_email_edit.text().strip()
+        pw    = self.auth_pass_edit.text()
+        if not email or not pw:
+            return
+        self._set_auth_busy(True)
+
+        import threading
+        def _run():
+            ok, msg = auth.sign_in(email, pw)
+            def _done():
+                self._set_auth_busy(False)
+                if ok:
+                    self.auth_pass_edit.clear()
+                    self.refresh_account()
+                    subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
+                else:
+                    self._account_status(msg, error=True)
+            QTimer.singleShot(0, _done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_sign_up(self):
+        email = self.auth_email_edit.text().strip()
+        pw    = self.auth_pass_edit.text()
+        if not email or not pw:
+            return
+        self._set_auth_busy(True)
+
+        import threading
+        def _run():
+            ok, msg = auth.sign_up(email, pw)
+            def _done():
+                self._set_auth_busy(False)
+                self._account_status(msg, error=not ok)
+                if ok and auth.is_logged_in():
+                    self.refresh_account()
+            QTimer.singleShot(0, _done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_oauth(self, provider: str):
+        self._set_auth_busy(True)
+        self._account_status(f"Opening browser for {provider} sign-in…")
+
+        def _on_done(ok, msg):
+            def _finish():
+                self._set_auth_busy(False)
+                if ok:
+                    self.refresh_account()
+                    subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
+                else:
+                    self._account_status(msg, error=True)
+            QTimer.singleShot(0, _finish)
+
+        auth.start_oauth(provider, _on_done)
+
+    def _do_sign_out(self):
+        auth.sign_out()
+        self.account_stack.setCurrentIndex(0)
+        self.account_status_lbl.setText("")
+
+    def _do_sync_now(self):
+        from src.services.sync import memory_sync
+        self.sync_btn.setEnabled(False)
+        self.sync_btn.setText("…")
+
+        def _on_sync(state):
+            def _done():
+                self.sync_btn.setEnabled(True)
+                self.sync_btn.setText("Sync Now")
+                self._update_sync_ui(state)
+            QTimer.singleShot(0, _done)
+
+        memory_sync.add_listener(_on_sync)
+        memory_sync.sync_now()
+
+    def _account_status(self, msg: str, error: bool = False):
+        self.account_status_lbl.setText(msg)
+        self.account_status_lbl.setProperty("error", "true" if error else "false")
+        self.account_status_lbl.style().unpolish(self.account_status_lbl)
+        self.account_status_lbl.style().polish(self.account_status_lbl)
+        QTimer.singleShot(8000, lambda: self.account_status_lbl.setText(""))
 
     # ── Theming ──────────────────────────────────────────────────────
 
@@ -967,4 +1352,69 @@ class SettingsPanel(QWidget):
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+
+            /* Account tab */
+            QLabel#PlanBadgeFree {{
+                background: {field_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 10px;
+                font-weight: bold;
+            }}
+            QLabel#PlanBadgePro {{
+                background: rgba(99,102,241,0.25);
+                border: 1px solid rgba(99,102,241,0.6);
+                border-radius: 6px;
+                color: #a5b4fc;
+                font-family: "Manrope";
+                font-size: 10px;
+                font-weight: bold;
+            }}
+            QPushButton#RefreshBtn {{
+                background: transparent;
+                border: 1px solid {border};
+                border-radius: 6px;
+                color: {secondary};
+                font-size: 14px;
+            }}
+            QPushButton#RefreshBtn:hover {{
+                background: {btn_hover};
+                color: {primary};
+            }}
+            QLabel#UsageLbl {{
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 10px;
+                margin-top: 4px;
+            }}
+            QPushButton#OAuthBtn {{
+                background: {field_bg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                color: {primary};
+                font-family: "Manrope";
+                font-size: 12px;
+                padding: 0px 18px;
+            }}
+            QPushButton#OAuthBtn:hover {{ background: {btn_hover}; }}
+            QPushButton#OAuthBtn:pressed {{ background: {btn_press}; }}
+            QPushButton#OAuthBtn:disabled {{
+                color: {secondary};
+                border: 1px solid {border};
+            }}
+            QFrame#SepLine {{
+                border: none;
+                border-top: 1px solid {border};
+            }}
+            QLabel#AccountStatusLbl {{
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 10px;
+            }}
+            QLabel#AccountStatusLbl[error="true"] {{ color: #ff5f5f; }}
         """)
+        # Update usage bar dark mode
+        if hasattr(self, "usage_bar"):
+            self.usage_bar.set_dark(dark)

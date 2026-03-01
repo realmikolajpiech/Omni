@@ -73,6 +73,11 @@ def _remote_encode(texts: list) -> list:
     return result["vectors"]
 
 
+def _count_tokens(text: str) -> int:
+    """Rough token estimate for logging: ~4 characters per token."""
+    return max(1, len(text) // 4)
+
+
 def _elapsed(start: float) -> str:
     s = int(time.time() - start)
     if s < 60:
@@ -402,6 +407,7 @@ def main():
             f"{len(llm_skip_paths)}/{len(llm_candidates)} additional files filtered out"
         )
 
+    total_tokens = 0
     skipped_content = 0
     for full_path, filename in text_files:
         if _static_skip(full_path, filename) or full_path in llm_skip_paths:
@@ -423,6 +429,7 @@ def main():
                 if len(chunk) > 512:
                     chunk = chunk[:512]
 
+                total_tokens += _count_tokens(chunk)
                 current_batch_chunks.append(chunk)
                 current_batch_metadata.append({
                     "filename": filename,
@@ -461,7 +468,8 @@ def main():
                     eta = _eta(phase_start, content_files, total_text_count)
                     logging.info(
                         f"  [content] {content_files:,} / {total_text_count:,} files "
-                        f"({pct:.1f}%), {total_chunks_indexed:,} chunks  "
+                        f"({pct:.1f}%), {total_chunks_indexed:,} chunks, "
+                        f"~{total_tokens:,} tokens  "
                         f"({_elapsed(phase_start)})  ETA {eta}"
                     )
 
@@ -502,7 +510,8 @@ def main():
 
     logging.info(
         f"Phase 2/3 complete — {content_files:,} files, "
-        f"{total_chunks_indexed:,} chunks in {_elapsed(phase_start)} "
+        f"{total_chunks_indexed:,} chunks, ~{total_tokens:,} tokens "
+        f"in {_elapsed(phase_start)} "
         f"({skipped_content:,} boilerplate files skipped)"
     )
 
@@ -586,10 +595,11 @@ def main():
 
     # ── Done ──────────────────────────────────────────────────────
     with open(INDEX_DONE_MARKER, "w") as f:
-        f.write(f"files={total_files_indexed} chunks={total_chunks_indexed} images={total_images}\n")
+        f.write(f"files={total_files_indexed} chunks={total_chunks_indexed} tokens={total_tokens} images={total_images}\n")
 
     logging.info(
-        f"All done!  files={total_files_indexed:,}  chunks={total_chunks_indexed:,}  images={total_images:,}"
+        f"All done!  files={total_files_indexed:,}  chunks={total_chunks_indexed:,}  "
+        f"~tokens={total_tokens:,}  images={total_images:,}"
     )
 
 
