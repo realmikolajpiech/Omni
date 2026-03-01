@@ -3168,7 +3168,15 @@ class OmniWindow(QWidget):
                 widget.update_thinking(thinking)
                 widget.set_thinking_collapsed(True)
 
-            widget.set_answer(answer)
+            # Pre-scan: if a request_permission continuation will block,
+            # suppress the premature answer so there's nothing to flash/replace
+            _has_pending_continuation = any(
+                isinstance(a, dict) and a.get('type') == 'trust_request'
+                and a.get('source') == 'request_permission'
+                and _trust < a.get('required_level', 2)
+                for a in (actions or [])
+            )
+            widget.set_answer("" if _has_pending_continuation else answer)
 
             # Determine label for the collapsed thinking block
             action_label = data.get("thinking_header") or None
