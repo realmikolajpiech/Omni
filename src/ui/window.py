@@ -2009,7 +2009,10 @@ class OmniWindow(QWidget):
                 item = self.list_widget.item(i)
                 key = self.get_item_key(item.data(Qt.ItemDataRole.UserRole))
                 if key not in new_keys:
-                    self.list_widget.takeItem(i)
+                    taken = self.list_widget.takeItem(i)
+                    if taken:
+                        w = self.list_widget.itemWidget(taken)
+                        if w: w.deleteLater()
 
             # 3. Align items with new order
             for i, (key, data, factory) in enumerate(new_items_data):
@@ -2039,7 +2042,10 @@ class OmniWindow(QWidget):
                         # Exists elsewhere: Move it here (Slide effect by skipping animation)
                         old_item = existing[key]
                         row = self.list_widget.row(old_item)
-                        self.list_widget.takeItem(row) # Remove from old pos
+                        taken = self.list_widget.takeItem(row) # Remove from old pos
+                        if taken:
+                            w = self.list_widget.itemWidget(taken)
+                            if w: w.deleteLater()
                         
                         # Re-insert at i
                         new_item = QListWidgetItem()
@@ -2753,7 +2759,10 @@ class OmniWindow(QWidget):
                 item = self.list_widget.item(i)
                 role = item.data(Qt.ItemDataRole.UserRole)
                 if role == "thinking":
-                    self.list_widget.takeItem(i)
+                    taken = self.list_widget.takeItem(i)
+                    if taken:
+                        w = self.list_widget.itemWidget(taken)
+                        if w: w.deleteLater()
 
             # Restore UI state
             if not self.is_history_mode:
@@ -3016,10 +3025,16 @@ class OmniWindow(QWidget):
                 if thinking_idx + 1 < self.list_widget.count():
                     next_item = self.list_widget.item(thinking_idx + 1)
                     if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
-                        self.list_widget.takeItem(thinking_idx + 1)
+                        taken_sep = self.list_widget.takeItem(thinking_idx + 1)
+                        if taken_sep:
+                            w = self.list_widget.itemWidget(taken_sep)
+                            if w: w.deleteLater()
                 
                 # Then remove thinking
-                self.list_widget.takeItem(thinking_idx)
+                taken_think = self.list_widget.takeItem(thinking_idx)
+                if taken_think:
+                    w = self.list_widget.itemWidget(taken_think)
+                    if w: w.deleteLater()
 
             # Create widget WITHOUT thinking in constructor, add it dynamically
             prepend = self.is_history_mode
@@ -3285,7 +3300,10 @@ class OmniWindow(QWidget):
                                                 _itm = self.list_widget.item(_i)
                                                 _w_itm = self.list_widget.itemWidget(_itm)
                                                 if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
-                                                    self.list_widget.takeItem(_i)
+                                                    taken = self.list_widget.takeItem(_i)
+                                                    if taken:
+                                                        w_del = self.list_widget.itemWidget(taken)
+                                                        if w_del: w_del.deleteLater()
                                                     break
                                             # Pop the incomplete pre-permission exchange from history
                                             if (len(self.chat_history) >= 2 and
@@ -3515,17 +3533,26 @@ class OmniWindow(QWidget):
             if thinking_idx + 1 < self.list_widget.count():
                 next_item = self.list_widget.item(thinking_idx + 1)
                 if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
-                    self.list_widget.takeItem(thinking_idx + 1)
+                    taken_sep = self.list_widget.takeItem(thinking_idx + 1)
+                    if taken_sep:
+                        w = self.list_widget.itemWidget(taken_sep)
+                        if w: w.deleteLater()
             
             # Then remove thinking
-            self.list_widget.takeItem(thinking_idx)
+            taken_think = self.list_widget.takeItem(thinking_idx)
+            if taken_think:
+                w = self.list_widget.itemWidget(taken_think)
+                if w: w.deleteLater()
             
         # Fallback cleanup for any other thinking widgets
         for i in range(self.list_widget.count() - 1, -1, -1):
             item = self.list_widget.item(i)
             role = item.data(Qt.ItemDataRole.UserRole)
             if role == "thinking":
-                 self.list_widget.takeItem(i)
+                 taken = self.list_widget.takeItem(i)
+                 if taken:
+                     w = self.list_widget.itemWidget(taken)
+                     if w: w.deleteLater()
 
         answer = data.get("answer", "")
         actions = data.get("actions", [])

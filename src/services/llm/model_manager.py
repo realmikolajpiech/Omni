@@ -385,7 +385,7 @@ def ensure_main_model():
     """Load main model — custom API if configured in settings, otherwise xAI Grok."""
     global llm, init_error
 
-    ensure_resources()
+    # Removed ensure_resources() to defer 15s embed model loading until strictly needed by a tool.
 
     if llm:
         return

@@ -108,14 +108,15 @@ def get_user_memory(query=None):
         # Search specifically for the query
         logging.info(f"Searching personal memory for: {query}")
         
-        # Generate embedding for the query
-        query_vec = embed_text(query)
+        # Disable embedding generation for real-time query to fix 3.5s delay
+        # using lexical search instead.
+        query_vec = None # embed_text(query)
         
         # Use find with query_embedding if available
         if query_vec:
             raw_results = mem.find(query, k=5, query_embedding=query_vec)
         else:
-            raw_results = mem.find(query, k=5)
+            raw_results = mem.find(query, k=10) # increase k slightly to compensate for lexical search
         
         # Results is a dict with 'hits' key
         hits = []

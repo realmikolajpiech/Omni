@@ -30,7 +30,7 @@
  */
 
 const FREE_DAILY_LIMIT = 10;
-const XAI_BASE  = "https://api.x.ai/v1";
+const XAI_BASE = "https://api.x.ai/v1";
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -42,8 +42,8 @@ export default {
       return resp({ error: "Unauthorized" }, 401);
     }
 
-    const url    = new URL(request.url);
-    const path   = url.pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
     const method = request.method;
 
     if (path === "/v1/chat/completions" && method === "POST")
@@ -65,8 +65,8 @@ export default {
 // ── Chat proxy ────────────────────────────────────────────────────────────────
 
 async function handleChat(request, env) {
-  const body     = await request.json();
-  const model    = body.model || "";
+  const body = await request.json();
+  const model = body.model || "";
   const isStream = !!body.stream;
 
   // Route by model: anything with "grok" → xAI (main model, rate-limited for free)
@@ -92,16 +92,16 @@ async function handleChat(request, env) {
 
 async function proxyChat(body, baseUrl, apiKey) {
   const upstream = await fetch(`${baseUrl}/chat/completions`, {
-    method:  "POST",
+    method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
-      "Content-Type":  "application/json",
+      "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
   });
 
   return new Response(upstream.body, {
-    status:  upstream.status,
+    status: upstream.status,
     headers: {
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
     },
@@ -128,22 +128,22 @@ function limitReachedResponse(stream) {
 // ── Search proxy ──────────────────────────────────────────────────────────────
 
 async function handleSearch(request, env) {
-  const body     = await request.json();
+  const body = await request.json();
   const endpoint = body._endpoint || "/search";
-  const fast     = !!body._fast;
+  const fast = !!body._fast;
   delete body._endpoint;
   delete body._fast;
 
   const apiKey = fast ? env.SERPER_FAST_API_KEY : env.SERPER_MAIN_API_KEY;
 
   const upstream = await fetch(`https://google.serper.dev${endpoint}`, {
-    method:  "POST",
+    method: "POST",
     headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
   return new Response(upstream.body, {
-    status:  upstream.status,
+    status: upstream.status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -155,7 +155,7 @@ async function handleStatus(request, env) {
   const usage = isPro ? 0 : await getUsage(id, env);
 
   return resp({
-    plan:        isPro ? "pro" : "free",
+    plan: isPro ? "pro" : "free",
     daily_usage: usage,
     daily_limit: FREE_DAILY_LIMIT,
   });
@@ -178,9 +178,9 @@ async function handlePaymentWebhook(request, env) {
       await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
         method: "PUT",
         headers: {
-          "Content-Type":  "application/json",
+          "Content-Type": "application/json",
           "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
-          "apikey":        env.SUPABASE_SERVICE_KEY,
+          "apikey": env.SUPABASE_SERVICE_KEY,
         },
         body: JSON.stringify({ user_metadata: { plan: "pro" } }),
       });
@@ -197,7 +197,7 @@ async function resolveIdentity(request, env) {
   const authHeader = request.headers.get("Authorization") || "";
 
   if (authHeader.startsWith("Bearer ") && env.SUPABASE_URL && env.SUPABASE_ANON_KEY) {
-    const token  = authHeader.slice(7);
+    const token = authHeader.slice(7);
     const userId = await validateSupabaseToken(token, env);
 
     if (userId) {
@@ -208,7 +208,7 @@ async function resolveIdentity(request, env) {
 
   // Fallback: anonymous device-ID
   const deviceId = request.headers.get("X-Device-ID") || "unknown";
-  const isPro    = (await env.SUBSCRIPTIONS.get(deviceId)) === "pro";
+  const isPro = (await env.SUBSCRIPTIONS.get(deviceId)) === "pro";
   return { id: deviceId, isPro };
 }
 
@@ -219,14 +219,14 @@ async function resolveIdentity(request, env) {
 async function validateSupabaseToken(token, env) {
   // Use a short prefix of the token as the cache key (tokens are long; first 40 chars are unique enough)
   const cacheKey = `jwt:${token.slice(-40)}`;
-  const cached   = await env.USAGE.get(cacheKey);
+  const cached = await env.USAGE.get(cacheKey);
   if (cached) return cached === "invalid" ? null : cached;
 
   try {
     const res = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
       headers: {
         "Authorization": `Bearer ${token}`,
-        "apikey":        env.SUPABASE_ANON_KEY,
+        "apikey": env.SUPABASE_ANON_KEY,
       },
     });
 
@@ -257,7 +257,7 @@ async function getUsage(id, env) {
 }
 
 async function incrementUsage(id, env) {
-  const key     = todayKey(id);
+  const key = todayKey(id);
   const current = await getUsage(id, env);
   await env.USAGE.put(key, String(current + 1), { expirationTtl: 172800 }); // 2-day TTL
 }
