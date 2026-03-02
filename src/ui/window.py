@@ -804,6 +804,14 @@ class OmniWindow(QWidget):
         self.refresh_list(text, animate=animate)
 
     def toggle_visibility_safe(self, source="manual"):
+        import time
+        now = time.time()
+        # Debounce to prevent rapid double-triggers from native OS hooks
+        if source == "manual" and (now - getattr(self, 'last_toggle_time', 0)) < 0.25:
+            logging.info("toggle_visibility_safe ignored due to debounce")
+            return
+            
+        self.last_toggle_time = now
         logging.info(f"toggle_visibility_safe called. Current visibility: {self.isVisible()}, Source: {source}")
         
         # Check if visible AND not currently closing.
@@ -819,24 +827,9 @@ class OmniWindow(QWidget):
                 self.logo_label.boost_speed()
             else:
                 # Manual toggle (hotkey/tray)
-                # If window is visible but not focused (e.g. user clicked away or another app stole focus),
-                # bring it to front and focus it instead of closing.
-                if self.isActiveWindow():
-                    self._closed_by_deactivation = False
-                    self.animate_close()
-                else:
-                    logging.info("Window visible but not active - activating")
-                    self.activateWindow()
-                    self.raise_()
-                    
-                    # Force focus and re-apply no-focus-rect attribute
-                    self.input_field.setFocus()
-                    self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-                    
-                    # Force style re-polish to ensure no blue border
-                    self.input_field.style().unpolish(self.input_field)
-                    self.input_field.style().polish(self.input_field)
-                    self.input_field.update()
+                # If window is visible, close it.
+                self._closed_by_deactivation = False
+                self.animate_close()
         else:
             # Window was hidden — show it.
             # If a close animation is still in progress, abort it and reopen immediately
