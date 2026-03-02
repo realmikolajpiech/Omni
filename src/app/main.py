@@ -447,27 +447,40 @@ def main():
         except: pass
 
     # Start Voice Listener
+    # Native macOS SFSpeechRecognizer is disabled by default (listener.py uses
+    # Groq Whisper API instead), so no TCC entitlement is needed and we can
+    # launch the listener as a plain subprocess.
     voice_process = None
     try:
-        listener_script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
-                                       "src", "services", "voice", "listener.py")
-        
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        listener_script = os.path.join(_project_root, "src", "services", "voice", "listener.py")
         logging.info(f"Starting Voice Listener: {listener_script}")
-        
-        # Use stdout=None to see output in terminal for debugging
-        voice_process = subprocess.Popen([sys.executable, listener_script], 
-                                         cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                                         stdout=None, 
-                                         stderr=None)
-        
+
+        if os.environ.get("OMNI_LISTENER_LAUNCHED") != "1":
+            voice_process = subprocess.Popen(
+                [sys.executable, listener_script],
+                cwd=_project_root,
+                stdout=None,
+                stderr=None,
+                start_new_session=True
+            )
+            logging.info("Voice Listener started.")
+
         def kill_voice():
             if voice_process:
-                voice_process.terminate()
-        
+                try:
+                    voice_process.terminate()
+                except Exception:
+                    pass
+            if sys.platform == "darwin":
+                try:
+                    subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False)
+                except Exception:
+                    pass
+
         atexit.register(kill_voice)
         app.aboutToQuit.connect(kill_voice)
-        logging.info("Voice Listener started.")
-        
+
     except Exception as e:
         logging.error(f"Failed to start voice listener: {e}")
 

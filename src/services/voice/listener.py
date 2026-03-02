@@ -3,6 +3,20 @@ import os
 import re
 import io
 import queue
+import tempfile
+
+# ── Ensure venv site-packages are importable when launched via Python.app ─────
+# `open -na Python.app` runs the framework Python (no venv), so we manually
+# insert the project venv's site-packages so all third-party deps are found.
+import glob as _glob
+_venv_site = next(
+    iter(_glob.glob(os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")),
+        "venv", "lib", "python*", "site-packages"))), None)
+if _venv_site and _venv_site not in sys.path:
+    sys.path.insert(0, _venv_site)
+del _glob, _venv_site
+
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -16,19 +30,86 @@ except ImportError:
     scipy = None
 from typing import Optional
 
+
+def _check_speech_entitlement() -> bool:
+    """Return True only when native macOS SFSpeechRecognizer is safe to use.
+
+    macOS TCC enforces privacy entitlements against the *responsible process*
+    (the app that spawned this process's coalition), NOT the running binary.
+    When launched from Electron, Terminal, or any non-Python-signed app, the
+    responsible process is that parent — which lacks
+    NSSpeechRecognitionUsageDescription — causing an unrecoverable SIGABRT.
+
+    Because reliably detecting the responsible process is fragile, we default
+    to DISABLED native ASR and use the Groq Whisper API instead (works
+    perfectly, no TCC required).  Set OMNI_NATIVE_ASR=1 to explicitly opt-in
+    if you have a properly signed/entitled app bundle.
+    """
+    if os.environ.get("OMNI_NATIVE_ASR", "0") != "1":
+        return False
+    try:
+        import plistlib
+        from Foundation import NSBundle
+        bundle_path = str(NSBundle.mainBundle().bundlePath())
+        plist_path = os.path.join(bundle_path, "Contents", "Info.plist")
+        if not os.path.exists(plist_path):
+            return False
+        with open(plist_path, "rb") as fh:
+            data = plistlib.load(fh)
+        return "NSSpeechRecognitionUsageDescription" in data
+    except Exception:
+        return False
+
+
+# Native macOS Speech Recognition — disabled by default to avoid TCC SIGABRT crash.
+# Falls back to Groq Whisper API for transcription (reliable, no permissions needed).
+# Set OMNI_NATIVE_ASR=1 to explicitly enable native ASR.
+NATIVE_ASR_AVAILABLE = False
+SFSpeechRecognizer = None
+SFSpeechURLRecognitionRequest = None
+NSURL = None
+NSLocale = None
+
+if _check_speech_entitlement():
+    try:
+        from Speech import SFSpeechRecognizer, SFSpeechURLRecognitionRequest
+        from Foundation import NSURL, NSLocale
+        NATIVE_ASR_AVAILABLE = True
+    except ImportError:
+        pass
+
+# Short language code → macOS locale identifier
+_LANG_TO_LOCALE = {
+    "en": "en-US",
+    "pl": "pl-PL",
+    "de": "de-DE",
+    "fr": "fr-FR",
+    "es": "es-ES",
+    "it": "it-IT",
+    "pt": "pt-PT",
+    "ja": "ja-JP",
+    "zh": "zh-CN",
+    "uk": "uk-UA",
+    "ru": "ru-RU",
+    "ar": "ar-SA",
+    "nl": "nl-NL",
+}
+
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
 try:
     from src.core.config import (
         IPC_PORT,
-        OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD
+        OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD,
+        GROQ_API_KEY,
     )
 except ImportError:
     IPC_PORT = 5556
     OWW_WAKE_WORD_MODEL = "Hey_Omni"
     OWW_CUSTOM_MODEL_PATH = ""
     OWW_DETECTION_THRESHOLD = 0.5
+    GROQ_API_KEY = ""
 
 # --- CONFIGURATION ---
 SAMPLE_RATE = 16000
@@ -72,7 +153,13 @@ class VoiceService:
         self.setup_udp()
 
     def setup_models(self):
-        """Initialize openWakeWord and Groq client."""
+        """Initialize openWakeWord, request speech recognition authorization, and set up Groq fallback."""
+        # 0. Request macOS speech recognition authorization early
+        if NATIVE_ASR_AVAILABLE:
+            self._request_speech_auth()
+        else:
+            logger.warning("Native ASR disabled — no NSSpeechRecognitionUsageDescription entitlement.")
+
         # 1. openWakeWord
         try:
             from openwakeword.model import Model
@@ -102,6 +189,134 @@ class VoiceService:
             self.oww_model = None
             self._oww_key = None
 
+        # 2. Groq Whisper (fallback transcription when native ASR is unavailable)
+        try:
+            from groq import Groq as _GroqClient
+            if GROQ_API_KEY:
+                self.groq_client = _GroqClient(api_key=GROQ_API_KEY)
+                logger.info("Groq Whisper fallback transcription ready.")
+            else:
+                logger.info("GROQ_API_KEY not set — Groq transcription fallback disabled.")
+        except ImportError:
+            logger.info("groq package not installed — Groq transcription fallback disabled.")
+
+    def _request_speech_auth(self):
+        """Ask macOS for SFSpeechRecognizer permission (shows system dialog on first run)."""
+        try:
+            auth_event = threading.Event()
+            def _handler(status):
+                # 3 = SFSpeechRecognizerAuthorizationStatusAuthorized
+                if status == 3:
+                    logger.info("Speech recognition: authorized.")
+                else:
+                    logger.warning(f"Speech recognition authorization status: {status}")
+                auth_event.set()
+            SFSpeechRecognizer.requestAuthorization_(_handler)
+            auth_event.wait(timeout=30.0)
+        except Exception as e:
+            logger.error(f"Speech auth request error: {e}")
+
+    def transcribe_audio_native(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
+        """Transcribe audio array using native macOS SFSpeechRecognizer."""
+        if not NATIVE_ASR_AVAILABLE:
+            return None
+        try:
+            # Read language preference
+            try:
+                sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+                import src.core.settings_store as settings_store
+                lang_code = settings_store.get("transcription_language", "auto")
+            except Exception:
+                lang_code = "auto"
+
+            if lang_code == "auto" or lang_code not in _LANG_TO_LOCALE:
+                # Use system locale as best proxy
+                locale = NSLocale.currentLocale()
+            else:
+                locale_id = _LANG_TO_LOCALE[lang_code]
+                locale = NSLocale.localeWithLocaleIdentifier_(locale_id)
+
+            recognizer = SFSpeechRecognizer.alloc().initWithLocale_(locale)
+            if not recognizer or not recognizer.isAvailable():
+                # Fallback to English
+                logger.warning("SFSpeechRecognizer not available for selected locale, falling back to en-US")
+                en_locale = NSLocale.localeWithLocaleIdentifier_("en-US")
+                recognizer = SFSpeechRecognizer.alloc().initWithLocale_(en_locale)
+                if not recognizer or not recognizer.isAvailable():
+                    logger.error("SFSpeechRecognizer not available at all.")
+                    return None
+
+            # Write audio to a temp WAV file
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                temp_path = f.name
+            sf.write(temp_path, audio_data, sample_rate)
+
+            result_container = [None]
+            done_event = threading.Event()
+
+            url = NSURL.fileURLWithPath_(temp_path)
+            request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+            request.setShouldReportPartialResults_(False)
+
+            def _result_handler(result, error):
+                if error:
+                    logger.error(f"SFSpeechRecognizer error: {error}")
+                if result and result.isFinal():
+                    result_container[0] = result.bestTranscription().formattedString()
+                done_event.set()
+
+            recognizer.recognitionTaskWithRequest_resultHandler_(request, _result_handler)
+            done_event.wait(timeout=15.0)
+
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+            return result_container[0]
+
+        except Exception as e:
+            logger.error(f"Native macOS transcription error: {e}")
+            return None
+
+    def transcribe_audio_groq(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
+        """Transcribe audio using Groq Whisper API (fallback when native ASR unavailable)."""
+        if not self.groq_client:
+            return None
+        try:
+            import io as _io
+            buf = _io.BytesIO()
+            sf.write(buf, audio_data, sample_rate, format='wav')
+            buf.seek(0)
+            response = self.groq_client.audio.transcriptions.create(
+                model="whisper-large-v3-turbo",
+                file=("audio.wav", buf),
+                response_format="text",
+            )
+            return response.strip() if isinstance(response, str) else response.text.strip()
+        except Exception as e:
+            logger.error(f"Groq transcription error: {e}")
+            return None
+
+    def _transcribe_and_send(self, audio_data: np.ndarray):
+        """Run transcription in a background thread and send result via IPC."""
+        def _worker():
+            duration = len(audio_data) / SAMPLE_RATE
+            logger.info(f"Transcribing {duration:.1f}s of audio...")
+            text = None
+            # Try native macOS ASR first
+            if NATIVE_ASR_AVAILABLE:
+                text = self.transcribe_audio_native(audio_data, SAMPLE_RATE)
+            # Fall back to Groq Whisper
+            if not text and self.groq_client:
+                logger.info("Falling back to Groq Whisper transcription...")
+                text = self.transcribe_audio_groq(audio_data, SAMPLE_RATE)
+            if text and text.strip():
+                logger.info(f"Transcription: {text!r}")
+                self.send_ipc(f"QUERY:VOICE:{text.strip()}".encode('utf-8'))
+            else:
+                logger.warning("Transcription returned no text.")
+        threading.Thread(target=_worker, daemon=True).start()
 
     def setup_udp(self):
         try:
@@ -134,8 +349,13 @@ class VoiceService:
                 elif msg == "STOP_LISTENING":
                     self.set_mode("PAUSED")
                 elif msg == "COMMIT_AUDIO":
-                    logger.info("Manual Commit Requested (Transcription Disabled)")
+                    logger.info("Manual Commit Requested — transcribing buffer...")
+                    audio_to_transcribe = None
+                    if self.audio_buffer:
+                        audio_to_transcribe = np.concatenate(self.audio_buffer)
                     self.set_mode("PAUSED")
+                    if audio_to_transcribe is not None and len(audio_to_transcribe) > 0:
+                        self._transcribe_and_send(audio_to_transcribe)
                 elif msg == "SET_MODE:IDLE":
                     self.set_mode("IDLE")
                 elif msg == "SET_MODE:LISTENING":
@@ -320,18 +540,24 @@ class VoiceService:
         # 3. End-of-utterance detection
         if self.is_speaking and self.silence_frames > self.max_silence_frames:
             logger.info("End of utterance detected.")
+            audio_to_transcribe = np.concatenate(self.audio_buffer) if self.audio_buffer else None
             self.audio_buffer = []
             self.is_speaking = False
             self.silence_frames = 0
             self.set_mode("PAUSED")
+            if audio_to_transcribe is not None and len(audio_to_transcribe) > 0:
+                self._transcribe_and_send(audio_to_transcribe)
 
         # 4. Safety timeout at 15s
         if len(self.audio_buffer) * BLOCK_SIZE > 15 * SAMPLE_RATE:
             logger.warning("Max duration reached.")
+            audio_to_transcribe = np.concatenate(self.audio_buffer) if self.audio_buffer else None
             self.audio_buffer = []
             self.is_speaking = False
             self.silence_frames = 0
             self.set_mode("PAUSED")
+            if audio_to_transcribe is not None and len(audio_to_transcribe) > 0:
+                self._transcribe_and_send(audio_to_transcribe)
 
 
 

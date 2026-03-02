@@ -24,6 +24,10 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Omni listens for your voice to answer questions hands-free.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Omni uses speech recognition to transcribe your voice commands.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

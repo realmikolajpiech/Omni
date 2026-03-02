@@ -96,6 +96,17 @@ echo "Starting File Watcher in background..."
 mkdir -p logs
 nohup $PYTHON_CMD src/services/search/watcher.py > logs/watcher.log 2>&1 &
 
+# Start Voice Listener
+# Native macOS SFSpeechRecognizer is disabled by default (see listener.py) to
+# avoid TCC SIGABRT crashes.  Transcription uses Groq Whisper API instead, so
+# we can launch the listener as a plain Python subprocess.
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    echo "Starting Voice Listener..."
+    mkdir -p logs
+    nohup $PYTHON_CMD src/services/voice/listener.py > logs/listener.log 2>&1 &
+    export OMNI_LISTENER_LAUNCHED=1
+fi
+
 # Run
 if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "macOS detected."
