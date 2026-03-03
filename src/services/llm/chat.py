@@ -662,9 +662,13 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
     if screenshot_b64:
         logging.info("[CHAT] Screenshot provided — skipping tool calls for this request.")
 
-    user_loc = get_ip_location()
-    user_personal_context = get_user_memory(query)
-    
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _pool:
+        _loc_fut = _pool.submit(get_ip_location)
+        _mem_fut = _pool.submit(get_user_memory, query)
+        user_loc = _loc_fut.result()
+        user_personal_context = _mem_fut.result()
+
     # NOTE: user_personal_context will NOT have the "Just Learned" fact from this turn,
     # because it is being extracted in the background. This is a trade-off for speed.
     
@@ -1025,6 +1029,20 @@ Available settings and values:
                             all_answer_text += ans_clean + "\n"
 
                         logging.info(f"[CHAT] Iteration {tool_iter} finished in {time.time() - iter_start_time:.4f}s")
+
+                        # If any tool blocked on permission, stop the loop now.
+                        # The UI will show the popup; when the user approves, the
+                        # query is re-sent with elevated trust — no wasted LLM iteration.
+                        if has_pending_trust:
+                            pending = flush_pending_trust_requests()
+                            logging.info(f"[CHAT] Stopping early — permission required ({len(pending)} trust_request(s))")
+                            yield ("final", {
+                                "answer": "",
+                                "actions": pending,
+                                "thinking": _build_thinking(model_reasoning, tool_records),
+                            })
+                            return
+
                         continue  # Next iteration with tool results in messages
 
                     # ── No tool calls: this is the final response ────────────
@@ -1091,6 +1109,7 @@ Available settings and values:
                         "content": full_text or None,
                         "tool_calls": tool_calls,
                     })
+                    permission_blocked = False
                     for tc in tool_calls:
                         tool_start = time.time()
                         tool_name = tc["function"]["name"]
@@ -1099,14 +1118,21 @@ Available settings and values:
                         except Exception:
                             args = {}
                         result = execute_tool(tool_name, args)
+                        if result and "[Permission required]" in str(result):
+                            permission_blocked = True
                         logging.info(f"[tool-ns:{tool_name}] result length={len(result)} (took {time.time() - tool_start:.4f}s)")
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": result,
                         })
-                    
+
                     logging.info(f"[CHAT-NS] Iteration {tool_iter+1} finished in {time.time() - iter_start_time:.4f}s")
+
+                    if permission_blocked:
+                        pending = flush_pending_trust_requests()
+                        logging.info(f"[CHAT-NS] Stopping early — permission required")
+                        return {"answer": "", "actions": pending, "thinking": ""}
 
                 if full_text.startswith(':'):
                     full_text = full_text[1:].strip()

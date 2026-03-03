@@ -986,13 +986,15 @@ class OmniWindow(QWidget):
         self.activateWindow()
         
         # Clean up query if it has VOICE: prefix
-        if query.startswith("VOICE:"):
+        is_voice = query.startswith("VOICE:")
+        if is_voice:
             query = query[6:]
-            self.voice_triggered_query = True
-        
+
         # Set text and submit
         self.input_field.setText(query)
         self.perform_ai_query(query)
+        if is_voice:
+            self.voice_triggered_query = True
 
     def animate_entry(self):
         self.is_entry_animating = True
@@ -1006,7 +1008,10 @@ class OmniWindow(QWidget):
         
         def on_finished():
             self.is_entry_animating = False
-        
+            # If items were added during the entry animation (e.g. ThinkingWidget for voice),
+            # now that the animation is done we can safely resize the window.
+            QTimer.singleShot(0, lambda: self.adjust_window_height(animate=True))
+
         self.anim_group.finished.connect(on_finished)
         
         # Zoom In Animation
@@ -2761,6 +2766,9 @@ class OmniWindow(QWidget):
         return False
 
     def perform_ai_query(self, query):
+        # Reset voice flag — will be re-set after this call if query came from voice
+        self.voice_triggered_query = False
+
         # Stop debounce timer to prevent new fast searches from starting
         self.debounce_timer.stop()
 
