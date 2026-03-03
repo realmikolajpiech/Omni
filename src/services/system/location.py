@@ -16,12 +16,16 @@ _COUNTRY_TO_LANG = {
     'CZ': 'cs', 'HU': 'hu', 'RO': 'ro', 'CH': 'de', 'AT': 'de'
 }
 
-def get_ip_location():
-    global _ip_location_cache, _ip_country_code_cache
-    if _ip_location_cache: return _ip_location_cache
+_ip_location_tried = False  # prevents re-trying after a failure
 
+def get_ip_location():
+    global _ip_location_cache, _ip_country_code_cache, _ip_location_tried
+    if _ip_location_cache: return _ip_location_cache
+    if _ip_location_tried: return "Unknown Location"  # don't retry after a failure
+
+    _ip_location_tried = True
     try:
-        resp = requests.get("http://ip-api.com/json/?fields=status,country,countryCode,city,regionName", timeout=3)
+        resp = requests.get("http://ip-api.com/json/?fields=status,country,countryCode,city,regionName", timeout=1)
         if resp.status_code == 200:
             data = resp.json()
             if data.get('status') == 'success':
@@ -31,8 +35,8 @@ def get_ip_location():
                 logging.info(f"IP Location: {loc_str} (countryCode: {_ip_country_code_cache})")
                 return loc_str
     except Exception as e:
-        logging.error(f"IP Loc Failed: {e}")
-    
+        logging.warning(f"IP Loc Failed (will not retry): {e}")
+
     return "Unknown Location"
 
 def get_search_locale():
@@ -62,10 +66,18 @@ def get_system_location():
 
     try:
         # 1. Get System Timezone
+        sys_tz = None
         if os.path.exists("/etc/timezone"):
             with open("/etc/timezone", "r") as f:
                 sys_tz = f.read().strip()
-        else:
+        elif os.path.islink("/etc/localtime"):
+            # macOS: /etc/localtime -> /usr/share/zoneinfo/Europe/Warsaw
+            target = os.readlink("/etc/localtime")
+            marker = "/zoneinfo/"
+            idx = target.find(marker)
+            if idx != -1:
+                sys_tz = target[idx + len(marker):]
+        if not sys_tz:
             return "en-US"
 
         # 2. Map Timezone -> Country Code using zone1970.tab

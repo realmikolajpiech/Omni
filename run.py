@@ -43,14 +43,10 @@ def main():
         run_ui_main()
         return
 
-    # Default "all" mode (Legacy behavior)
-    if is_brain_running():
-        print("Brain Service is already running. Skipping startup.")
-    else:
-        print("Starting Brain Service...")
-        # Start Flask in a daemon thread so it dies when main thread dies
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
+    # Default "all" mode — always start a fresh Brain in this process
+    print("Starting Brain Service...")
+    flask_thread = threading.Thread(target=run_flask, daemon=True, name="BrainThread")
+    flask_thread.start()
     
     print("Starting UI...")
     # Run the UI

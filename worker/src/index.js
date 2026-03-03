@@ -146,12 +146,20 @@ async function handleSearch(request, env) {
   delete body._fast;
 
   const apiKey = fast ? env.SERPER_FAST_API_KEY : env.SERPER_MAIN_API_KEY;
+  if (!apiKey) {
+    return resp({ error: "Search API key not configured", code: "missing_api_key" }, 500);
+  }
 
-  const upstream = await fetch(`https://google.serper.dev${endpoint}`, {
-    method: "POST",
-    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let upstream;
+  try {
+    upstream = await fetch(`https://google.serper.dev${endpoint}`, {
+      method: "POST",
+      headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return resp({ error: `Search request failed: ${e.message}`, code: "fetch_error" }, 502);
+  }
 
   return new Response(upstream.body, {
     status: upstream.status,

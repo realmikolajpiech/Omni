@@ -136,14 +136,15 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
         except Exception:
             pass
 
-        print(f"[SEARCH] POST /v1/search q={payload['q']!r} auth={'yes' if extra_headers else 'no'}", flush=True)
+        target_url = f"{_backend_client.base_url}v1/search"
+        logging.warning(f"[SEARCH] >>> POST {target_url}  q={payload['q']!r}  fast={fast}  timeout={timeout}s")
         r = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
-        print(f"[SEARCH] status={r.status_code} body={r.text[:300]!r}", flush=True)
+        logging.warning(f"[SEARCH] <<< status={r.status_code}  body_len={len(r.text)}  body={r.text!r}")
         r.raise_for_status()
         data = r.json()
-        print(f"[SEARCH] JSON keys={list(data.keys())}", flush=True)
+        logging.warning(f"[SEARCH] JSON keys={list(data.keys())}  organic_count={len(data.get('organic', []))}")
     except Exception as e:
-        logging.warning(f"[search] Serper request failed ({type(e).__name__}): {e}")
+        logging.warning(f"[SEARCH] !!! FAILED ({type(e).__name__}): {e}")
         return []
 
     # Normalize different Serper response shapes into uniform dicts
@@ -188,7 +189,9 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
                 'content': item.get('snippet', ''),
             })
 
-    print(f"[SEARCH] normalized {len(results)} results for category={categories!r}", flush=True)
+    logging.warning(f"[SEARCH] normalized {len(results)} results for category={categories!r}")
+    if results:
+        logging.warning(f"[SEARCH] first result: title={results[0].get('title')!r}  url={results[0].get('url')!r}")
     return results
 
 
@@ -221,7 +224,7 @@ def search_api(query: str, categories: str = 'general', fast: bool = False) -> l
 # perform_web_search -- formats results into text context for the LLM
 # ---------------------------------------------------------------------------
 def perform_web_search(query):
-    logging.info(f"Performing web search for: {query}")
+    logging.warning(f"[PERFORM_SEARCH] query={query!r}")
     try:
         map_triggers = ["nearest", "find", "locate", "where is", "directions to"]
         is_map_query = any(x in query.lower() for x in map_triggers)
@@ -260,7 +263,7 @@ def perform_web_search(query):
             results = search_api(search_query, 'general')
 
         if not results:
-            logging.warning("Search returned NO results.")
+            logging.warning(f"[PERFORM_SEARCH] NO RESULTS for {query!r} (category={categories!r})")
             return "No search results found."
 
         text_res = []
@@ -290,10 +293,12 @@ def perform_web_search(query):
                 text_res.append(f"Map Image URL: {static_map}")
 
         final_context = "\n\n".join(text_res)
-        logging.info(f"Context passed to LLM:\n{final_context}")
+        logging.warning(f"[PERFORM_SEARCH] returning {len(final_context)} chars: {final_context[:200]!r}")
         return final_context
     except Exception as e:
-        return f"Search failed: {str(e)}"
+        msg = f"Search failed: {str(e)}"
+        logging.warning(f"[PERFORM_SEARCH] EXCEPTION → returning {len(msg)} chars: {msg!r}")
+        return msg
 
 
 # ---------------------------------------------------------------------------

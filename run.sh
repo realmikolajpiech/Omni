@@ -43,9 +43,14 @@ PYTHON_CMD="./venv/bin/python3"
 # Cleanup old instances
 echo "Cleaning up old instances..."
 pkill -f "run.py" || true
+pkill -f "src/app/brain.py" || true
 pkill -f "src/services/voice/listener.py" || true
 pkill -f "src/services/search/indexer.py" || true
 pkill -f "src/services/search/watcher.py" || true
+# Force-kill whatever holds the brain port (5555) regardless of process name
+lsof -ti :5555 | xargs kill -9 2>/dev/null || true
+# Give OS time to release the port
+sleep 0.8
 
 if [ -d "searxng_local" ] && [ -f "searxng/start_searxng.py" ]; then
     echo "Ensuring local SearXNG is running..."

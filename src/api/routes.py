@@ -223,6 +223,7 @@ def _parse_fast_action_output(
                 logging.info(f"Refetching search results for new query: '{q}'")
                 from src.services.search.web_search import search_api
                 results = search_api(q, categories='general', fast=True)
+                logging.warning(f"[ACTION/SEARCH] search_api({q!r}, fast=True) → {len(results)} results")
 
             if results:
                 # Build rich context from top results
@@ -1351,6 +1352,7 @@ def action_pending_endpoint():
     try:
         from src.services.search.web_search import search_api
         tool_results = search_api(tool_q, categories='general', fast=True)
+        logging.warning(f"[ACTION/PENDING] search_api({tool_q!r}, fast=True) → {len(tool_results)} results")
         if tool_results:
             search_results.extend(tool_results)
 
@@ -1361,6 +1363,7 @@ def action_pending_endpoint():
                 tool_content += f"Result {i}: {res.get('title')} - {res.get('content') or res.get('snippet')}\n"
 
         search_context = f"Tool Search Results for '{tool_q}':\n{tool_content}".strip()
+        logging.warning(f"[ACTION/PENDING] search_context len={len(search_context)}: {search_context[:120]!r}")
 
         phase2_system = (
             "You are an intelligent action classifier. You ONLY output commands.\n"
