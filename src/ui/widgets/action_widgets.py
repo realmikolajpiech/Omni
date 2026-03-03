@@ -6,8 +6,8 @@ import requests
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu,
                               QFileIconProvider, QSizePolicy, QPushButton, QProgressBar)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer, QUrl
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor, QDesktopServices
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF, QEasingCurve
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor, QDesktopServices, QColor, QBrush, QPen
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from src.ui.styles import THEMES
 try:
@@ -4691,24 +4691,87 @@ class QRActionWidget(QWidget):
         self.data_label.setStyleSheet(f"color: {title_color};")
 
 
+class SkeletonLine(QWidget):
+    """A rounded rectangle that pulses/shimmers to indicate loading."""
+    def __init__(self, width_fraction=1.0, height=14, radius=4, parent=None):
+        super().__init__(parent)
+        self.width_fraction = width_fraction
+        self.setFixedHeight(height)
+        self.radius = radius
+        self.current_theme = "light"
+        self._pulse_value = 0.0
+
+        # Animation
+        self._anim = QPropertyAnimation(self, b"pulse_value")
+        self._anim.setStartValue(0.0)
+        self._anim.setKeyValueAt(0.5, 1.0)
+        self._anim.setEndValue(0.0)
+        self._anim.setDuration(1500)
+        self._anim.setLoopCount(-1)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._anim.start()
+
+    @pyqtProperty(float)
+    def pulse_value(self):
+        return self._pulse_value
+
+    @pulse_value.setter
+    def pulse_value(self, value):
+        self._pulse_value = value
+        self.update()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Calculate width based on fraction of parent
+        w = self.width()
+        if self.width_fraction < 1.0:
+            w = int(w * self.width_fraction)
+
+        rect = QRectF(0, 0, w, self.height())
+
+        # Determine colors based on theme
+        is_dark = (self.current_theme == "dark")
+        base_alpha = 30 if is_dark else 15
+        highlight_alpha = 50 if is_dark else 30
+        
+        color_base = QColor(255, 255, 255, base_alpha) if is_dark else QColor(0, 0, 0, base_alpha)
+        color_highlight = QColor(255, 255, 255, highlight_alpha) if is_dark else QColor(0, 0, 0, highlight_alpha)
+
+        # Interpolate color
+        r = color_base.red() + (color_highlight.red() - color_base.red()) * self._pulse_value
+        g = color_base.green() + (color_highlight.green() - color_base.green()) * self._pulse_value
+        b = color_base.blue() + (color_highlight.blue() - color_base.blue()) * self._pulse_value
+        a = color_base.alpha() + (color_highlight.alpha() - color_base.alpha()) * self._pulse_value
+        
+        final_color = QColor(int(r), int(g), int(b), int(a))
+
+        painter.setBrush(QBrush(final_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, self.radius, self.radius)
+
+
 class PendingActionWidget(QWidget):
     """Skeleton card shown while web search is running."""
     def __init__(self, title="Searching the web", subtitle="", parent=None):
         super().__init__(parent)
         self.current_theme = "light"
-        self._base_title = title or "Searching the web"
-        self._subtitle = subtitle or ""
-        self._dots = 0
-
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.card = QWidget()
         self.card.setObjectName("ActionCard")
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(6)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(10)
 
+        # Header Row: Icon + "WEB SEARCH" badge
         top_row = QWidget()
         top_layout = QHBoxLayout(top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -4718,53 +4781,45 @@ class PendingActionWidget(QWidget):
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.action_label = QLabel("WEB SEARCH")
+        self.action_label = QLabel("SEARCHING WEB")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
 
         top_layout.addWidget(self.icon_label)
         top_layout.addWidget(self.action_label)
         top_layout.addStretch()
 
-        self.title_label = QLabel(self._base_title)
-        self.title_label.setWordWrap(True)
-        self.title_label.setFont(QFont("Instrument Serif", 18, QFont.Weight.Normal))
-
-        self.sub_label = QLabel(self._subtitle)
-        self.sub_label.setWordWrap(True)
-        self.sub_label.setFont(QFont("Manrope", 11, QFont.Weight.Medium))
-        if not self._subtitle:
-            self.sub_label.hide()
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(6)
+        # Skeleton Content
+        # Replaces Title
+        self.skel_title = SkeletonLine(width_fraction=0.6, height=20, radius=6)
+        
+        # Replaces Subtitle / Description (2 lines)
+        self.skel_body1 = SkeletonLine(width_fraction=0.9, height=14, radius=4)
+        self.skel_body2 = SkeletonLine(width_fraction=0.75, height=14, radius=4)
 
         card_layout.addWidget(top_row)
-        card_layout.addWidget(self.title_label)
-        card_layout.addWidget(self.sub_label)
-        card_layout.addWidget(self.progress)
+        card_layout.addSpacing(4)
+        card_layout.addWidget(self.skel_title)
+        card_layout.addSpacing(2)
+        card_layout.addWidget(self.skel_body1)
+        card_layout.addWidget(self.skel_body2)
+        
         layout.addWidget(self.card)
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(350)
 
         self.update_style()
 
-    def _tick(self):
-        self._dots = (self._dots + 1) % 4
-        self.title_label.setText(self._base_title + ("." * self._dots))
-
     def set_theme(self, theme):
         self.current_theme = theme
+        self.skel_title.set_theme(theme)
+        self.skel_body1.set_theme(theme)
+        self.skel_body2.set_theme(theme)
         self.update_style()
 
     def update_style(self):
         t = THEMES.get(self.current_theme, THEMES["light"])
         is_dark = (self.current_theme == "dark")
         card_bg = "rgba(0, 0, 0, 0.22)" if is_dark else "rgba(255, 255, 255, 0.25)"
-        border = "rgba(255, 255, 255, 0.26)" if is_dark else "rgba(255, 255, 255, 0.40)"
+        border = "rgba(255, 255, 255, 0.10)" if is_dark else "rgba(255, 255, 255, 0.40)"
+        
         self.card.setStyleSheet(f"""
             QWidget#ActionCard {{
                 background-color: {card_bg};
@@ -4772,20 +4827,6 @@ class PendingActionWidget(QWidget):
                 border: 1px solid {border};
             }}
         """)
-        self.icon_label.setStyleSheet(f"background: transparent; color: {t['text_secondary']}; font-size: 11px;")
+        self.icon_label.setStyleSheet(f"background: transparent; color: {t['text_secondary']}; font-size: 14px;")
         self.action_label.setStyleSheet(f"color: {t['text_secondary']}; letter-spacing: 0.5px;")
-        self.title_label.setStyleSheet(f"color: {t['text_primary']}; margin-top: 0px;")
-        self.sub_label.setStyleSheet(f"color: {t['text_secondary']};")
-        chunk = "rgba(255,255,255,0.35)" if is_dark else "rgba(0,0,0,0.12)"
-        bar = "rgba(255,255,255,0.10)" if is_dark else "rgba(0,0,0,0.06)"
-        self.progress.setStyleSheet(f"""
-            QProgressBar {{
-                background: {bar};
-                border-radius: 3px;
-            }}
-            QProgressBar::chunk {{
-                background: {chunk};
-                border-radius: 3px;
-            }}
-        """)
 

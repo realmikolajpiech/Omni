@@ -2247,22 +2247,6 @@ class OmniWindow(QWidget):
             self.activateWindow()
             self.raise_()
 
-        # For link-type actions start an OG preview fetch
-        if actions and actions[0].get("type") == "link":
-            # Only start OG worker if there are no other higher-priority actions
-            # If we have a place action (or one pending), skip OG to avoid clutter
-            has_place = any(a.get('type') == 'place' for a in actions)
-            if has_place or has_pending_place:
-                return
-
-            link_url = actions[0].get("url", "")
-            if link_url and link_url.startswith("http"):
-                self.cleanup_worker("og_worker")
-                self.og_worker = OGWorker(link_url, query)
-                self.og_worker.og_result.connect(self.on_og_result)
-                self.og_worker.no_result.connect(lambda _q: None)
-                self.og_worker.start()
-
     def on_place_resolved(self, action, original_name):
         """Handle async place resolution."""
         if not action or action.get('type') != 'place': return
