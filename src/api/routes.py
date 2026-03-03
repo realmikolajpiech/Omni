@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import re
+import threading
 from typing import Optional
 import torch
 from flask import Blueprint, request, jsonify, Response
@@ -16,6 +17,501 @@ from src.services.system.app_launcher import find_and_launch_app, resolve_app_me
 from src.services.system.installer import generate_install_plan, log_debug, KNOWN
 
 api_bp = Blueprint('api', __name__)
+
+# Pending fast actions (when fast model requests web_search)
+_PENDING_ACTIONS_LOCK = threading.Lock()
+_PENDING_ACTIONS: dict[str, dict] = {}
+_PENDING_ACTIONS_TTL_S = 90
+
+
+def _pending_actions_put(pending_id: str, payload: dict) -> None:
+    now = time.time()
+    with _PENDING_ACTIONS_LOCK:
+        _PENDING_ACTIONS[pending_id] = {"created_at": now, **payload}
+        # Best-effort cleanup
+        for k, v in list(_PENDING_ACTIONS.items()):
+            if now - float(v.get("created_at", now)) > _PENDING_ACTIONS_TTL_S:
+                _PENDING_ACTIONS.pop(k, None)
+
+
+def _pending_actions_pop(pending_id: str) -> Optional[dict]:
+    with _PENDING_ACTIONS_LOCK:
+        return _PENDING_ACTIONS.pop(pending_id, None)
+
+
+def _pending_actions_get(pending_id: str) -> Optional[dict]:
+    with _PENDING_ACTIONS_LOCK:
+        return _PENDING_ACTIONS.get(pending_id)
+
+
+def _parse_fast_action_output(
+    *,
+    result_text: str,
+    query: str,
+    request_id: str,
+    endpoint_start_time: float,
+    search_context: str,
+    search_results: list,
+    safe_fast_completion,
+):
+    """
+    Parse the fast model's command output into typed action dicts.
+    `safe_fast_completion` is a callable compatible with _safe_fast_completion in action_endpoint.
+    """
+    logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
+
+    # Fallback: if output is empty, default to search
+    if not result_text or not result_text.strip():
+        logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
+        result_text = f"SEARCH:{query}"
+
+    # Also check if output contains only special tokens or is just newlines/spaces
+    has_command = any(cmd in result_text for cmd in [
+        "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
+        "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
+        "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
+        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:"
+    ])
+    if not has_command:
+        logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
+        result_text = f"SEARCH:{query}"
+
+    logging.info(f"[TIMING] Starting action parsing at: {time.time() - endpoint_start_time:.3f}s")
+    actions = []
+    for line in result_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        if "CALC:" in line:
+            try:
+                expr = line.split("CALC:")[1].strip()
+                res = perform_calculation(expr)
+                # Extract result and LaTeX
+                val = res.split("Result: ")[1].strip() if "Result: " in res else res
+                latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+                latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
+                actions.append({"type": "calc", "content": val, "equation": latex_eq})
+            except Exception:
+                pass
+
+        if "CURRENCY:" in line:
+            try:
+                raw_content = line.split("CURRENCY:")[1].strip()
+                parts = raw_content.split("|")
+                if len(parts) >= 3:
+                    amount = parts[0].strip()
+                    from_unit = parts[1].strip().upper()
+                    to_unit = parts[2].strip().upper()
+                    llm_converted = parts[3].strip() if len(parts) >= 4 else ""
+
+                    # Try live exchange rate via Frankfurter (free, no API key)
+                    converted = llm_converted
+                    try:
+                        import requests as _req
+                        resp = _req.get(
+                            f"https://api.frankfurter.app/latest?amount={amount}&from={from_unit}&to={to_unit}",
+                            timeout=4
+                        )
+                        if resp.status_code == 200:
+                            rate_data = resp.json()
+                            rate_val = rate_data.get("rates", {}).get(to_unit)
+                            if rate_val is not None:
+                                converted = f"{rate_val:,.2f}"
+                                logging.info(f"Live rate: {amount} {from_unit} = {converted} {to_unit}")
+                    except Exception as _re:
+                        logging.warning(f"Exchange rate API failed ({_re}), using LLM estimate")
+
+                    actions.append({
+                        "type": "currency",
+                        "amount": amount,
+                        "from_unit": from_unit,
+                        "to_unit": to_unit,
+                        "converted_value": converted
+                    })
+            except Exception as e:
+                logging.error(f"Failed to parse CURRENCY action: {e}")
+
+        if "WEATHER:" in line:
+            try:
+                parts = line.split("WEATHER:")[1].strip().split("|")
+                if len(parts) >= 3:
+                    actions.append({
+                        "type": "weather",
+                        "location": parts[0].strip(),
+                        "temp": parts[1].strip(),
+                        "condition": parts[2].strip()
+                    })
+            except Exception as e:
+                logging.error(f"Failed to parse WEATHER action: {e}")
+
+        if "UNIT:" in line:
+            try:
+                parts = line.split("UNIT:")[1].strip().split("|")
+                if len(parts) >= 4:
+                    actions.append({
+                        "type": "unit",
+                        "amount": parts[0].strip(),
+                        "from_unit": parts[1].strip(),
+                        "to_unit": parts[2].strip(),
+                        "converted_value": parts[3].strip()
+                    })
+            except Exception as e:
+                logging.error(f"Failed to parse UNIT action: {e}")
+
+        if "COLOR:" in line:
+            try:
+                parts = line.split("COLOR:")[1].strip().split("|")
+                actions.append({
+                    "type": "color_preview",
+                    "color_hex": parts[0].strip() if len(parts) > 0 else "#FFFFFF",
+                    "rgb_val": parts[1].strip() if len(parts) > 1 else "",
+                    "hsl_val": parts[2].strip() if len(parts) > 2 else ""
+                })
+            except Exception:
+                pass
+
+        if "TIMER:" in line:
+            try:
+                val = line.split("TIMER:")[1].strip()
+                actions.append({"type": "timer", "duration": int(val)})
+            except Exception:
+                pass
+
+        if "PASSWORD:" in line:
+            try:
+                val = line.split("PASSWORD:")[1].strip()
+                actions.append({"type": "password", "length": int(val)})
+            except Exception:
+                pass
+
+        if "QRCODE:" in line:
+            try:
+                val = line.split("QRCODE:")[1].strip()
+                actions.append({"type": "qrcode", "data": val})
+            except Exception:
+                pass
+
+        if "FA:" in line:
+            fact = line.split("FA:")[1].strip()
+            if fact and "[Unknown]" not in fact:
+                logging.info(f"Extracted Fact: {fact}")
+                remember_fact(fact)
+        elif "UP:" in line:
+            fact = line.split("UP:")[1].strip()
+            if fact and "[Unknown]" not in fact:
+                logging.info(f"Extracted Update: {fact}")
+                remember_update(fact)
+        elif "FORGET:" in line:
+            fact = line.split("FORGET:")[1].strip()
+            delete_memory(fact)
+        elif "SEARCH:" in line:
+            if model_manager.current_fast_request_id != request_id:
+                logging.info(f"Fast Action Aborted (request {request_id} cancelled by newer request).")
+                return [], []
+
+            raw_q = line.split("SEARCH:")[1].strip()
+            q = _sanitize_search_query(raw_q, query)
+            if q != raw_q:
+                logging.info(f"Fast model SEARCH query sanitized: '{raw_q[:80]}' -> '{q}'")
+
+            results = []
+            if q.lower() == query.lower() and search_results:
+                logging.info(f"Reusing {len(search_results)} existing search results for SEARCH action")
+                results = search_results
+            else:
+                logging.info(f"Refetching search results for new query: '{q}'")
+                from src.services.search.web_search import search_api
+                results = search_api(q, categories='general', fast=True)
+
+            if results:
+                # Build rich context from top results
+                context = "Search results:\n"
+                for i, res in enumerate(results[:3], 1):
+                    title = res.get('title', 'N/A')
+                    content = (res.get('content') or res.get('snippet', '') or 'N/A')
+                    if len(content) > 400:
+                        content = content[:400] + "..."
+                    url = res.get('url', 'N/A')
+                    context += f"\n--- Result {i} ---\n"
+                    context += f"Title: {title}\n"
+                    context += f"Description: {content}\n"
+                    context += f"URL: {url}\n"
+
+                logging.info(f"[DEBUG] Search results sent to fast model ({len(context)} chars):\n{context}")
+
+                classify_messages = [
+                    {
+                        "role": "system",
+                        "content": """You are a search result classifier.
+Analyze the provided search results for the user's query.
+
+Task: Determine if the user is looking for a PERSON, a PLACE, or just doing a general SEARCH.
+
+Categories:
+- PERSON: Real people, historical figures, celebrities, professionals.
+  * Indicators: "biography", "born", "career", "profile", job titles (CEO, Director, Actor), social media profiles (LinkedIn, Facebook).
+- PLACE: Physical locations, cities, schools, landmarks, addresses.
+  * Indicators: "city", "country", "address", "map", "located in", "school", "university".
+- SEARCH: Everything else (products, concepts, companies, websites, lyrics, definitions).
+
+Instructions:
+1. Read the user query and search snippets carefully.
+2. If the results are predominantly about a specific person's life or career, choose PERSON.
+3. If the results are about a specific physical location or institution, choose PLACE.
+4. Otherwise, choose SEARCH.
+5. Output ONLY the category name."""
+                    },
+                    {"role": "user", "content": f"User query: {query}\n\n{context}\n\nCategory (PERSON/PLACE/SEARCH):"}
+                ]
+
+                try:
+                    classification = safe_fast_completion(
+                        messages=classify_messages,
+                        max_tokens=8,
+                        temperature=0.0,
+                        step_name="Search classification"
+                    )
+                    if classification is None:
+                        raise Exception("Classification aborted")
+
+                    classification_text = classification['choices'][0]['message']['content'].strip().upper()
+                    normalized = re.sub(r'[^A-Za-z]', '', classification_text)
+                    first_word = ""
+                    if normalized.startswith('PERSON'):
+                        first_word = "PERSON"
+                    elif normalized.startswith('PLACE'):
+                        first_word = "PLACE"
+                    elif normalized.startswith('SEARCH'):
+                        first_word = "SEARCH"
+                    logging.info(f"[DEBUG] Fast model classification: '{classification_text[:60]}' -> normalized '{normalized[:20]}' -> '{first_word}'")
+
+                    if first_word == "PERSON":
+                        logging.info(f"[DEBUG] Model chose PERSON - fast model will write the card from search results")
+                        write_messages = [
+                            {
+                                "role": "system",
+                                "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary. Synthesize facts, do not copy snippets.]"
+                            },
+                            {"role": "user", "content": f"Search results about: {query}\n\n{context}\n\nWrite the person card:"}
+                        ]
+                        try:
+                            write_out = safe_fast_completion(
+                                messages=write_messages,
+                                max_tokens=150,
+                                temperature=0.5,
+                                step_name="Person card generation"
+                            )
+                            if write_out:
+                                card_text = write_out['choices'][0]['message']['content'].strip()
+                                logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
+                                person_name = q
+                                person_desc = ""
+                                for part in card_text.split("\n"):
+                                    part = part.strip()
+                                    if not part:
+                                        continue
+                                    if part.upper().startswith("NAME:"):
+                                        person_name = part.split(":", 1)[1].strip()
+                                    elif part.upper().startswith("DESCRIPTION:"):
+                                        person_desc = part.split(":", 1)[1].strip()
+                                if not person_desc:
+                                    lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                                    if len(lines) >= 2:
+                                        person_desc = " ".join(lines[1:])
+                                    elif lines:
+                                        person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
+
+                                person_res_fallback = get_person_result(person_name, existing_results=results)
+                                if person_res_fallback:
+                                    if person_desc:
+                                        person_res_fallback['description'] = person_desc
+                                    actions.append(person_res_fallback)
+                                else:
+                                    actions.append({
+                                        "type": "person",
+                                        "name": person_name or q,
+                                        "description": person_desc,
+                                        "url": results[0].get('url') if results else "",
+                                        "image": None
+                                    })
+                                continue
+                        except Exception as e:
+                            logging.error(f"[DEBUG] Person card generation failed: {e}")
+
+                    elif first_word == "PLACE":
+                        logging.info(f"[DEBUG] Model chose PLACE for: {q}")
+                        place_result = get_place_result(q, existing_results=results)
+                        if place_result:
+                            actions.append(place_result)
+                            continue
+
+                except Exception as e:
+                    logging.error(f"[DEBUG] Classification failed: {e}")
+
+            person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
+            if person_candidate:
+                person_result = get_person_result(person_candidate, existing_results=results if results else None)
+                if person_result:
+                    logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
+                    actions.append(person_result)
+                    continue
+
+            nav = get_navigation_result(q, fast=True, existing_results=results)
+            if nav:
+                logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
+                actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
+            else:
+                url = f"https://www.google.com/search?q={q}"
+                actions.append({"type": "link", "url": url, "title": f"Search {q}", "description": "Web Search"})
+
+        elif "TRANSLATE:" in line:
+            try:
+                raw_content = line.split("TRANSLATE:")[1].strip()
+                parts = raw_content.split("|")
+
+                if len(parts) >= 4:
+                    source = parts[0]
+                    from_lang = parts[1]
+                    to_lang = parts[2]
+                    translated = "|".join(parts[3:])
+                elif len(parts) == 3:
+                    p1, p2, p3 = parts
+                    if len(p2.strip()) <= 3:
+                        source, from_lang, to_lang, translated = p1, "auto", p2, p3
+                    else:
+                        logging.warning(f"TRANSLATE: parsed 3 parts, ambiguous: {parts}")
+                        continue
+                elif len(parts) == 2:
+                    source, translated = parts
+                    from_lang = "auto"
+                    to_lang = "en"
+                else:
+                    logging.warning(f"TRANSLATE: expected 4 parts, got {len(parts)}: {parts}")
+                    continue
+
+                actions.append({
+                    "type": "translate",
+                    "source_text": source.strip(),
+                    "from_lang": from_lang.strip(),
+                    "to_lang": to_lang.strip(),
+                    "translated_text": translated.strip()
+                })
+            except Exception as e:
+                logging.error(f"Failed to parse TRANSLATE action: {e}")
+
+        elif "PERSON:" in line:
+            content = line.split("PERSON:")[1].strip()
+            person_desc = None
+
+            if "|" in content:
+                name, desc = content.split("|", 1)
+                name = name.strip()
+                person_desc = desc.strip()
+            else:
+                name = content.strip()
+
+            already_have = any(a.get('type') == 'person' for a in actions)
+            if not already_have:
+                res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
+                if res:
+                    if person_desc:
+                        res['description'] = person_desc
+                    actions.append(res)
+
+        elif "PLACE:" in line:
+            name = line.split("PLACE:")[1].strip()
+            actions.append({"type": "place_pending", "name": name})
+
+        elif "UNINSTALL:" in line:
+            app = line.split("UNINSTALL:")[1].strip()
+            logging.info(f"Action: UNINSTALL {app}")
+            actions.append({"type": "uninstall", "name": app})
+
+        elif "INSTALL:" in line:
+            app = line.split("INSTALL:")[1].strip()
+            metadata = resolve_app_metadata(app)
+            if metadata:
+                actions.append({
+                    "type": "install",
+                    "name": app,
+                    "website": metadata.get("website"),
+                    "image": metadata.get("image")
+                })
+            else:
+                actions.append({"type": "install", "name": app})
+
+        elif "OPEN:" in line:
+            url = line.split("OPEN:")[1].strip()
+            if "http" not in url:
+                url = "https://" + url
+
+            display_url = url.replace("https://", "").replace("http://", "").replace("www.", "")
+            if "/" in display_url:
+                display_url = display_url.split('/')[0]
+            title = f"Open {display_url}"
+
+            act = {"type": "link", "url": url, "title": title, "description": "Open Website"}
+            logging.info(f"Generated Action: {act}")
+            actions.append(act)
+
+        elif "OPEN_APP:" in line:
+            app = line.split("OPEN_APP:")[1].strip()
+            success, msg = find_and_launch_app(app)
+            if success:
+                actions.append({"type": "status", "status": "success", "description": f"Opened {msg}"})
+            else:
+                logging.info(f"OPEN_APP: '{app}' not found, suggesting install")
+                metadata = resolve_app_metadata(app)
+                if metadata:
+                    actions.append({
+                        "type": "install",
+                        "name": app,
+                        "website": metadata.get("website"),
+                        "image": metadata.get("image")
+                    })
+                else:
+                    actions.append({"type": "install", "name": app})
+
+        elif "SYSTEM_SETTINGS:" in line:
+            try:
+                from src.services.system.macos_settings import SETTING_META, execute_setting
+                json_str = line.split("SYSTEM_SETTINGS:")[1].strip()
+                settings_act = json.loads(json_str)
+
+                setting_name = settings_act.get("setting", "")
+                meta = SETTING_META.get(setting_name, {})
+                settings_act.update(meta)
+                if "label" not in settings_act:
+                    settings_act["label"] = setting_name.replace("_", " ").title()
+
+                execute_setting(settings_act)
+                actions.append(settings_act)
+            except Exception as e:
+                logging.error(f"Failed to parse system_settings action: {e}")
+
+    chips = []
+    logging.info(f"Chips ({len(chips)}): {[c['label'] for c in chips]}")
+
+    # Post-processing: Remove redundant or unwanted actions
+    final_actions = []
+    has_person = any(a.get('type') == 'person' for a in actions)
+
+    for a in actions:
+        if a.get('type') == 'link':
+            url = a.get('url', '').lower()
+            if has_person and 'wikipedia.org' in url:
+                continue
+            if len(query) <= 1 and 'wikipedia.org' in url:
+                continue
+            if has_person:
+                person_card = next((p for p in actions if p.get('type') == 'person'), None)
+                if person_card and person_card.get('url') == a.get('url'):
+                    continue
+
+        final_actions.append(a)
+
+    return final_actions, chips
 
 
 @api_bp.route('/health', methods=['GET'])
@@ -627,7 +1123,11 @@ OPEN:https://www.pornhub.com
 """
     
     # Phase 1: Allow tools
-    system_prompt = base_system_prompt.replace("{tool_instruction}", "If you are unsure or need more information (e.g. unknown person/place), use the `web_search` tool to find it.\nThen, based on the tool results, output the final command.")
+    system_prompt = base_system_prompt.replace(
+        "{tool_instruction}",
+        "Think first: only call `web_search` if you truly need external, real-world info (unknown person/place/fact/event).\n"
+        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings, or any query you can confidently handle without external web information. Just output the command."
+    )
     
     user_prompt = f"Query: {query}\n\n{search_context}"
 
@@ -711,72 +1211,26 @@ OPEN:https://www.pornhub.com
         if out['choices'][0]['message'].get('tool_calls'):
             logging.info(f"[TIMING] Phase 1 decided to use tools at: {time.time() - endpoint_start_time:.3f}s")
             tool_calls = out['choices'][0]['message']['tool_calls']
-            # Append assistant message with tool calls
-            messages.append(out['choices'][0]['message'])
-            
-            for tc in tool_calls:
-                if tc['function']['name'] == 'web_search':
-                    try:
-                        args = json.loads(tc['function']['arguments'])
-                        q_tool = args.get('query')
-                        logging.info(f"Fast Model executing tool: web_search('{q_tool}')")
-                        
-                        # Execute search
-                        from src.services.search.web_search import search_api
-                        tool_results = search_api(q_tool, categories='general', fast=True)
-                        
-                        # Update global search_results for this request to avoid re-searching in get_person_result
-                        if tool_results:
-                            if search_results is None: search_results = []
-                            search_results.extend(tool_results)
-                        
-                        # Format results
-                        tool_content = "No results found."
-                        if tool_results:
-                            tool_content = ""
-                            for i, res in enumerate(tool_results[:3], 1):
-                                tool_content += f"Result {i}: {res.get('title')} - {res.get('content') or res.get('snippet')}\n"
-                        
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc['id'],
-                            "content": tool_content
-                        })
-                        
-                        # Update context for fallback logic later if needed
-                        search_context += f"\n\nTool Search Results for '{q_tool}':\n{tool_content}"
-                        
-                    except Exception as e:
-                        logging.error(f"Tool execution failed: {e}")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc['id'],
-                            "content": f"Error: {str(e)}"
-                        })
+            # If model wants a web search, return immediately with a skeleton action.
+            # The UI will call /action_pending with pending_id to fetch the final action.
+            q_tool = query
+            try:
+                for tc in tool_calls:
+                    if tc.get('function', {}).get('name') == 'web_search':
+                        args = json.loads(tc['function'].get('arguments', '{}') or '{}')
+                        q_tool = (args.get('query') or query).strip()
+                        break
+            except Exception:
+                q_tool = query
 
-            # Phase 2: Get final response after tool outputs
-            logging.info(f"Fast Model Phase 2 (after tools)")
-            logging.info(f"[TIMING] Tool execution finished at: {time.time() - endpoint_start_time:.3f}s")
-            
-            # Reconstruct messages for Phase 2 to avoid tool-use loops and API errors.
-            # We strip the tool call history and present the results as static context.
-            phase2_system = base_system_prompt.replace("{tool_instruction}", "Search complete. Analyze the results below and output the appropriate command (PERSON, PLACE, OPEN, etc). Do not explain.")
-            phase2_user = f"Query: {query}\n\n{search_context.strip()}"
-            
-            phase2_messages = [
-                {"role": "system", "content": phase2_system},
-                {"role": "user", "content": phase2_user}
-            ]
-
-            # Remove tools for the final phase to prevent the model from trying to call them again
-            out = _safe_fast_completion(
-                messages=phase2_messages,
-                max_tokens=256,
-                temperature=0.0,
-                step_name="Action intent (Phase 2)"
-            )
-            if out is None:
-                return jsonify({"actions": [], "chips": []})
+            _pending_actions_put(request_id, {"query": query, "tool_query": q_tool})
+            pending_act = {
+                "type": "action_pending",
+                "pending_id": request_id,
+                "title": "Searching the web",
+                "subtitle": q_tool,
+            }
+            return jsonify({"actions": [pending_act], "action": pending_act, "chips": []})
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -809,589 +1263,148 @@ OPEN:https://www.pornhub.com
         
         result_text = cleaned_text
 
-        logging.info(f"\n=== FAST MODEL OUTPUT ===\n{result_text}\n=========================\n")
-
-        # Fallback: if output is empty, default to search
-        if not result_text or not result_text.strip():
-            logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
-            result_text = f"SEARCH:{query}"
-        
-        # Also check if output contains only special tokens or is just newlines/spaces
-        # by looking for actual keyword patterns
-        has_command = any(cmd in result_text for cmd in [
-            "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
-            "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
-            "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
-            "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:"
-        ])
-        if not has_command:
-            logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
-            result_text = f"SEARCH:{query}"
-
-        logging.info(f"[TIMING] Starting action parsing at: {time.time() - endpoint_start_time:.3f}s")
-        actions = []
-        for line in result_text.split('\n'):
-            line = line.strip()
-            if not line: continue
-
-            if "CALC:" in line:
-                try:
-                    expr = line.split("CALC:")[1].strip()
-                    res = perform_calculation(expr)
-                    # Extract result and LaTeX
-                    val = res.split("Result: ")[1].strip() if "Result: " in res else res
-                    latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
-                    latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
-                    actions.append({"type": "calc", "content": val, "equation": latex_eq})
-                except: pass
-
-            if "CURRENCY:" in line:
-                try:
-                    raw_content = line.split("CURRENCY:")[1].strip()
-                    parts = raw_content.split("|")
-                    if len(parts) >= 3:
-                        amount = parts[0].strip()
-                        from_unit = parts[1].strip().upper()
-                        to_unit = parts[2].strip().upper()
-                        llm_converted = parts[3].strip() if len(parts) >= 4 else ""
-
-                        # Try live exchange rate via Frankfurter (free, no API key)
-                        converted = llm_converted
-                        try:
-                            import requests as _req
-                            resp = _req.get(
-                                f"https://api.frankfurter.app/latest?amount={amount}&from={from_unit}&to={to_unit}",
-                                timeout=4
-                            )
-                            if resp.status_code == 200:
-                                rate_data = resp.json()
-                                rate_val = rate_data.get("rates", {}).get(to_unit)
-                                if rate_val is not None:
-                                    converted = f"{rate_val:,.2f}"
-                                    logging.info(f"Live rate: {amount} {from_unit} = {converted} {to_unit}")
-                        except Exception as _re:
-                            logging.warning(f"Exchange rate API failed ({_re}), using LLM estimate")
-
-                        actions.append({
-                            "type": "currency",
-                            "amount": amount,
-                            "from_unit": from_unit,
-                            "to_unit": to_unit,
-                            "converted_value": converted
-                        })
-                except Exception as e:
-                    logging.error(f"Failed to parse CURRENCY action: {e}")
-
-            if "WEATHER:" in line:
-                try:
-                    parts = line.split("WEATHER:")[1].strip().split("|")
-                    if len(parts) >= 3:
-                        actions.append({
-                            "type": "weather",
-                            "location": parts[0].strip(),
-                            "temp": parts[1].strip(),
-                            "condition": parts[2].strip()
-                        })
-                except Exception as e:
-                    logging.error(f"Failed to parse WEATHER action: {e}")
-
-            if "UNIT:" in line:
-                try:
-                    parts = line.split("UNIT:")[1].strip().split("|")
-                    if len(parts) >= 4:
-                        actions.append({
-                            "type": "unit",
-                            "amount": parts[0].strip(),
-                            "from_unit": parts[1].strip(),
-                            "to_unit": parts[2].strip(),
-                            "converted_value": parts[3].strip()
-                        })
-                except Exception as e:
-                    logging.error(f"Failed to parse UNIT action: {e}")
-
-            if "COLOR:" in line:
-                try:
-                    parts = line.split("COLOR:")[1].strip().split("|")
-                    actions.append({
-                        "type": "color_preview",
-                        "color_hex": parts[0].strip() if len(parts) > 0 else "#FFFFFF",
-                        "rgb_val": parts[1].strip() if len(parts) > 1 else "",
-                        "hsl_val": parts[2].strip() if len(parts) > 2 else ""
-                    })
-                except Exception as e: pass
-
-            if "TIMER:" in line:
-                try:
-                    val = line.split("TIMER:")[1].strip()
-                    actions.append({"type": "timer", "duration": int(val)})
-                except Exception as e: pass
-
-            if "PASSWORD:" in line:
-                try:
-                    val = line.split("PASSWORD:")[1].strip()
-                    actions.append({"type": "password", "length": int(val)})
-                except Exception as e: pass
-
-            if "QRCODE:" in line:
-                try:
-                    val = line.split("QRCODE:")[1].strip()
-                    actions.append({"type": "qrcode", "data": val})
-                except Exception as e: pass
-
-            if "FA:" in line:
-                fact = line.split("FA:")[1].strip()
-                if fact and "[Unknown]" not in fact:
-                    logging.info(f"Extracted Fact: {fact}")
-                    remember_fact(fact)
-            elif "UP:" in line:
-                fact = line.split("UP:")[1].strip()
-                if fact and "[Unknown]" not in fact:
-                    logging.info(f"Extracted Update: {fact}")
-                    remember_update(fact)
-            elif "FORGET:" in line:
-                fact = line.split("FORGET:")[1].strip()
-                delete_memory(fact)
-            elif "SEARCH:" in line:
-                if model_manager.current_fast_request_id != request_id:
-                    logging.info(f"Fast Action Aborted (request {request_id} cancelled by newer request).")
-                    return jsonify({"actions": [], "chips": []})
-
-                raw_q = line.split("SEARCH:")[1].strip()
-                q = _sanitize_search_query(raw_q, query)
-                if q != raw_q:
-                    logging.info(f"Fast model SEARCH query sanitized: '{raw_q[:80]}' -> '{q}'")
-                
-                # Use EXISTING results if query matches (or if LLM kept original query)
-                # If LLM changed query significantly, we might need new search, 
-                # but usually it's just "SEARCH:original_query".
-                # To be safe: if q is similar to original query, reuse.
-                # Since we already searched for 'query', if q == query, we reuse.
-                
-                results = []
-                if q.lower() == query.lower() and search_results:
-                     logging.info(f"Reusing {len(search_results)} existing search results for SEARCH action")
-                     results = search_results
-                else:
-                     logging.info(f"Refetching search results for new query: '{q}'")
-                     from src.services.search.web_search import search_api
-                     results = search_api(q, categories='general', fast=True)
-                
-                if results:
-                    # Build rich context from top 5 results - full descriptions for model to decide
-                    context = "Search results:\n"
-                    for i, res in enumerate(results[:3], 1):
-                        title = res.get('title', 'N/A')
-                        content = (res.get('content') or res.get('snippet', '') or 'N/A')
-                        if len(content) > 400:
-                            content = content[:400] + "..."
-                        url = res.get('url', 'N/A')
-                        context += f"\n--- Result {i} ---\n"
-                        context += f"Title: {title}\n"
-                        context += f"Description: {content}\n"
-                        context += f"URL: {url}\n"
-                    
-                    logging.info(f"[DEBUG] Search results sent to fast model ({len(context)} chars):\n{context}")
-                    
-                    # Use fast model to classify based on the descriptions only
-                    classify_messages = [
-                        {
-                            "role": "system",
-                            "content": """You are a search result classifier.
-Analyze the provided search results for the user's query.
-
-Task: Determine if the user is looking for a PERSON, a PLACE, or just doing a general SEARCH.
-
-Categories:
-- PERSON: Real people, historical figures, celebrities, professionals.
-  * Indicators: "biography", "born", "career", "profile", job titles (CEO, Director, Actor), social media profiles (LinkedIn, Facebook).
-- PLACE: Physical locations, cities, schools, landmarks, addresses.
-  * Indicators: "city", "country", "address", "map", "located in", "school", "university".
-- SEARCH: Everything else (products, concepts, companies, websites, lyrics, definitions).
-
-Instructions:
-1. Read the user query and search snippets carefully.
-2. If the results are predominantly about a specific person's life or career, choose PERSON.
-3. If the results are about a specific physical location or institution, choose PLACE.
-4. Otherwise, choose SEARCH.
-5. Output ONLY the category name.
-
-Examples:
-Query: "Albert Einstein" -> PERSON
-Query: "Paris France" -> PLACE
-Query: "How to tie a tie" -> SEARCH
-Query: "Jerzy Soska" (Results: Director of ZSTiB, Mayor) -> PERSON
-Query: "ZSTiB Brzesko" (Results: School in Brzesko) -> PLACE"""
-                        },
-                        {
-                            "role": "user",
-                            "content": f"User query: {query}\n\n{context}\n\nCategory (PERSON/PLACE/SEARCH):"
-                        }
-                    ]
-                    
-                    try:
-                        classification = _safe_fast_completion(
-                            messages=classify_messages,
-                            max_tokens=8,
-                            temperature=0.0,
-                            step_name="Search classification"
-                        )
-                        if classification is None:
-                            raise Exception("Classification aborted")
-                        
-                        classification_text = classification['choices'][0]['message']['content'].strip().upper()
-                        # Strip non-ASCII (Qwen can emit Chinese/garbage when confused); then match PERSON/PLACE/SEARCH
-                        import re
-                        normalized = re.sub(r'[^A-Za-z]', '', classification_text)
-                        first_word = ""
-                        if normalized.startswith('PERSON'):
-                            first_word = "PERSON"
-                        elif normalized.startswith('PLACE'):
-                            first_word = "PLACE"
-                        elif normalized.startswith('SEARCH'):
-                            first_word = "SEARCH"
-                        logging.info(f"[DEBUG] Fast model classification: '{classification_text[:60]}' -> normalized '{normalized[:20]}' -> '{first_word}'")
-                        
-                        # Act on model decision only - let the model decide
-                        if first_word == "PERSON":
-                            logging.info(f"[DEBUG] Model chose PERSON - fast model will write the card from search results")
-                            # Have fast model write the card (name + description) from search results, not raw copy-paste
-                            write_messages = [
-                                {
-                                    "role": "system",
-                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
-                                },
-                                {
-                                    "role": "user",
-                                    "content": f"Search results about: {query}\n\n{context}\n\nWrite the person card:"
-                                }
-                            ]
-                            try:
-                                write_out = _safe_fast_completion(
-                                    messages=write_messages,
-                                    max_tokens=150,
-                                    temperature=0.5,
-                                    step_name="Person card generation"
-                                )
-                                if write_out:
-                                    card_text = write_out['choices'][0]['message']['content'].strip()
-                                    logging.info(f"[DEBUG] Fast model person card output:\n{card_text}")
-                                    # Parse NAME: and DESCRIPTION:
-                                    person_name = q
-                                    person_desc = ""
-                                    for part in card_text.split("\n"):
-                                        part = part.strip()
-                                        if not part:
-                                            continue
-                                        if part.upper().startswith("NAME:"):
-                                            person_name = part.split(":", 1)[1].strip()
-                                        elif part.upper().startswith("DESCRIPTION:"):
-                                            person_desc = part.split(":", 1)[1].strip()
-                                    if not person_desc:
-                                        # Fallback: use rest of card as description (skip first line if it looks like name)
-                                        lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                                        if len(lines) >= 2:
-                                            person_desc = " ".join(lines[1:])
-                                        elif lines:
-                                            person_desc = lines[0] if "NAME:" not in lines[0].upper() else ""
-                                    
-                                    # We also want image support. 
-                                    # Let's call get_person_result to get image but OVERRIDE description
-                                    # Actually, let's just use get_person_result and patch it.
-                                    person_res_fallback = get_person_result(person_name, existing_results=results)
-                                    if person_res_fallback:
-                                         if person_desc:
-                                             person_res_fallback['description'] = person_desc
-                                         actions.append(person_res_fallback)
-                                    else:
-                                        # Add the generated action if get_person_result returns None
-                                        actions.append({
-                                            "type": "person",
-                                            "name": person_name or q,
-                                            "description": person_desc,
-                                            "url": results[0].get('url') if results else "",
-                                            "image": None 
-                                        })
-                                
-                                continue
-                            except Exception as e:
-                                logging.error(f"[DEBUG] Person card generation failed: {e}")
-                                pass
-                        
-                        elif first_word == "PLACE":
-                            logging.info(f"[DEBUG] Model chose PLACE for: {q}")
-                            place_result = get_place_result(q, existing_results=results)
-                            if place_result:
-                                actions.append(place_result)
-                                continue
-                    
-                    except Exception as e:
-                        logging.error(f"[DEBUG] Classification failed: {e}")
-                
-                # If query still looks like a person, prefer person card over website link.
-                person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
-                if person_candidate:
-                    # Try to enhance with LLM description if we have context
-                    enhanced_desc = None
-                    if 'context' in locals() and context:
-                        try:
-                            write_messages = [
-                                {
-                                    "role": "system",
-                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
-                                },
-                                {
-                                    "role": "user",
-                                    "content": f"Search results about: {person_candidate}\n\n{context}\n\nWrite the person card:"
-                                }
-                            ]
-                            write_out = _safe_fast_completion(
-                                messages=write_messages,
-                                max_tokens=150,
-                                temperature=0.5,
-                                step_name="Person card generation (Heuristic)"
-                            )
-                            if write_out:
-                                card_text = write_out['choices'][0]['message']['content'].strip()
-                                logging.info(f"[DEBUG] Fast model person card output (Heuristic):\n{card_text}")
-                                for part in card_text.split("\n"):
-                                    part = part.strip()
-                                    if part.upper().startswith("DESCRIPTION:"):
-                                        enhanced_desc = part.split(":", 1)[1].strip()
-                                        break
-                                if not enhanced_desc:
-                                     lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                                     if len(lines) >= 2: enhanced_desc = " ".join(lines[1:])
-                        except Exception as e:
-                            logging.error(f"[DEBUG] Heuristic LLM generation failed: {e}")
-
-                    person_result = get_person_result(person_candidate, existing_results=results)
-                    if person_result:
-                        if enhanced_desc:
-                            person_result['description'] = enhanced_desc
-                        logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
-                        actions.append(person_result)
-                        continue
-
-                # Fallback: treat as website search
-                nav = get_navigation_result(q, fast=True, existing_results=results)
-                if nav:
-                    logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
-                    actions.append({"type": "link", "url": nav['url'], "title": nav['title'], "description": nav['description']})
-                else:
-                    url = f"https://www.google.com/search?q={q}"
-                    actions.append({"type": "link", "url": url, "title": f"Search {q}", "description": "Web Search"})
-
-            elif "TRANSLATE:" in line:
-                try:
-                    raw_content = line.split("TRANSLATE:")[1].strip()
-                    parts = raw_content.split("|")
-                    
-                    # Robust parsing:
-                    if len(parts) >= 4:
-                        source = parts[0]
-                        from_lang = parts[1]
-                        to_lang = parts[2]
-                        translated = "|".join(parts[3:]) # Rejoin in case text contained |
-                    elif len(parts) == 3:
-                        # Common error: source|to_lang|translated (missing from_lang)
-                        p1, p2, p3 = parts
-                        # If p2 looks like a lang code (2-3 chars)
-                        if len(p2.strip()) <= 3:
-                             source, from_lang, to_lang, translated = p1, "auto", p2, p3
-                        else:
-                             # Fallback: assume source|from|translated ?? 
-                             # Or just fail gracefully
-                             logging.warning(f"TRANSLATE: parsed 3 parts, ambiguous: {parts}")
-                             continue
-                    elif len(parts) == 2:
-                        # source|translated
-                        source, translated = parts
-                        from_lang = "auto"
-                        to_lang = "en" # Safe default?
-                    else:
-                        logging.warning(f"TRANSLATE: expected 4 parts, got {len(parts)}: {parts}")
-                        continue
-
-                    actions.append({
-                        "type": "translate",
-                        "source_text": source.strip(),
-                        "from_lang": from_lang.strip(),
-                        "to_lang": to_lang.strip(),
-                        "translated_text": translated.strip()
-                    })
-                except Exception as e:
-                    logging.error(f"Failed to parse TRANSLATE action: {e}")
-
-            elif "PERSON:" in line:
-                content = line.split("PERSON:")[1].strip()
-                person_desc = None
-                
-                if "|" in content:
-                    name, desc = content.split("|", 1)
-                    name = name.strip()
-                    person_desc = desc.strip()
-                else:
-                    name = content.strip()
-
-                # If we have a custom description from the "Person card generation" step above,
-                # it would have been added to 'actions' already.
-                
-                # Check if we already have a person action for this name to avoid duplicates
-                already_have = any(a['type'] == 'person' for a in actions)
-                if not already_have:
-                    # If not, generate it NOW using the LLM logic if possible
-                    # Re-use the generation logic if we have context
-                    
-                    # Try to generate description if we haven't already
-                    # Use 'context' if available (from SEARCH block), otherwise 'search_context' (from pre-emptive search)
-                    ctx = context if 'context' in locals() and context else search_context
-
-                    if ctx and not person_desc:
-                        try:
-                            # Re-run generation specifically for this PERSON if not done yet
-                            write_messages = [
-                                {
-                                    "role": "system",
-                                    "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary (e.g. 'He is a...', 'She is a...'). Do NOT use 'I' or first-person. Synthesize facts, do not copy snippets directly.]"
-                                },
-                                {
-                                    "role": "user",
-                                    "content": f"Search results about: {name}\n\n{ctx}\n\nWrite the person card:"
-                                }
-                            ]
-                            write_out = _safe_fast_completion(
-                                messages=write_messages,
-                                max_tokens=150,
-                                temperature=0.5,
-                                step_name="Person card generation (Fallback)"
-                            )
-                            if write_out:
-                                card_text = write_out['choices'][0]['message']['content'].strip()
-                                for part in card_text.split("\n"):
-                                    part = part.strip()
-                                    if part.upper().startswith("DESCRIPTION:"):
-                                        person_desc = part.split(":", 1)[1].strip()
-                                        break
-                                if not person_desc:
-                                     lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                                     if len(lines) >= 2: person_desc = " ".join(lines[1:])
-                        except Exception: pass
-
-                    res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
-                    if res:
-                        if person_desc:
-                            res['description'] = person_desc
-                        actions.append(res)
-
-            elif "PLACE:" in line:
-                name = line.split("PLACE:")[1].strip()
-                # Return a pending placeholder so UI can show other actions (like Link) immediately
-                # The UI will call /resolve_place asynchronously
-                actions.append({"type": "place_pending", "name": name})
-
-            elif "UNINSTALL:" in line:
-                app = line.split("UNINSTALL:")[1].strip()
-                logging.info(f"Action: UNINSTALL {app}")
-                actions.append({"type": "uninstall", "name": app})
-
-            elif "INSTALL:" in line:
-                app = line.split("INSTALL:")[1].strip()
-                metadata = resolve_app_metadata(app)
-                if metadata:
-                    actions.append({
-                        "type": "install",
-                        "name": app,
-                        "website": metadata.get("website"),
-                        "image": metadata.get("image")
-                    })
-                else:
-                    actions.append({"type": "install", "name": app})
-
-            elif "OPEN:" in line:
-                url = line.split("OPEN:")[1].strip()
-                if "http" not in url: url = "https://" + url
-                
-                # Generate a better title
-                display_url = url.replace("https://", "").replace("http://", "").replace("www.", "")
-                if "/" in display_url: display_url = display_url.split('/')[0]
-                title = f"Open {display_url}"
-
-                act = {"type": "link", "url": url, "title": title, "description": "Open Website"}
-                logging.info(f"Generated Action: {act}")
-                actions.append(act)
-
-            elif "OPEN_APP:" in line:
-                app = line.split("OPEN_APP:")[1].strip()
-                success, msg = find_and_launch_app(app)
-                if success:
-                    actions.append({"type": "status", "status": "success", "description": f"Opened {msg}"})
-                else:
-                    # App not found locally — suggest installation instead of showing error
-                    logging.info(f"OPEN_APP: '{app}' not found, suggesting install")
-                    metadata = resolve_app_metadata(app)
-                    if metadata:
-                        actions.append({
-                            "type": "install",
-                            "name": app,
-                            "website": metadata.get("website"),
-                            "image": metadata.get("image")
-                        })
-                    else:
-                        actions.append({"type": "install", "name": app})
-
-            elif "SYSTEM_SETTINGS:" in line:
-                try:
-                    from src.services.system.macos_settings import SETTING_META, execute_setting
-                    json_str = line.split("SYSTEM_SETTINGS:")[1].strip()
-                    settings_act = json.loads(json_str)
-                    
-                    # Augment with meta data (icon, color, etc)
-                    setting_name = settings_act.get("setting", "")
-                    meta = SETTING_META.get(setting_name, {})
-                    settings_act.update(meta)
-                    if "label" not in settings_act:
-                        settings_act["label"] = setting_name.replace("_", " ").title()
-                        
-                    execute_setting(settings_act)
-                    actions.append(settings_act)
-                except Exception as e:
-                    logging.error(f"Failed to parse system_settings action: {e}")
-
-        chips = []
-        logging.info(f"Chips ({len(chips)}): {[c['label'] for c in chips]}")
-
-        # Post-processing: Remove redundant or unwanted actions
-        final_actions = []
-        has_person = any(a['type'] == 'person' for a in actions)
-        
-        for a in actions:
-            if a['type'] == 'link':
-                url = a.get('url', '').lower()
-                
-                # Rule 1: If Person card exists, remove Wikipedia links (redundant bio)
-                if has_person and 'wikipedia.org' in url:
-                    continue
-                    
-                # Rule 2: For very short queries (<=1 char), remove Wikipedia links
-                # (unless it's a specific website match like z -> z.ai, which is handled by not being wikipedia)
-                if len(query) <= 1 and 'wikipedia.org' in url:
-                    continue
-                
-                # Rule 3: Remove duplicate URLs (if Person card already has this URL)
-                if has_person:
-                    person_card = next((p for p in actions if p['type'] == 'person'), None)
-                    if person_card and person_card.get('url') == a.get('url'):
-                        continue
-
-            final_actions.append(a)
-        
-        actions = final_actions
-
+        actions, chips = _parse_fast_action_output(
+            result_text=result_text,
+            query=query,
+            request_id=request_id,
+            endpoint_start_time=endpoint_start_time,
+            search_context=search_context,
+            search_results=search_results,
+            safe_fast_completion=_safe_fast_completion,
+        )
         logging.info(f"[TIMING] Total action_endpoint time: {time.time() - endpoint_start_time:.3f}s")
         return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
 
     except Exception as e:
         logging.error(f"Error in action_endpoint: {e}")
+        return jsonify({"actions": [], "chips": [], "error": str(e)})
+
+
+@api_bp.route('/action_pending', methods=['POST'])
+def action_pending_endpoint():
+    """
+    Continue a pending fast action that required web_search.
+    Expects: {"pending_id": "<request_id>"}
+    """
+    model_manager.ensure_fast_model()
+    try:
+        req = request.get_json(force=True)
+    except Exception:
+        return jsonify({"actions": [], "chips": []}), 400
+
+    pending_id = (req.get("pending_id") or "").strip()
+    if not pending_id:
+        return jsonify({"actions": [], "chips": []}), 400
+
+    pending = _pending_actions_get(pending_id)
+    if not pending:
+        return jsonify({"actions": [], "chips": []})
+
+    # If user already typed something else, don't waste cycles.
+    if model_manager.current_fast_request_id != pending_id:
+        _pending_actions_pop(pending_id)
+        return jsonify({"actions": [], "chips": []})
+
+    query = pending.get("query", "")
+    tool_q = pending.get("tool_query", query) or query
+    endpoint_start_time = time.time()
+    search_context = ""
+    search_results = []
+
+    def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False, tools=None, tool_choice=None):
+        if model_manager.current_fast_request_id != pending_id:
+            logging.info(f"{step_name}: request {pending_id} superseded before lock.")
+            return None
+
+        if not model_manager.fast_lock.acquire(timeout=5.0):
+            logging.error(f"{step_name}: failed to acquire fast_lock after 5 seconds.")
+            return None
+
+        try:
+            if model_manager.current_fast_request_id != pending_id:
+                logging.info(f"{step_name}: request {pending_id} cancelled before inference.")
+                return None
+            if not model_manager.fast_model:
+                logging.error(f"{step_name}: fast model is not loaded.")
+                return None
+            if reset_model and hasattr(model_manager.fast_model, 'reset'):
+                model_manager.fast_model.reset()
+
+            out = model_manager.fast_model.create_chat_completion(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                request_id=pending_id,
+                tools=tools,
+                tool_choice=tool_choice
+            )
+            if out is None:
+                logging.info(f"{step_name}: completion aborted/empty for request {pending_id}.")
+                return None
+            return out
+        except Exception as e:
+            logging.error(f"{step_name}: fast model inference failed: {e}")
+            return None
+        finally:
+            model_manager.fast_lock.release()
+
+    try:
+        from src.services.search.web_search import search_api
+        tool_results = search_api(tool_q, categories='general', fast=True)
+        if tool_results:
+            search_results.extend(tool_results)
+
+        tool_content = "No results found."
+        if tool_results:
+            tool_content = ""
+            for i, res in enumerate(tool_results[:3], 1):
+                tool_content += f"Result {i}: {res.get('title')} - {res.get('content') or res.get('snippet')}\n"
+
+        search_context = f"Tool Search Results for '{tool_q}':\n{tool_content}".strip()
+
+        phase2_system = (
+            "You are an intelligent action classifier. You ONLY output commands.\n"
+            "Use the web search results below.\n"
+            "Output one or more commands, one per line, from:\n"
+            "PERSON:Name|Description\nPLACE:Name\nOPEN:url\nINSTALL:name\nUNINSTALL:name\nSEARCH:query\n"
+            "CALC:expr\nTRANSLATE:source|from|to|translated\nCURRENCY:amount|from|to|converted\n"
+            "WEATHER:location|temp|condition\nUNIT:amount|from|to|converted\n"
+            "COLOR:hex|rgb|hsl\nTIMER:seconds\nPASSWORD:length\nQRCODE:data\n"
+            "SYSTEM_SETTINGS:{...}\n"
+            "Do not explain."
+        )
+        phase2_user = f"Query: {query}\n\n{search_context}"
+        out = _safe_fast_completion(
+            messages=[{"role": "system", "content": phase2_system}, {"role": "user", "content": phase2_user}],
+            max_tokens=256,
+            temperature=0.0,
+            step_name="Action intent (pending)"
+        )
+        if out is None:
+            return jsonify({"actions": [], "chips": []})
+
+        result_text = out['choices'][0]['message']['content'].strip()
+        cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
+        if not cleaned_text and result_text:
+            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+                cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
+        result_text = cleaned_text
+
+        actions, chips = _parse_fast_action_output(
+            result_text=result_text,
+            query=query,
+            request_id=pending_id,
+            endpoint_start_time=endpoint_start_time,
+            search_context=search_context,
+            search_results=search_results,
+            safe_fast_completion=_safe_fast_completion,
+        )
+        _pending_actions_pop(pending_id)
+        return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
+
+    except Exception as e:
+        logging.error(f"Error in action_pending_endpoint: {e}")
+        _pending_actions_pop(pending_id)
         return jsonify({"actions": [], "chips": [], "error": str(e)})
 
 @api_bp.route('/resolve_place', methods=['POST'])

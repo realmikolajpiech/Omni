@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -699,6 +699,9 @@ class OmniWindow(QWidget):
              self.resize(self.width(), 84)
         elif self.is_settings_mode:
              self.resize(self.width(), self._SETTINGS_HEIGHT)
+             # Refresh account/subscription state every time settings re-appears,
+             # so stale "waiting for payment" messages are cleared and plan badges update.
+             self.settings_panel.refresh_account()
              
         QTimer.singleShot(100, self.apply_blur)
         # Focus immediately and again after a short delay (Windows often needs both)
@@ -1852,6 +1855,8 @@ class OmniWindow(QWidget):
                     return PasswordActionWidget(a.get('length', 16), a.get('pwd', None))
                 elif a.get('type') == 'qrcode':
                     return QRActionWidget(a.get('data', ''))
+                elif a.get('type') == 'action_pending':
+                    return PendingActionWidget(a.get('title', 'Searching the web'), a.get('subtitle', ''))
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
@@ -1959,6 +1964,7 @@ class OmniWindow(QWidget):
         if data.get('type') == 'og_preview': return f"og:{data.get('url', '')}"
         if data.get('type') == 'quick_url': return f"quick_url:{data.get('url', '')}"
         if data.get('type') == 'ask_omni': return 'ask_omni'
+        if data.get('type') == 'action_pending': return f"action_pending:{data.get('pending_id') or data.get('subtitle') or ''}"
         if 'orig_name' in data and 'cmd' in data: return f"app:{data['orig_name']}" # App
         if data.get('type') == 'open_file': return f"file:{data.get('path')}"
         if data.get('type') == 'link': return f"link:{data.get('url')}"

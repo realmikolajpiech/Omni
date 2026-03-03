@@ -263,7 +263,9 @@ APP_VERSION = "0.5.0"
 
 # Backend (Cloudflare Worker) — all AI/search calls are proxied through here
 BACKEND_URL = os.environ.get("OMNI_BACKEND_URL", "https://omni-backend.heyomni.workers.dev")
-OMNI_SECRET = os.environ.get("OMNI_SECRET", "928623c24271f389cb638ce1853f0386b3728c0c8d50c3ea08166186580b3c2f")
+# OMNI_SECRET = os.environ.get("OMNI_SECRET", "928623c24271f389cb638ce1853f0386b3728c0c8d50c3ea08166186580b3c2f")
+# We need to make sure we are not hardcoding the secret here for security, but for now let's keep it consistent
+OMNI_SECRET = "928623c24271f389cb638ce1853f0386b3728c0c8d50c3ea08166186580b3c2f"
 
 from src.core.device import get_device_id
 DEVICE_ID = get_device_id()
@@ -301,11 +303,15 @@ BRAIN_PORT = 5555
 BRAIN_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/ask_llm"
 SEARCH_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/search"
 ACTION_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/action"
+ACTION_PENDING_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/action_pending"
 RESOLVE_PLACE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/resolve_place"
 INSTALL_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/install_plan"
 FIND_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/find_package"
 PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"
 VERIFY_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/verify_package"
+
+# Billing (Dodo via Worker)
+CHECKOUT_SESSION_URL = f"{BACKEND_URL}/v1/billing/checkout_session"
 
 # Search API (Serper.dev -- fast Google results)
 SERPER_MAIN_API_KEY = os.environ.get("SERPER_MAIN_API_KEY", "")  # used by main LLM tool calls

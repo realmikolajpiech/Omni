@@ -28,6 +28,11 @@ id      = "a855aebfb1c84020b402e99cef0791e7"
 #   wrangler secret put SERPER_MAIN_API_KEY
 #   wrangler secret put SERPER_FAST_API_KEY
 #   wrangler secret put PAYMENT_WEBHOOK_SECRET
+#   wrangler secret put DODO_PAYMENTS_API_KEY
 #   wrangler secret put SUPABASE_URL            ← https://xxxx.supabase.co
 #   wrangler secret put SUPABASE_ANON_KEY       ← Settings → API → anon/publishable key
 #   wrangler secret put SUPABASE_SERVICE_KEY    ← Settings → API → service_role key
+#
+# Optional vars (set in dashboard or wrangler.toml [vars]):
+#   DODO_ENVIRONMENT    "test_mode" or "live_mode" (default: live_mode)
+#   DODO_RETURN_URL     Where Dodo redirects after payment (default: https://heyomni.app/thanks)

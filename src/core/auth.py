@@ -190,6 +190,142 @@ def sign_out():
     _clear_session()
 
 
+def exchange_magic_link(url: str, on_done) -> None:
+    """Exchange a Supabase magic link for a live session.
+
+    Opens *url* in the browser (it redirects to localhost:5579/magic-callback
+    with tokens in the URL fragment), serves a tiny JS page that extracts the
+    fragment tokens and POSTs them back to the local server, then saves the
+    session.  *on_done(success: bool, msg: str)* is called on a background thread.
+    """
+    result: dict = {"access_token": None, "refresh_token": None, "error": None}
+    done_event = threading.Event()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path in ("/magic-callback", "/magic_callback"):
+                html = (
+                    b"<!DOCTYPE html><html><body>"
+                    b"<p style='font-family:sans-serif;padding:20px'>Signing you in\u2026</p>"
+                    b"<script>"
+                    b"var h=window.location.hash.substring(1);"
+                    b"var p=new URLSearchParams(h);"
+                    b"var at=p.get('access_token');"
+                    b"var rt=p.get('refresh_token')||'';"
+                    b"if(at){"
+                    b"fetch('/token',{method:'POST',"
+                    b"headers:{'Content-Type':'application/json'},"
+                    b"body:JSON.stringify({access_token:at,refresh_token:rt})})"
+                    b".then(function(){"
+                    b"document.body.innerHTML='<p style=\"font-family:sans-serif;padding:20px\">"
+                    b"Signed in! You can close this tab.</p>';});"
+                    b"}else{"
+                    b"document.body.innerHTML='<p style=\"font-family:sans-serif;padding:20px;color:red\">"
+                    b"Authentication failed. Close this tab.</p>';"
+                    b"fetch('/error');}"
+                    b"</script></body></html>"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(html)
+            elif parsed.path == "/error":
+                result["error"] = "authentication failed"
+                done_event.set()
+                self.send_response(200)
+                self.end_headers()
+            else:
+                self.send_response(204)
+                self.end_headers()
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/token":
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length))
+                    result["access_token"]  = data.get("access_token")
+                    result["refresh_token"] = data.get("refresh_token", "")
+                except Exception:
+                    result["error"] = "token parse error"
+                done_event.set()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    def _run():
+        import time
+        try:
+            httpd = HTTPServer(("localhost", _OAUTH_PORT), _Handler)
+            webbrowser.open(url)
+            start = time.time()
+            while not done_event.is_set():
+                if time.time() - start > 300:
+                    result["error"] = "timed out"
+                    break
+                httpd.timeout = 1.0
+                httpd.handle_request()
+            httpd.server_close()
+        except Exception as e:
+            result["error"] = str(e)
+
+        if result["access_token"]:
+            try:
+                req = urllib.request.Request(
+                    f"{SUPABASE_URL}/auth/v1/user",
+                    headers={
+                        "Authorization": f"Bearer {result['access_token']}",
+                        "apikey":        SUPABASE_ANON_KEY,
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    user = json.loads(r.read())
+                _save_session(result["access_token"], result.get("refresh_token", ""), user)
+                on_done(True, "Signed in!")
+            except Exception as e:
+                on_done(False, f"Failed to get user info: {e}")
+        else:
+            on_done(False, result.get("error") or "Magic link exchange failed.")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def update_password(new_password: str) -> tuple[bool, str]:
+    """Update the password for the currently signed-in user."""
+    token = get_access_token()
+    if not token:
+        return False, "Not signed in."
+    try:
+        payload = json.dumps({"password": new_password}).encode()
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/auth/v1/user",
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "apikey":        SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {token}",
+            },
+            method="PUT",
+        )
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read())
+        if data.get("error"):
+            return False, data["error"].get("message", "Failed to update password.")
+        rt = get_session().get("refresh_token", "")
+        _save_session(token, rt, data)
+        return True, "Password set! You can now sign in with email + password."
+    except Exception as e:
+        return False, f"Connection error: {e}"
+
+
 def start_oauth(provider: str, on_done) -> None:
     """Open browser OAuth flow (PKCE).  on_done(success: bool, msg: str) is called on background thread."""
     verifier  = secrets.token_urlsafe(64)

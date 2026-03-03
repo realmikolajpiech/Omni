@@ -126,12 +126,22 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
     }
 
     try:
-        logging.info(f"[search] POST {BACKEND_URL}/v1/search payload={payload}")
-        r = _backend_client.post("/v1/search", json=payload, timeout=timeout)
-        logging.info(f"[search] response status={r.status_code} body={r.text[:500]!r}")
+        # Attach JWT if user is logged in (backend requires it for authenticated endpoints)
+        extra_headers = {}
+        try:
+            from src.core import auth as _auth
+            token = _auth.get_access_token()
+            if token:
+                extra_headers["Authorization"] = f"Bearer {token}"
+        except Exception:
+            pass
+
+        print(f"[SEARCH] POST /v1/search q={payload['q']!r} auth={'yes' if extra_headers else 'no'}", flush=True)
+        r = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
+        print(f"[SEARCH] status={r.status_code} body={r.text[:300]!r}", flush=True)
         r.raise_for_status()
         data = r.json()
-        logging.info(f"[search] parsed JSON keys={list(data.keys())}")
+        print(f"[SEARCH] JSON keys={list(data.keys())}", flush=True)
     except Exception as e:
         logging.warning(f"[search] Serper request failed ({type(e).__name__}): {e}")
         return []
@@ -178,7 +188,7 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
                 'content': item.get('snippet', ''),
             })
 
-    logging.info(f"[search] normalized {len(results)} results for category={categories!r}")
+    print(f"[SEARCH] normalized {len(results)} results for category={categories!r}", flush=True)
     return results
 
 

@@ -13,6 +13,8 @@ from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
 import src.core.subscription as subscription
 import src.core.auth as auth
+import src.core.billing as billing
+from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET
 
 LANGUAGES = [
     ("auto", "Auto — detect language"),
@@ -509,12 +511,20 @@ class SettingsPage(QWidget):
 
 class SettingsPanel(QWidget):
     closed = pyqtSignal()
+    # Signals used to marshal results from background threads to the main thread.
+    _checkout_ready     = pyqtSignal(str)   # emitted with checkout URL on success
+    _checkout_error_sig = pyqtSignal(str)   # emitted with error message on failure
+    _payment_detected   = pyqtSignal(object)  # emitted with payment data dict
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_theme = "dark"
         self._pages = {}  # name -> widget
         self._build_ui()
+        # Connect cross-thread signals (must be after _build_ui so self is fully set up).
+        self._checkout_ready.connect(self._on_checkout_ready)
+        self._checkout_error_sig.connect(self._on_checkout_error_occurred)
+        self._payment_detected.connect(self._handle_payment_complete)
 
     # ── Build ────────────────────────────────────────────────────────
 
@@ -542,6 +552,7 @@ class SettingsPanel(QWidget):
         self._add_page("Trust", self._build_trust())
         self._add_page("Privacy", self._build_privacy())
         self._add_page("Account", self._build_account())
+        self._add_page("Developer", self._build_developer())
 
         root.addWidget(self.sidebar)
         root.addWidget(self.content_stack)
@@ -750,6 +761,64 @@ class SettingsPanel(QWidget):
         page.add_stretch()
         return page
 
+    # ── Developer page ────────────────────────────────────────────────
+
+    def _build_developer(self) -> QWidget:
+        page = SettingsPage("Developer")
+
+        page.add_widget(self._desc(
+            "Development tools — for local testing only. "
+            "These settings are not synced and have no effect in production builds."
+        ))
+        page.add_spacing(12)
+
+        # Pro override toggle row
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        lbl = QLabel("Pro override")
+        lbl.setObjectName("FieldLbl")
+        lbl.setFont(_font("Manrope", 11, bold=True))
+        row.addWidget(lbl)
+        row.addStretch()
+
+        self._dev_pro_btn = QPushButton()
+        self._dev_pro_btn.setCheckable(True)
+        self._dev_pro_btn.setChecked(settings_store.get("dev_pro_override", False))
+        self._dev_pro_btn.setFixedSize(52, 28)
+        self._dev_pro_btn.setObjectName("ToggleBtn")
+        self._dev_pro_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dev_pro_btn.toggled.connect(self._on_dev_pro_toggled)
+        self._dev_update_toggle_text()
+        row.addWidget(self._dev_pro_btn)
+
+        page.add_layout(row)
+
+        desc = QLabel(
+            "When on, all subscription checks return Pro and daily limits are skipped. "
+            "Restart is not required — takes effect on the next status refresh."
+        )
+        desc.setObjectName("DescLbl")
+        desc.setFont(_font("Manrope", 10))
+        desc.setWordWrap(True)
+        page.add_widget(desc)
+
+        page.add_stretch()
+        return page
+
+    def _dev_update_toggle_text(self):
+        on = self._dev_pro_btn.isChecked()
+        self._dev_pro_btn.setText("ON" if on else "OFF")
+
+    def _on_dev_pro_toggled(self, checked: bool):
+        settings_store.set("dev_pro_override", checked)
+        self._dev_update_toggle_text()
+        # Immediately re-fetch subscription so the Account tab reflects the change.
+        subscription.refresh_status(
+            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+        )
+
     # ── Logged-out: sign-in / sign-up form ───────────────────────────
 
     def _build_auth_form(self) -> QWidget:
@@ -821,6 +890,55 @@ class SettingsPanel(QWidget):
         self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
         lay.addWidget(self.github_btn)
 
+        lay.addSpacing(10)
+
+        # Upgrade CTA (works without login; attaches to device_id if no account)
+        self.upgrade_box_login = QFrame()
+        self.upgrade_box_login.setObjectName("UpgradeBox")
+        ub = QVBoxLayout(self.upgrade_box_login)
+        ub.setContentsMargins(12, 12, 12, 12)
+        ub.setSpacing(8)
+
+        title = QLabel("Upgrade to Pro")
+        title.setObjectName("FieldLbl")
+        title.setFont(_font("Manrope", 11, bold=True))
+        ub.addWidget(title)
+
+        subtitle = QLabel("Checkout opens in your browser. If you’re not signed in, Pro will apply to this device.")
+        subtitle.setObjectName("DescLbl")
+        subtitle.setFont(_font("Manrope", 10))
+        subtitle.setWordWrap(True)
+        ub.addWidget(subtitle)
+
+        btns = QHBoxLayout()
+        btns.setContentsMargins(0, 2, 0, 0)
+        btns.setSpacing(8)
+
+        self.upgrade_monthly_btn_login = QPushButton("Pro Monthly")
+        self.upgrade_monthly_btn_login.setObjectName("SaveBtn")
+        self.upgrade_monthly_btn_login.setFixedHeight(36)
+        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
+
+        self.upgrade_yearly_btn_login = QPushButton("Pro Yearly")
+        self.upgrade_yearly_btn_login.setObjectName("SaveBtn")
+        self.upgrade_yearly_btn_login.setFixedHeight(36)
+        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
+
+        btns.addWidget(self.upgrade_monthly_btn_login)
+        btns.addWidget(self.upgrade_yearly_btn_login)
+        btns.addStretch()
+        ub.addLayout(btns)
+
+        self.upgrade_status_lbl_login = QLabel("")
+        self.upgrade_status_lbl_login.setObjectName("DescLbl")
+        self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
+        self.upgrade_status_lbl_login.setWordWrap(True)
+        ub.addWidget(self.upgrade_status_lbl_login)
+
+        lay.addWidget(self.upgrade_box_login)
+
         return w
 
     # ── Logged-in: account info ───────────────────────────────────────
@@ -871,6 +989,54 @@ class SettingsPanel(QWidget):
 
         lay.addSpacing(6)
 
+        # Upgrade CTA (hidden for pro)
+        self.upgrade_box = QFrame()
+        self.upgrade_box.setObjectName("UpgradeBox")
+        ub = QVBoxLayout(self.upgrade_box)
+        ub.setContentsMargins(12, 12, 12, 12)
+        ub.setSpacing(8)
+
+        title = QLabel("Upgrade to Pro")
+        title.setObjectName("FieldLbl")
+        title.setFont(_font("Manrope", 11, bold=True))
+        ub.addWidget(title)
+
+        subtitle = QLabel("Checkout opens in your browser. After paying, come back and press refresh (↻).")
+        subtitle.setObjectName("DescLbl")
+        subtitle.setFont(_font("Manrope", 10))
+        subtitle.setWordWrap(True)
+        ub.addWidget(subtitle)
+
+        btns = QHBoxLayout()
+        btns.setContentsMargins(0, 2, 0, 0)
+        btns.setSpacing(8)
+
+        self.upgrade_monthly_btn = QPushButton("Pro Monthly")
+        self.upgrade_monthly_btn.setObjectName("SaveBtn")
+        self.upgrade_monthly_btn.setFixedHeight(36)
+        self.upgrade_monthly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
+
+        self.upgrade_yearly_btn = QPushButton("Pro Yearly")
+        self.upgrade_yearly_btn.setObjectName("SaveBtn")
+        self.upgrade_yearly_btn.setFixedHeight(36)
+        self.upgrade_yearly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_yearly_btn.clicked.connect(lambda: self._start_checkout("yearly"))
+
+        btns.addWidget(self.upgrade_monthly_btn)
+        btns.addWidget(self.upgrade_yearly_btn)
+        btns.addStretch()
+        ub.addLayout(btns)
+
+        self.upgrade_status_lbl = QLabel("")
+        self.upgrade_status_lbl.setObjectName("DescLbl")
+        self.upgrade_status_lbl.setFont(_font("Manrope", 10))
+        self.upgrade_status_lbl.setWordWrap(True)
+        ub.addWidget(self.upgrade_status_lbl)
+
+        lay.addWidget(self.upgrade_box)
+        lay.addSpacing(10)
+
         # Sync status row
         sync_row = QHBoxLayout()
         sync_row.setContentsMargins(0, 0, 0, 0)
@@ -891,7 +1057,57 @@ class SettingsPanel(QWidget):
         sync_row.addWidget(self.sync_btn)
         lay.addLayout(sync_row)
 
-        lay.addSpacing(16)
+        lay.addSpacing(10)
+
+        # Set password / connect Google (always available; useful after magic-link signup)
+        self.secure_box = QFrame()
+        self.secure_box.setObjectName("UpgradeBox")
+        sb = QVBoxLayout(self.secure_box)
+        sb.setContentsMargins(12, 12, 12, 12)
+        sb.setSpacing(8)
+
+        secure_title = QLabel("Account Security")
+        secure_title.setObjectName("FieldLbl")
+        secure_title.setFont(_font("Manrope", 11, bold=True))
+        sb.addWidget(secure_title)
+
+        secure_desc = QLabel("Set a password or connect Google so you can sign in without a magic link.")
+        secure_desc.setObjectName("DescLbl")
+        secure_desc.setFont(_font("Manrope", 10))
+        secure_desc.setWordWrap(True)
+        sb.addWidget(secure_desc)
+
+        self.new_password_edit = QLineEdit()
+        self.new_password_edit.setObjectName("SettingsEdit")
+        self.new_password_edit.setPlaceholderText("New password (min. 6 chars)")
+        self.new_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password_edit.setFixedHeight(38)
+        self.new_password_edit.returnPressed.connect(self._do_set_password)
+        sb.addWidget(self.new_password_edit)
+
+        secure_btns = QHBoxLayout()
+        secure_btns.setContentsMargins(0, 2, 0, 0)
+        secure_btns.setSpacing(8)
+
+        self.set_password_btn = QPushButton("Set Password")
+        self.set_password_btn.setObjectName("SaveBtn")
+        self.set_password_btn.setFixedHeight(36)
+        self.set_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_password_btn.clicked.connect(self._do_set_password)
+
+        self.link_google_btn = QPushButton("Connect Google")
+        self.link_google_btn.setObjectName("OAuthBtn")
+        self.link_google_btn.setFixedHeight(36)
+        self.link_google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.link_google_btn.clicked.connect(lambda: self._do_oauth("google"))
+
+        secure_btns.addWidget(self.set_password_btn)
+        secure_btns.addWidget(self.link_google_btn)
+        secure_btns.addStretch()
+        sb.addLayout(secure_btns)
+
+        lay.addWidget(self.secure_box)
+        lay.addSpacing(10)
 
         # Sign out
         self.sign_out_btn = QPushButton("Sign Out")
@@ -987,9 +1203,29 @@ class SettingsPanel(QWidget):
 
     def refresh_account(self):
         """Refresh both auth state and subscription status."""
+        # Only clear stale checkout messages when no poller is actively waiting.
+        _checkout_active = (
+            hasattr(self, "_checkout_stop") and not self._checkout_stop.is_set()
+        )
+        if not _checkout_active:
+            _stale_msgs = {"Checkout opened — waiting for payment…", "Opening checkout…"}
+            for _attr in ("upgrade_status_lbl", "upgrade_status_lbl_login"):
+                _lbl = getattr(self, _attr, None)
+                if _lbl and _lbl.text() in _stale_msgs:
+                    _lbl.setText("")
+
+        # If not yet signed in, do a one-shot check for a pending confirmed payment.
+        # This covers the case where the user paid while the window was hidden / after
+        # restarting the app, so the continuous poller never got a chance to fire.
+        if not auth.is_logged_in():
+            self._check_pending_payment()
+
         # Show correct stack page
         logged_in = auth.is_logged_in()
         self.account_stack.setCurrentIndex(1 if logged_in else 0)
+
+        def _on_done(status):
+            QTimer.singleShot(0, lambda: self._update_account_ui(status))
 
         if logged_in:
             user = auth.get_user() or {}
@@ -997,10 +1233,9 @@ class SettingsPanel(QWidget):
             self.refresh_btn.setEnabled(False)
             self.refresh_btn.setText("…")
 
-            def _on_done(status):
-                QTimer.singleShot(0, lambda: self._update_account_ui(status))
-
-            subscription.refresh_status(callback=_on_done)
+        # Always refresh subscription status — even when not logged in, so the device
+        # subscription (keyed by device_id) is reflected in the UI.
+        subscription.refresh_status(callback=_on_done)
 
         # Hook sync status updates
         from src.services.sync import memory_sync
@@ -1028,6 +1263,11 @@ class SettingsPanel(QWidget):
 
         self.usage_bar.setVisible(not is_pro)
         self.usage_lbl.setVisible(not is_pro)
+        if hasattr(self, "upgrade_box"):
+            self.upgrade_box.setVisible(not is_pro)
+        # Also update the not-logged-in upgrade box (device may be pro without account).
+        if hasattr(self, "upgrade_box_login"):
+            self.upgrade_box_login.setVisible(not is_pro)
         if not is_pro:
             self.usage_bar.set_fraction(daily_usage, daily_limit)
             self.usage_lbl.setText(f"{daily_usage} / {daily_limit} requests today")
@@ -1036,6 +1276,193 @@ class SettingsPanel(QWidget):
             self._account_status(f"Could not refresh: {error}", error=True)
         else:
             self.account_status_lbl.setText("")
+
+    def _set_checkout_busy(self, busy: bool):
+        for w in (
+            getattr(self, "upgrade_monthly_btn", None),
+            getattr(self, "upgrade_yearly_btn", None),
+            getattr(self, "upgrade_monthly_btn_login", None),
+            getattr(self, "upgrade_yearly_btn_login", None),
+            getattr(self, "refresh_btn", None),
+        ):
+            if w is not None:
+                w.setEnabled(not busy)
+        if hasattr(self, "upgrade_status_lbl"):
+            self.upgrade_status_lbl.setText("Opening checkout…" if busy else "")
+        if hasattr(self, "upgrade_status_lbl_login"):
+            self.upgrade_status_lbl_login.setText("Opening checkout…" if busy else "")
+
+    def _start_checkout(self, interval: str):
+        self._set_checkout_busy(True)
+
+        token = auth.get_access_token()
+        user = auth.get_user() or {}
+        email = user.get("email") or None
+        name = None
+        um = user.get("user_metadata")
+        if isinstance(um, dict):
+            name = um.get("full_name") or um.get("name") or None
+        if not email and hasattr(self, "auth_email_edit"):
+            email = self.auth_email_edit.text().strip() or None
+
+        import threading
+
+        def _run():
+            print(f"[Settings] Starting checkout for interval: {interval}")
+            import webbrowser
+            try:
+                print("[Settings] Calling billing.create_pro_checkout_url...")
+                url = billing.create_pro_checkout_url(
+                    interval=interval,
+                    access_token=token,
+                    customer_email=email,
+                    customer_name=name,
+                )
+                print(f"[Settings] Checkout URL generated: {url}")
+                # Emit signal — guaranteed to be delivered on the main thread.
+                self._checkout_ready.emit(url)
+                print(f"[Settings] Opening browser: {url}")
+                webbrowser.open(url)
+                print("[Settings] Browser opened")
+            except Exception as e:
+                print(f"[Settings] Checkout failed with error: {e}")
+                import traceback
+                traceback.print_exc()
+                self._checkout_error_sig.emit(f"Could not open checkout: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_checkout_ready(self, url: str):
+        """Called on the main thread once the checkout URL is ready."""
+        self._set_checkout_busy(False)
+        msg = "Checkout opened — waiting for payment…"
+        if hasattr(self, "upgrade_status_lbl"):
+            self.upgrade_status_lbl.setText(msg)
+        if hasattr(self, "upgrade_status_lbl_login"):
+            self.upgrade_status_lbl_login.setText(msg)
+        import threading as _threading
+        self._checkout_stop = _threading.Event()
+        billing.poll_checkout_payment(
+            lambda data: self._payment_detected.emit(data),
+            stop_event=self._checkout_stop,
+        )
+
+    def _on_checkout_error_occurred(self, err_msg: str):
+        """Called on the main thread when checkout URL creation fails."""
+        self._set_checkout_busy(False)
+        if hasattr(self, "upgrade_status_lbl"):
+            self.upgrade_status_lbl.setText(err_msg)
+        if hasattr(self, "upgrade_status_lbl_login"):
+            self.upgrade_status_lbl_login.setText(err_msg)
+
+    def _check_pending_payment(self):
+        """One-shot background check of session_status.
+        If the worker has a confirmed payment for this device that we haven't
+        processed yet (e.g. app was restarted after paying), process it now.
+        """
+        if getattr(self, "_payment_check_in_flight", False):
+            return
+        self._payment_check_in_flight = True
+
+        import threading, urllib.request, json as _json
+
+        def _run():
+            try:
+                req = urllib.request.Request(
+                    f"{BACKEND_URL}/v1/billing/session_status",
+                    headers={
+                        "X-Omni-Secret": OMNI_SECRET,
+                        "X-Device-ID":   DEVICE_ID,
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = _json.loads(r.read())
+                if data.get("paid"):
+                    self._payment_detected.emit(data)
+            except Exception:
+                pass
+            finally:
+                self._payment_check_in_flight = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _handle_payment_complete(self, data: dict):
+        """Called on the main thread when the payment poller detects a successful payment."""
+        # Stop the poller (already stopped itself, but be safe)
+        if hasattr(self, "_checkout_stop"):
+            self._checkout_stop.set()
+
+        # Bring the app window back to front and ensure settings/Account tab is visible.
+        win = self.window()
+        if win is not None:
+            if not win.isVisible():
+                win.toggle_visibility_safe("manual")
+            else:
+                win.raise_()
+                win.activateWindow()
+            # Open settings mode if not already in it, then navigate to Account tab.
+            if hasattr(win, "enter_settings_mode") and not win.is_settings_mode:
+                win.enter_settings_mode()
+            delay = 250 if not win.is_settings_mode else 50
+            QTimer.singleShot(delay, self._focus_account_tab)
+
+        magic_link = data.get("magic_link") or ""
+        email      = data.get("email") or ""
+
+        if magic_link and not auth.is_logged_in():
+            # Auto-login via the magic link the worker generated.
+            msg = f"Payment confirmed! Signing in as {email}…" if email else "Payment confirmed! Signing you in…"
+            if hasattr(self, "upgrade_status_lbl"):
+                self.upgrade_status_lbl.setText(msg)
+            if hasattr(self, "upgrade_status_lbl_login"):
+                self.upgrade_status_lbl_login.setText(msg)
+
+            def _on_login(ok, login_msg):
+                def _done():
+                    if ok:
+                        self.refresh_account()
+                        subscription.refresh_status(
+                            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+                        )
+                        QTimer.singleShot(300, self._show_secure_account_prompt)
+                    else:
+                        # Still refresh subscription — device is already unlocked.
+                        ok_msg = "Payment confirmed! Sign in to enable sync."
+                        if hasattr(self, "upgrade_status_lbl"):
+                            self.upgrade_status_lbl.setText(ok_msg)
+                        if hasattr(self, "upgrade_status_lbl_login"):
+                            self.upgrade_status_lbl_login.setText(ok_msg)
+                        subscription.refresh_status(
+                            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+                        )
+                QTimer.singleShot(0, _done)
+
+            auth.exchange_magic_link(magic_link, _on_login)
+        else:
+            # User was already logged in, or no magic link available — just refresh.
+            self.refresh_account()
+            subscription.refresh_status(
+                callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+            )
+            if hasattr(self, "upgrade_status_lbl"):
+                self.upgrade_status_lbl.setText("Payment confirmed! Plan updated.")
+            if hasattr(self, "upgrade_status_lbl_login"):
+                self.upgrade_status_lbl_login.setText("Payment confirmed! Plan updated.")
+
+    def _focus_account_tab(self):
+        """Switch the settings sidebar to the Account page."""
+        for i in range(self.sidebar.count()):
+            if self.sidebar.item(i).text() == "Account":
+                self.sidebar.setCurrentRow(i)
+                break
+
+    def _show_secure_account_prompt(self):
+        """Reveal the 'Account Security' box after auto-login from checkout."""
+        if hasattr(self, "secure_box"):
+            self.secure_box.setVisible(True)
+        # Switch to the logged-in Account view if not already there.
+        if auth.is_logged_in() and self.account_stack.currentIndex() != 1:
+            self.account_stack.setCurrentIndex(1)
 
     def _update_sync_ui(self, state: dict):
         s = state.get("state", "idle")
@@ -1056,6 +1483,12 @@ class SettingsPanel(QWidget):
         for w in (self.sign_in_btn, self.sign_up_btn, self.google_btn, self.github_btn,
                   self.auth_email_edit, self.auth_pass_edit):
             w.setEnabled(not busy)
+        for w in (
+            getattr(self, "set_password_btn", None),
+            getattr(self, "link_google_btn", None),
+        ):
+            if w is not None:
+                w.setEnabled(not busy)
         if busy:
             self.sign_in_btn.setText("…")
         else:
@@ -1115,6 +1548,26 @@ class SettingsPanel(QWidget):
             QTimer.singleShot(0, _finish)
 
         auth.start_oauth(provider, _on_done)
+
+    def _do_set_password(self):
+        pw = self.new_password_edit.text()
+        if len(pw) < 6:
+            self._account_status("Password must be at least 6 characters.", error=True)
+            return
+        self.set_password_btn.setEnabled(False)
+        self.set_password_btn.setText("…")
+
+        import threading
+        def _run():
+            ok, msg = auth.update_password(pw)
+            def _done():
+                self.set_password_btn.setEnabled(True)
+                self.set_password_btn.setText("Set Password")
+                self._account_status(msg, error=not ok)
+                if ok:
+                    self.new_password_edit.clear()
+            QTimer.singleShot(0, _done)
+        threading.Thread(target=_run, daemon=True).start()
 
     def _do_sign_out(self):
         auth.sign_out()
@@ -1389,6 +1842,11 @@ class SettingsPanel(QWidget):
                 font-size: 10px;
                 margin-top: 4px;
             }}
+            QFrame#UpgradeBox {{
+                background: {sidebar_bg};
+                border: 1px solid {border};
+                border-radius: 12px;
+            }}
             QPushButton#OAuthBtn {{
                 background: {field_bg};
                 border: 1px solid {border};
@@ -1414,6 +1872,23 @@ class SettingsPanel(QWidget):
                 font-size: 10px;
             }}
             QLabel#AccountStatusLbl[error="true"] {{ color: #ff5f5f; }}
+
+            /* Developer toggle */
+            QPushButton#ToggleBtn {{
+                background: {field_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QPushButton#ToggleBtn:checked {{
+                background: rgba(99,102,241,0.35);
+                border: 1px solid rgba(99,102,241,0.7);
+                color: #a5b4fc;
+            }}
+            QPushButton#ToggleBtn:hover {{ background: {btn_hover}; }}
         """)
         # Update usage bar dark mode
         if hasattr(self, "usage_bar"):

@@ -448,8 +448,9 @@ def _tool_search_web(query: str) -> str:
     from src.services.search.web_search import perform_web_search
     if not query.strip():
         return "Error: empty query."
-    logging.info(f"[tool:search_web] query={query!r}")
+    print(f"[TOOL:search_web] query={query!r}", flush=True)
     result = perform_web_search(query)
+    print(f"[TOOL:search_web] result len={len(result)} preview={result[:120]!r}", flush=True)
     return result or "No web results found."
 
 
