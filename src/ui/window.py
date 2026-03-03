@@ -3282,7 +3282,7 @@ class OmniWindow(QWidget):
                                 perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                                 self._perm_widget = perm  # keep strong ref
                                 widget.set_answer_visible(False)
-                                def _make_tr_allow_cb(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking):
+                                def _make_tr_allow_cb(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking, _was_voice):
                                     def _cb():
                                         if _rerun:
                                             # ── In-place continuation ───────────────────────────
@@ -3310,6 +3310,9 @@ class OmniWindow(QWidget):
                                             _w.set_answer("")
                                             _w.set_answer_visible(True)
                                             _w.set_thinking_collapsed(False)
+                                            # Restore voice flag so the re-run response also gets TTS
+                                            if _was_voice:
+                                                self.voice_triggered_query = True
                                             # Boost trust and re-run — widget updates in-place
                                             from src.services.llm.tools import set_trust_boost
                                             set_trust_boost(_lvl)
@@ -3326,6 +3329,12 @@ class OmniWindow(QWidget):
                                                     _row = _i + 1
                                                     break
                                             self._run_trusted_terminal(_cmd, _row)
+                                            if _was_voice:
+                                                self.cleanup_worker('tts_worker')
+                                                self.tts_worker = TTSWorker("Gotowe.")
+                                                self.tts_worker.finished_speaking.connect(self.on_tts_finished)
+                                                self.tts_worker.start()
+                                                self.is_tts_playing = True
                                     return _cb
                                 def _make_tr_deny_cb(_w, _rerun):
                                     def _cb():
@@ -3342,7 +3351,7 @@ class OmniWindow(QWidget):
                                             self._finalize_response_ui()
                                         self._navigate_to_trust_settings()
                                     return _cb
-                                perm.allowed.connect(_make_tr_allow_cb(cmd, perm, widget, req_level, is_rerun, data.get("thinking", "")))
+                                perm.allowed.connect(_make_tr_allow_cb(cmd, perm, widget, req_level, is_rerun, data.get("thinking", ""), self.voice_triggered_query))
                                 perm.denied.connect(_make_tr_deny_cb(widget, is_rerun))
                                 perm.open_settings.connect(_make_tr_settings_cb(is_rerun))
                                 self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
@@ -3701,7 +3710,7 @@ class OmniWindow(QWidget):
                         perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                         if _answer_bubble:
                             _answer_bubble.set_answer_visible(False)
-                        def _make_tr_allow_non_stream(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking):
+                        def _make_tr_allow_non_stream(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking, _was_voice):
                             def _cb():
                                 if _rerun:
                                     self._continuation_pending = False
@@ -3721,6 +3730,9 @@ class OmniWindow(QWidget):
                                         _w.set_answer("")
                                         _w.set_answer_visible(True)
                                         _w.set_thinking_collapsed(False)
+                                    # Restore voice flag so the re-run response also gets TTS
+                                    if _was_voice:
+                                        self.voice_triggered_query = True
                                     from src.services.llm.tools import set_trust_boost
                                     set_trust_boost(_lvl)
                                     QTimer.singleShot(100, lambda: self.start_ai_worker(
@@ -3736,6 +3748,12 @@ class OmniWindow(QWidget):
                                             _row = _i + 1
                                             break
                                     self._run_trusted_terminal(_cmd, _row)
+                                    if _was_voice:
+                                        self.cleanup_worker('tts_worker')
+                                        self.tts_worker = TTSWorker("Gotowe.")
+                                        self.tts_worker.finished_speaking.connect(self.on_tts_finished)
+                                        self.tts_worker.start()
+                                        self.is_tts_playing = True
                             return _cb
                         def _make_tr_deny_non_stream(_w, _rerun):
                             def _cb():
@@ -3753,7 +3771,7 @@ class OmniWindow(QWidget):
                                     self._finalize_response_ui()
                                 self._navigate_to_trust_settings()
                             return _cb
-                        perm.allowed.connect(_make_tr_allow_non_stream(cmd, perm, _answer_bubble, req_level, is_rerun, thinking))
+                        perm.allowed.connect(_make_tr_allow_non_stream(cmd, perm, _answer_bubble, req_level, is_rerun, thinking, self.voice_triggered_query))
                         perm.denied.connect(_make_tr_deny_non_stream(_answer_bubble, is_rerun))
                         perm.open_settings.connect(_make_tr_settings_ns_cb(is_rerun))
                         add_item(perm, {"type": "trust_permission"}, anim="pop")

@@ -3,6 +3,7 @@ import logging
 import asyncio
 import tempfile
 import os
+import re
 import subprocess
 import threading
 
@@ -29,6 +30,30 @@ VOICE_MAP = {
 
 _POLISH_CHARS = frozenset("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
 _CJK_RANGES = [(0x4E00, 0x9FFF), (0x3040, 0x30FF), (0xAC00, 0xD7AF)]
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002600-\U000027BF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "\uFE0F\u200D"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _clean_for_tts(text: str) -> str:
+    """Remove emojis and normalize whitespace before TTS."""
+    text = _EMOJI_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _detect_voice(text: str) -> str:
@@ -86,7 +111,7 @@ def _get_stdin_player_cmd():
 
 async def _run_tts(text: str, voice: str, stop_event: threading.Event):
     import edge_tts
-    communicate = edge_tts.Communicate(text, voice=voice)
+    communicate = edge_tts.Communicate(text, voice=voice, rate="+30%")
 
     stdin_cmd = _get_stdin_player_cmd()
 
@@ -160,6 +185,10 @@ def stop_playback():
 
 def speak(text: str, voice: str = None):
     if not text or not text.strip():
+        return
+
+    text = _clean_for_tts(text)
+    if not text:
         return
 
     _stop_event.clear()
