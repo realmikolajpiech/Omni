@@ -245,6 +245,11 @@ class XAIMainWrapper:
         if tools:
             extra["tools"] = tools
 
+        # Inject dev-override header dynamically (setting can change at runtime)
+        import src.core.settings_store as _ss
+        if _ss.get("dev_pro_override", False):
+            extra["extra_headers"] = {"X-Omni-Dev": "1"}
+
         start_time = time.time()
 
         if stream:

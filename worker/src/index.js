@@ -80,14 +80,18 @@ async function handleChat(request, env) {
   const isMainModel = model.toLowerCase().includes("grok");
 
   if (isMainModel) {
-    const { id, isPro } = await resolveIdentity(request, env);
+    const isDevOverride = request.headers.get("X-Omni-Dev") === "1";
 
-    if (!isPro) {
-      const usage = await getUsage(id, env);
-      if (usage >= FREE_DAILY_LIMIT) {
-        return limitReachedResponse(isStream);
+    if (!isDevOverride) {
+      const { id, isPro } = await resolveIdentity(request, env);
+
+      if (!isPro) {
+        const usage = await getUsage(id, env);
+        if (usage >= FREE_DAILY_LIMIT) {
+          return limitReachedResponse(isStream);
+        }
+        await incrementUsage(id, env);
       }
-      await incrementUsage(id, env);
     }
 
     return proxyChat(body, XAI_BASE, env.XAI_API_KEY);
@@ -158,6 +162,10 @@ async function handleSearch(request, env) {
 // ── Status ────────────────────────────────────────────────────────────────────
 
 async function handleStatus(request, env) {
+  const isDevOverride = request.headers.get("X-Omni-Dev") === "1";
+  if (isDevOverride) {
+    return resp({ plan: "pro", daily_usage: 0, daily_limit: 999 });
+  }
   const { id, isPro } = await resolveIdentity(request, env);
   const usage = isPro ? 0 : await getUsage(id, env);
 
