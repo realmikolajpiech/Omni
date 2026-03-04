@@ -295,7 +295,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_email",
-            "description": "Draft and optionally send an email using macOS Mail app.",
+            "description": "Send an email using macOS Mail app. The email is sent automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {

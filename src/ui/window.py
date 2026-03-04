@@ -342,6 +342,7 @@ class OmniWindow(QWidget):
         self._streaming_answer_widget = None  # tracks widget currently being streamed
         self._continuation_thinking_prefix = ""  # thinking text prepended on request_permission re-run
         self._continuation_pending = False  # True while waiting for user to approve request_permission
+        self._pending_open_file = None  # file path shown as "Enter to open" hint after AI response
         self.is_settings_mode = False
         self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
 
@@ -1678,7 +1679,15 @@ class OmniWindow(QWidget):
         super().closeEvent(event)
 
     def on_text_changed(self, text):
-        if self.is_history_mode: 
+        # Clear "Enter to open" hint when user starts typing
+        if self._pending_open_file and text.strip():
+            self._pending_open_file = None
+            for i in range(self.list_widget.count()):
+                w = self._unwrap_answer_widget(self.list_widget.item(i))
+                if w and hasattr(w, 'set_open_hint'):
+                    w.set_open_hint("")
+
+        if self.is_history_mode:
             # If user types in history mode, allow modification without resetting state
             # self.is_history_mode = False  <-- REMOVED
             # self.follow_up_widget.set_active(False) <-- REMOVED
@@ -2356,6 +2365,23 @@ class OmniWindow(QWidget):
         if not item:
             item = self.list_widget.currentItem()
         
+        # "Enter to open" — if input is empty and a file hint is pending, open it
+        if not self.input_field.text().strip() and self._pending_open_file:
+            try:
+                import platform
+                fp = self._pending_open_file
+                self._pending_open_file = None
+                if platform.system() == 'Darwin':
+                    subprocess.Popen(['open', fp])
+                elif platform.system() == 'Windows':
+                    os.startfile(fp)
+                else:
+                    subprocess.Popen(['xdg-open', fp])
+                QTimer.singleShot(500, self.animate_close)
+            except Exception as e:
+                logging.error(f"Failed to open pending file: {e}")
+            return
+
         # If no item selected (Enter in box), use text
         if not item:
             query = self.input_field.text().strip()
@@ -3479,6 +3505,30 @@ class OmniWindow(QWidget):
             self.voice_triggered_query = False
 
         if has_streaming_answer:
+            # Detect file path for "↵ Enter to open" hint
+            # Priority: file_hint from tool results, then regex from answer text
+            self._pending_open_file = None
+            _fh = data.get("file_hint")
+            if _fh and os.path.exists(_fh) and widget is not None:
+                self._pending_open_file = _fh
+                widget.ensure_thinking_widget()
+                widget.thinking_widget.set_open_hint("↵  Enter to open")
+                logging.info(f"[open_hint] from tool file_hint={_fh}")
+            elif widget is not None:
+                answer_text = data.get("answer", "") or getattr(widget, '_answer_text', "")
+                if answer_text:
+                    import re
+                    _fp_match = re.search(r'(?:~/[\w./ \-]+|/[\w./ \-]+\.[\w]+)', answer_text)
+                    if _fp_match:
+                        _fp = _fp_match.group(0).rstrip(' .,;:)`')
+                        if _fp.startswith("~"):
+                            _fp = os.path.expanduser(_fp)
+                        if os.path.exists(_fp):
+                            self._pending_open_file = _fp
+                            widget.ensure_thinking_widget()
+                            widget.thinking_widget.set_open_hint("↵  Enter to open")
+                            logging.info(f"[open_hint] from answer text={_fp}")
+
             self._finalize_response_ui()
             # If AI opened a file via terminal_command, close like shortcut — preserves state
             if self._actions_include_file_open(data.get("actions", [])):

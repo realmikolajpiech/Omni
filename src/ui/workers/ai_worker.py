@@ -51,7 +51,8 @@ class AIWorker(QThread):
                                 self.finished.emit({
                                     "answer": data.get("answer", ""),
                                     "actions": data.get("actions", []),
-                                    "thinking": data.get("thinking", "")
+                                    "thinking": data.get("thinking", ""),
+                                    **({"file_hint": data["file_hint"]} if data.get("file_hint") else {}),
                                 })
                                 break
                             elif data.get("type") == "error":

@@ -341,9 +341,9 @@ class FollowUpWidget(QWidget):
         layout.addStretch()
         layout.addWidget(self.hint)
 
-        self.hide() 
+        self.hide()
         self.current_theme = "light"
-    
+
     def set_theme(self, theme):
         self.current_theme = theme
         t = THEMES.get(theme, THEMES["light"])
@@ -351,7 +351,7 @@ class FollowUpWidget(QWidget):
 
     def sizeHint(self):
         return QSize(150, 32)
-    
+
     def set_mode(self, mode):
         """
         mode: "hidden" | "followup" | "ask_omni"
@@ -403,6 +403,15 @@ class CollapsibleThinkingWidget(QWidget):
         self.header_button.clicked.connect(self.toggle_content)
         self.header_button.setCursor(Qt.CursorShape.PointingHandCursor)
         header_row.addWidget(self.header_button)
+
+        # Open-file hint (shown to the right of the Reasoning pill)
+        self.open_hint = QLabel("")
+        self.open_hint.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+        _ohf = self.open_hint.font(); _ohf.setItalic(True); self.open_hint.setFont(_ohf)
+        self.open_hint.setContentsMargins(8, 0, 0, 0)
+        self.open_hint.hide()
+        header_row.addWidget(self.open_hint)
+
         header_row.addStretch()
         self.layout.addLayout(header_row)
 
@@ -480,6 +489,16 @@ class CollapsibleThinkingWidget(QWidget):
             f"QTextEdit {{ background: transparent; color: {thinking_color}; padding: 0px; margin: 0px; }}"
         )
         self.left_bar.setStyleSheet(f"QFrame {{ background-color: {bar_color}; border: none; }}")
+        self.open_hint.setStyleSheet(f"color: {thinking_color};")
+
+    def set_open_hint(self, text):
+        """Show or hide the open-file hint next to the Reasoning pill."""
+        if text:
+            self.open_hint.setText(text)
+            self.open_hint.show()
+        else:
+            self.open_hint.setText("")
+            self.open_hint.hide()
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -684,10 +703,10 @@ class _BubbleInner(QWidget):
         if is_markdown:
             # Placeholder shown while AI is "thinking" (no answer/thinking content yet)
             self.thinking_placeholder = QLabel("Thinking...")
-            _ph_font = QFont("Instrument Serif", 22, QFont.Weight.Normal)
+            _ph_font = QFont("Instrument Serif", 18, QFont.Weight.Normal)
             _ph_font.setItalic(True)
             self.thinking_placeholder.setFont(_ph_font)
-            self.thinking_placeholder.setMinimumHeight(48)
+            self.thinking_placeholder.setMinimumHeight(38)
             lay.addWidget(self.thinking_placeholder)
             self._placeholder_shown = True  # placeholder starts visible
 
@@ -1078,6 +1097,11 @@ class AnswerWidget(QWidget):
         has_answer = bool(self.text_edit and self.text_edit.toPlainText().strip())
         if self.text_edit:
             self.text_edit.setVisible(has_answer)
+
+    def set_open_hint(self, text):
+        """Show or hide an open-file hint next to the Reasoning pill."""
+        if self.thinking_widget is not None:
+            self.thinking_widget.set_open_hint(text)
 
     def set_thinking_collapsed(self, collapsed):
         if self.thinking_widget is not None:

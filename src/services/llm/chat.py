@@ -689,6 +689,8 @@ Location: {user_loc} | Date: {current_date}
 - **run_terminal** — execute any shell command on macOS (defaults write, osascript, pmset, diskutil, etc.); NEVER tell user to open Terminal manually
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request
+- **send_email** — send an email via macOS Mail app; params: to (address), subject, body; email is sent automatically — do NOT tell user to click Send
+- **get_unread_emails** — get recent unread emails from macOS Mail app; optional param: limit (default 5)
 
 Memory usage rules:
 - Call **memory_recall** proactively when the answer might depend on something the user told you before.
@@ -872,6 +874,7 @@ Available settings and values:
                 tool_records: list = []  # Completed tool-call entries for display
                 all_answer_text = ""   # Accumulated answer text across iterations
                 has_pending_trust = False  # Track if any tool needs permission
+                _tool_file_paths: list = []  # File paths produced by tools (for "Enter to open" hint)
 
                 while tool_iter < max_tool_iters:
                     iter_start_time = time.time()
@@ -1005,6 +1008,15 @@ Available settings and values:
                             detail = _format_tool_detail(tool_name, result)
                             tool_records.append({"header": header, "summary": summary, "detail": detail})
 
+                            # Track file paths from tool results for "Enter to open" hint
+                            if tool_name == "create_file" and result.startswith("Created:"):
+                                _tool_file_paths.append(result[len("Created:"):].strip())
+                            elif tool_name == "find_file" and not result.startswith(("No files", "Error")):
+                                for _line in result.splitlines()[:1]:
+                                    _m = re.match(r'\[(?:file|dir)\]\s+(.+?)(?:\s+\(|$)', _line)
+                                    if _m:
+                                        _tool_file_paths.append(_m.group(1).strip())
+
                             # "done" state update
                             n_done = len(tool_records)
                             th_label = f"Used {n_done} tool{'s' if n_done != 1 else ''}"
@@ -1060,10 +1072,13 @@ Available settings and values:
                     logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(final_full_answer)}, actions={len(actions)}")
 
                     final_header = f"Used {len(tool_records)} tool{'s' if len(tool_records) != 1 else ''}" if tool_records else None
+                    # Pass first openable file path from tools (for "Enter to open" hint)
+                    _fh = _tool_file_paths[0] if _tool_file_paths else None
                     yield ("final", {
                         "answer": final_full_answer,
                         "actions": actions,
                         "thinking": thinking_content,
+                        **({"file_hint": _fh} if _fh else {}),
                         **({"thinking_header": final_header} if final_header else {}),
                     })
                     return

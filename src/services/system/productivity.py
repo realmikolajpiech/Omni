@@ -160,23 +160,20 @@ def get_unread_emails(limit: int = 5) -> str:
     return _run_osascript(script)
 
 def send_email(to_address: str, subject: str, body: str) -> str:
-    """Draft (and optionally send) an email."""
-    # We create a visible message so the user can review and hit send.
-    # To auto-send, we would add 'send newMessage'
-    
+    """Send an email via macOS Mail app."""
     # Sanitize inputs for AppleScript
     to_address = to_address.replace('"', '\\"')
     subject = subject.replace('"', '\\"')
     body = body.replace('"', '\\"')
-    
+
     script = f'''
     tell application "Mail"
-        set newMessage to make new outgoing message with properties {{subject:"{subject}", content:"{body}", visible:true}}
+        set newMessage to make new outgoing message with properties {{subject:"{subject}", content:"{body}", visible:false}}
         tell newMessage
             make new to recipient at end of to recipients with properties {{address:"{to_address}"}}
         end tell
-        activate
+        send newMessage
     end tell
-    return "Email draft created. Please review and send."
+    return "Email sent successfully."
     '''
     return _run_osascript(script)
