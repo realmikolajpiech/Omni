@@ -31,6 +31,9 @@ _TOOL_META = {
     "run_terminal":  {"icon": "🖥️", "label": "Terminal"},
     "install_app":   {"icon": "📦", "label": "Install"},
     "uninstall_app": {"icon": "🗑️", "label": "Uninstall"},
+    "find_file":     {"icon": "🔍", "label": "Find file"},
+    "create_file":   {"icon": "📝", "label": "Create file"},
+    "organize_folder": {"icon": "📁", "label": "Organize"},
 }
 
 
@@ -126,6 +129,12 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
         if "error" in low or "not found" in low or "no such" in low:
             return "not found / failed"
         return "removed"
+
+    if tool_name == "create_file":
+        if result.startswith("Created:"):
+            path = result[len("Created:"):].strip()
+            return f"saved to {path}"
+        return "failed" if "Error" in result else result.strip()[:60]
 
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
@@ -675,6 +684,8 @@ Location: {user_loc} | Date: {current_date}
 - **memory_recall** — retrieve facts/preferences/details you've remembered about this user from past conversations
 - **memory_save** — permanently store a new fact or preference about this user for future conversations
 - **memory_delete** — forget/remove a memory when user asks you to or when info is outdated
+- **find_file** — locate a file or folder by name on the user's Mac; returns exact paths; use BEFORE deleting, moving, or opening a file to get its precise path
+- **create_file** — create a new text file with content; use for any "create/write/save a file" request; defaults to ~/Desktop; ALWAYS prefer this over run_terminal for file creation
 - **run_terminal** — execute any shell command on macOS (defaults write, osascript, pmset, diskutil, etc.); NEVER tell user to open Terminal manually
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request
@@ -722,6 +733,12 @@ Available settings and values:
 → Call search_files to find it, then IMMEDIATELY use the run_terminal tool to `open "/path/to/file"`
 → Always pick the most relevant result (prefer PDFs/documents over source code for document queries).
 → NEVER just report the path or save it to memory — always open the file right away.
+
+**Delete a file or folder** — when user asks to delete, remove, or trash a file/folder:
+→ ALWAYS call find_file first to get the exact path(s). Do NOT guess or invent paths.
+→ After finding the path, call run_terminal with `rm "/exact/path"` (file) or `rm -r "/exact/path"` (folder).
+→ If find_file returns multiple matches, pick the most obvious one or briefly list them and ask the user to confirm before deleting.
+→ Prefer moving to trash: `osascript -e 'tell app "Finder" to delete POSIX file "/exact/path"'` when trust < 3.
 
 **Computer control** (only when user explicitly says click/type/scroll/press)
 {{"type": "computer_control", "action": "type", "text": "hello world", "description": "typing text"}}

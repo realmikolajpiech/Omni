@@ -354,6 +354,67 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": (
+                "Create a new file with specified content on the user's Mac. "
+                "Use when asked to 'create', 'write', 'save', or 'make' a file (txt, md, csv, etc.). "
+                "Defaults to ~/Desktop if no folder is given. "
+                "Always prefer this over run_terminal for file creation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "The filename with extension, e.g. 'receipt.txt', 'notes.md', 'data.csv'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The text content to write into the file.",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Directory where the file should be created, e.g. '~/Desktop', '~/Documents'. Defaults to ~/Desktop.",
+                    },
+                },
+                "required": ["filename", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_file",
+            "description": (
+                "Find files or folders on the user's Mac by name or partial name. "
+                "Returns exact file paths. Use this BEFORE deleting, moving, or opening a file "
+                "when you need to locate its precise path. Also use when the user asks where a "
+                "file is located or wants to confirm it exists. "
+                "Prefer this over search_files when you need actionable paths, not content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The filename or partial name to search for, e.g. 'report.pdf', 'notes', 'project'.",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional folder to limit the search to, e.g. '~/Desktop', '~/Documents'. Omit to search everywhere.",
+                    },
+                    "include_dirs": {
+                        "type": "boolean",
+                        "description": "Whether to include directories in results (default true).",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 
@@ -401,6 +462,18 @@ def execute_tool(name: str, arguments: dict) -> str:
             )
         elif name == "organize_folder":
             return _tool_organize_folder(arguments.get("path", ""), arguments.get("strategy", "smart"))
+        elif name == "create_file":
+            return _tool_create_file(
+                arguments.get("filename", ""),
+                arguments.get("content", ""),
+                arguments.get("folder", ""),
+            )
+        elif name == "find_file":
+            return _tool_find_file(
+                arguments.get("name", ""),
+                arguments.get("folder", ""),
+                arguments.get("include_dirs", True),
+            )
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -708,3 +781,115 @@ def _tool_organize_folder(path: str, strategy: str) -> str:
 
     logging.info(f"[tool:organize_folder] path={path!r} strategy={strategy!r}")
     return organize_folder(path, strategy)
+
+
+def _tool_create_file(filename: str, content: str, folder: str = "") -> str:
+    """Create a file with given content. Requires trust level 2."""
+    import os
+
+    filename = filename.strip()
+    if not filename:
+        return "Error: empty filename."
+
+    current = get_effective_trust()
+    if current < 2:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 2,
+            "command":        f"create file {filename}",
+            "description":    f"Create file '{filename}'",
+        })
+        return "[Permission required] 'Automation' trust is needed to create files."
+
+    folder = os.path.expanduser(folder.strip() if folder.strip() else "~/Desktop")
+    os.makedirs(folder, exist_ok=True)
+    file_path = os.path.join(folder, filename)
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logging.info(f"[tool:create_file] Created {file_path} ({len(content)} chars)")
+        return f"Created: {file_path}"
+    except Exception as e:
+        return f"Error creating file: {e}"
+
+
+def _tool_find_file(name: str, folder: str = "", include_dirs: bool = True) -> str:
+    """Find files/folders by name using Spotlight (mdfind) with a find fallback."""
+    import subprocess, os, sys
+
+    name = name.strip()
+    if not name:
+        return "Error: empty name."
+
+    folder = folder.strip()
+    if folder:
+        folder = os.path.expanduser(folder)
+
+    logging.info(f"[tool:find_file] name={name!r} folder={folder!r}")
+
+    results: list[str] = []
+
+    # ── macOS: use mdfind (Spotlight) — instant and index-backed ─────────────
+    if sys.platform == "darwin":
+        try:
+            cmd = ["mdfind", "-name", name]
+            if folder:
+                cmd += ["-onlyin", folder]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            if proc.returncode == 0:
+                for line in proc.stdout.strip().splitlines():
+                    line = line.strip()
+                    if not line or not os.path.exists(line):
+                        continue
+                    if not include_dirs and os.path.isdir(line):
+                        continue
+                    # Filter out noisy system paths
+                    if any(seg in line for seg in (
+                        "/Library/Caches/", "/.Spotlight-", "/.Trashes",
+                        "/System/", "/private/var/", "/.vol/",
+                    )):
+                        continue
+                    results.append(line)
+        except Exception as e:
+            logging.warning(f"[tool:find_file] mdfind failed: {e}")
+
+    # ── Fallback: plain `find` (slower, used on non-mac or mdfind failure) ───
+    if not results:
+        search_root = folder or os.path.expanduser("~")
+        try:
+            cmd = ["find", search_root, "-maxdepth", "6", "-iname", f"*{name}*"]
+            if not include_dirs:
+                cmd += ["-type", "f"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            for line in proc.stdout.strip().splitlines():
+                line = line.strip()
+                if line and os.path.exists(line):
+                    results.append(line)
+        except Exception as e:
+            logging.warning(f"[tool:find_file] find fallback failed: {e}")
+
+    if not results:
+        return f"No files or folders named '{name}' found."
+
+    # De-duplicate and cap output
+    seen: set[str] = set()
+    unique: list[str] = []
+    for r in results:
+        if r not in seen:
+            seen.add(r)
+            unique.append(r)
+
+    unique = unique[:20]  # cap at 20 results
+
+    lines = []
+    for p in unique:
+        kind = "dir" if os.path.isdir(p) else "file"
+        try:
+            size = os.path.getsize(p) if kind == "file" else 0
+            size_str = f"  ({size:,} bytes)" if size else ""
+        except OSError:
+            size_str = ""
+        lines.append(f"[{kind}] {p}{size_str}")
+
+    return "\n".join(lines)

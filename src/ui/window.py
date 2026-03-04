@@ -3193,11 +3193,10 @@ class OmniWindow(QWidget):
                 widget.update_thinking(thinking)
                 widget.set_thinking_collapsed(True)
 
-            # Pre-scan: if a request_permission continuation will block,
-            # suppress the premature answer so there's nothing to flash/replace
+            # Pre-scan: if any trust_request needs permission, suppress the answer
+            # so there's nothing to flash before the permission popup appears
             _has_pending_continuation = any(
                 isinstance(a, dict) and a.get('type') == 'trust_request'
-                and a.get('source') == 'request_permission'
                 and _trust < a.get('required_level', 2)
                 for a in (actions or [])
             )
@@ -3287,93 +3286,69 @@ class OmniWindow(QWidget):
                             req_level  = act.get('required_level', 2)
                             cmd        = act.get('command', '')
                             desc       = act.get('description', cmd)[:80]
-                            is_rerun   = act.get('source') == 'request_permission'
                             if settings_store.get("trust_level", 1) >= req_level:
                                 if cmd:
                                     self._run_trusted_terminal(cmd, insert_pos)
                                     insert_pos += 1
                             else:
-                                if is_rerun:
-                                    # Pause all finalization — keep widget alive + input locked
-                                    self._continuation_pending = True
+                                # Always pause finalization so the thinking widget doesn't collapse
+                                self._continuation_pending = True
                                 perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                                 self._perm_widget = perm  # keep strong ref
                                 widget.set_answer_visible(False)
-                                def _make_tr_allow_cb(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking, _was_voice):
+                                def _make_tr_allow_cb(_perm_widget, _w, _lvl, _prior_thinking, _was_voice):
                                     def _cb():
-                                        if _rerun:
-                                            # ── In-place continuation ───────────────────────────
-                                            # Clear the flag — finalize runs normally after continuation
-                                            self._continuation_pending = False
-                                            # Remove the permission widget from the list
-                                            for _i in range(self.list_widget.count() - 1, -1, -1):
-                                                _itm = self.list_widget.item(_i)
-                                                _w_itm = self.list_widget.itemWidget(_itm)
-                                                if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
-                                                    taken = self.list_widget.takeItem(_i)
-                                                    if taken:
-                                                        w_del = self.list_widget.itemWidget(taken)
-                                                        if w_del: w_del.deleteLater()
-                                                    break
-                                            # Pop the incomplete pre-permission exchange from history
-                                            if (len(self.chat_history) >= 2 and
-                                                    self.chat_history[-1].get('role') == 'assistant' and
-                                                    self.chat_history[-2].get('role') == 'user'):
-                                                self.chat_history.pop()
-                                                self.chat_history.pop()
-                                            # The existing widget is already _streaming_answer_widget
-                                            # (finalize was skipped so the ref was never cleared)
-                                            self._continuation_thinking_prefix = _prior_thinking
-                                            _w.set_answer("")
-                                            _w.set_answer_visible(True)
-                                            _w.set_thinking_collapsed(False)
-                                            # Restore voice flag so the re-run response also gets TTS
-                                            if _was_voice:
-                                                self.voice_triggered_query = True
-                                            # Boost trust and re-run — widget updates in-place
-                                            from src.services.llm.tools import set_trust_boost
-                                            set_trust_boost(_lvl)
-                                            self.logo_label.boost_speed()
-                                            _w.set_answer("Running...")
-                                            QTimer.singleShot(100, lambda: self.start_ai_worker(
-                                                getattr(self, '_last_ai_query', ''), None
-                                            ))
-                                        else:
-                                            _row = -1
-                                            for _i in range(self.list_widget.count()):
-                                                _itm = self.list_widget.item(_i)
-                                                _w_itm = self.list_widget.itemWidget(_itm)
-                                                if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
-                                                    _row = _i + 1
-                                                    break
-                                            result = self._run_trusted_terminal(_cmd, _row)
-                                            _w.set_answer(result)
-                                            _w.set_answer_visible(True)
-                                            if _was_voice:
-                                                self.cleanup_worker('tts_worker')
-                                                self.tts_worker = TTSWorker("Gotowe.")
-                                                self.tts_worker.finished_speaking.connect(self.on_tts_finished)
-                                                self.tts_worker.start()
-                                                self.is_tts_playing = True
+                                        # Clear the flag — finalize runs normally after re-run
+                                        self._continuation_pending = False
+                                        # Remove the permission widget from the list
+                                        for _i in range(self.list_widget.count() - 1, -1, -1):
+                                            _itm = self.list_widget.item(_i)
+                                            _w_itm = self.list_widget.itemWidget(_itm)
+                                            if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                                taken = self.list_widget.takeItem(_i)
+                                                if taken:
+                                                    w_del = self.list_widget.itemWidget(taken)
+                                                    if w_del: w_del.deleteLater()
+                                                break
+                                        # Pop the incomplete pre-permission exchange from history
+                                        if (len(self.chat_history) >= 2 and
+                                                self.chat_history[-1].get('role') == 'assistant' and
+                                                self.chat_history[-2].get('role') == 'user'):
+                                            self.chat_history.pop()
+                                            self.chat_history.pop()
+                                        # Reuse the existing answer widget in-place
+                                        self._continuation_thinking_prefix = _prior_thinking
+                                        _w.set_answer("")
+                                        _w.set_answer_visible(True)
+                                        _w.set_thinking_collapsed(False)
+                                        # Restore voice flag so the re-run response also gets TTS
+                                        if _was_voice:
+                                            self.voice_triggered_query = True
+                                        # Boost trust and re-run — widget updates in-place
+                                        from src.services.llm.tools import set_trust_boost
+                                        set_trust_boost(_lvl)
+                                        self.logo_label.boost_speed()
+                                        _w.set_answer("Running...")
+                                        QTimer.singleShot(100, lambda: self.start_ai_worker(
+                                            getattr(self, '_last_ai_query', ''), None
+                                        ))
                                     return _cb
-                                def _make_tr_deny_cb(_w, _rerun):
+                                def _make_tr_deny_cb(_w):
                                     def _cb():
-                                        if _rerun:
-                                            self._continuation_pending = False
-                                            self._finalize_response_ui()  # run the cleanup we held back
-                                        _w.set_answer("Akcja anulowana.")
+                                        self._continuation_pending = False
+                                        self._finalize_response_ui()
+                                        _w.set_answer("Action cancelled.")
                                         _w.set_answer_visible(True)
                                     return _cb
-                                def _make_tr_settings_cb(_rerun):
+                                def _make_tr_settings_cb():
                                     def _cb():
-                                        if _rerun:
-                                            self._continuation_pending = False
-                                            self._finalize_response_ui()
+                                        self._continuation_pending = False
+                                        self._finalize_response_ui()
                                         self._navigate_to_trust_settings()
                                     return _cb
-                                perm.allowed.connect(_make_tr_allow_cb(cmd, perm, widget, req_level, is_rerun, data.get("thinking", ""), self.voice_triggered_query))
-                                perm.denied.connect(_make_tr_deny_cb(widget, is_rerun))
-                                perm.open_settings.connect(_make_tr_settings_cb(is_rerun))
+                                perm.allowed.connect(_make_tr_allow_cb(perm, widget, req_level, data.get("thinking", ""), self.voice_triggered_query))
+                                perm.denied.connect(_make_tr_deny_cb(widget))
+                                perm.open_settings.connect(_make_tr_settings_cb())
                                 self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
                                 insert_pos += 1
                         elif act.get('type') == 'open_app':
@@ -3719,86 +3694,65 @@ class OmniWindow(QWidget):
                     req_level = act.get('required_level', 2)
                     cmd       = act.get('command', '')
                     desc      = act.get('description', cmd)[:80]
-                    is_rerun  = act.get('source') == 'request_permission'
                     if settings_store.get("trust_level", 1) >= req_level:
                         if cmd:
                             self._run_trusted_terminal(cmd)
                     else:
-                        if is_rerun and _answer_bubble:
-                            self._continuation_pending = True
-                            self._streaming_answer_widget = _answer_bubble  # make widget reusable
+                        # Always pause finalization and reuse the answer bubble for in-place re-run
+                        self._continuation_pending = True
+                        if _answer_bubble:
+                            self._streaming_answer_widget = _answer_bubble
                         perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                         if _answer_bubble:
                             _answer_bubble.set_answer_visible(False)
-                        def _make_tr_allow_non_stream(_cmd, _perm_widget, _w, _lvl, _rerun, _prior_thinking, _was_voice):
+                        def _make_tr_allow_non_stream(_perm_widget, _w, _lvl, _prior_thinking, _was_voice):
                             def _cb():
-                                if _rerun:
-                                    self._continuation_pending = False
-                                    for _i in range(self.list_widget.count() - 1, -1, -1):
-                                        _itm = self.list_widget.item(_i)
-                                        _w_itm = self.list_widget.itemWidget(_itm)
-                                        if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
-                                            self.list_widget.takeItem(_i)
-                                            break
-                                    if (len(self.chat_history) >= 2 and
-                                            self.chat_history[-1].get('role') == 'assistant' and
-                                            self.chat_history[-2].get('role') == 'user'):
-                                        self.chat_history.pop()
-                                        self.chat_history.pop()
-                                    self._continuation_thinking_prefix = _prior_thinking
-                                    if _w:
-                                        _w.set_answer("")
-                                        _w.set_answer_visible(True)
-                                        _w.set_thinking_collapsed(False)
-                                    # Restore voice flag so the re-run response also gets TTS
-                                    if _was_voice:
-                                        self.voice_triggered_query = True
-                                    from src.services.llm.tools import set_trust_boost
-                                    set_trust_boost(_lvl)
-                                    self.logo_label.boost_speed()
-                                    if _w:
-                                        _w.set_answer("Running...")
-                                    QTimer.singleShot(100, lambda: self.start_ai_worker(
-                                        getattr(self, '_last_ai_query', ''), None
-                                    ))
-                                else:
-                                    _row = -1
-                                    for _i in range(self.list_widget.count()):
-                                        _itm = self.list_widget.item(_i)
-                                        _w_itm = self.list_widget.itemWidget(_itm)
-                                        if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
-                                            _row = _i + 1
-                                            break
-                                    result = self._run_trusted_terminal(_cmd, _row)
-                                    if _w:
-                                        _w.set_answer(result)
-                                        _w.set_answer_visible(True)
-                                    if _was_voice:
-                                        self.cleanup_worker('tts_worker')
-                                        self.tts_worker = TTSWorker("Gotowe.")
-                                        self.tts_worker.finished_speaking.connect(self.on_tts_finished)
-                                        self.tts_worker.start()
-                                        self.is_tts_playing = True
-                            return _cb
-                        def _make_tr_deny_non_stream(_w, _rerun):
-                            def _cb():
-                                if _rerun:
-                                    self._continuation_pending = False
-                                    self._finalize_response_ui()
+                                self._continuation_pending = False
+                                for _i in range(self.list_widget.count() - 1, -1, -1):
+                                    _itm = self.list_widget.item(_i)
+                                    _w_itm = self.list_widget.itemWidget(_itm)
+                                    if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
+                                        self.list_widget.takeItem(_i)
+                                        break
+                                if (len(self.chat_history) >= 2 and
+                                        self.chat_history[-1].get('role') == 'assistant' and
+                                        self.chat_history[-2].get('role') == 'user'):
+                                    self.chat_history.pop()
+                                    self.chat_history.pop()
+                                self._continuation_thinking_prefix = _prior_thinking
                                 if _w:
-                                    _w.set_answer("Akcja anulowana.")
+                                    _w.set_answer("")
+                                    _w.set_answer_visible(True)
+                                    _w.set_thinking_collapsed(False)
+                                # Restore voice flag so the re-run response also gets TTS
+                                if _was_voice:
+                                    self.voice_triggered_query = True
+                                from src.services.llm.tools import set_trust_boost
+                                set_trust_boost(_lvl)
+                                self.logo_label.boost_speed()
+                                if _w:
+                                    _w.set_answer("Running...")
+                                QTimer.singleShot(100, lambda: self.start_ai_worker(
+                                    getattr(self, '_last_ai_query', ''), None
+                                ))
+                            return _cb
+                        def _make_tr_deny_non_stream(_w):
+                            def _cb():
+                                self._continuation_pending = False
+                                self._finalize_response_ui()
+                                if _w:
+                                    _w.set_answer("Action cancelled.")
                                     _w.set_answer_visible(True)
                             return _cb
-                        def _make_tr_settings_ns_cb(_rerun):
+                        def _make_tr_settings_ns_cb():
                             def _cb():
-                                if _rerun:
-                                    self._continuation_pending = False
-                                    self._finalize_response_ui()
+                                self._continuation_pending = False
+                                self._finalize_response_ui()
                                 self._navigate_to_trust_settings()
                             return _cb
-                        perm.allowed.connect(_make_tr_allow_non_stream(cmd, perm, _answer_bubble, req_level, is_rerun, thinking, self.voice_triggered_query))
-                        perm.denied.connect(_make_tr_deny_non_stream(_answer_bubble, is_rerun))
-                        perm.open_settings.connect(_make_tr_settings_ns_cb(is_rerun))
+                        perm.allowed.connect(_make_tr_allow_non_stream(perm, _answer_bubble, req_level, thinking, self.voice_triggered_query))
+                        perm.denied.connect(_make_tr_deny_non_stream(_answer_bubble))
+                        perm.open_settings.connect(_make_tr_settings_ns_cb())
                         add_item(perm, {"type": "trust_permission"}, anim="pop")
                 elif act.get('type') == 'open_app':
                     w = AppActionWidget(act['name'])
