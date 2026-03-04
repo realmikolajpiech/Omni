@@ -699,6 +699,10 @@ class OmniWindow(QWidget):
              self.resize(self.width(), 84)
         elif self.is_settings_mode:
              self.resize(self.width(), self._SETTINGS_HEIGHT)
+             # Clear any stale QGraphicsOpacityEffect (left from a partial fade-in animation)
+             # then ensure the panel is visible before refreshing its content.
+             self.settings_panel.setGraphicsEffect(None)
+             self.settings_panel.show()
              # Refresh account/subscription state every time settings re-appears,
              # so stale "waiting for payment" messages are cleared and plan badges update.
              self.settings_panel.refresh_account()

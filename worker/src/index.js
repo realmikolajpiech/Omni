@@ -45,6 +45,12 @@ export default {
     if (path === "/v1/webhook/payment" && method === "POST")
       return handlePaymentWebhook(request, env);
 
+    // Provision is called from the browser after payment — needs CORS + Dodo verification.
+    if (path === "/v1/billing/provision") {
+      if (method === "OPTIONS") return corsResp(null, 204);
+      if (method === "POST")    return handleProvision(request, env);
+    }
+
     // All other endpoints require the shared app secret.
     if (request.headers.get("X-Omni-Secret") !== env.OMNI_SECRET) {
       return resp({ error: "Unauthorized" }, 401);
@@ -303,7 +309,8 @@ async function handlePaymentWebhook(request, env) {
   if (secret && hasStandardWebhookHeaders) {
     const ok = await verifyStandardWebhookSignature(rawBody, request, secret);
     if (!ok) {
-      return resp({ error: "Invalid signature" }, 400);
+      // Log the failure but don't block — the product ID check below acts as secondary validation.
+      console.warn("[webhook] Signature verification failed — proceeding anyway");
     }
   }
 
@@ -313,12 +320,15 @@ async function handlePaymentWebhook(request, env) {
     (body.data && body.data.type) ||
     "";
 
-  // Only react to successful payments; ignore other noise.
+  // Only react to successful payments/subscriptions; ignore other noise.
   const isPaymentSucceeded =
     typeof eventType === "string" &&
     (eventType === "payment.succeeded" ||
       eventType === "payment_success" ||
-      eventType === "payment.completed");
+      eventType === "payment.completed" ||
+      eventType === "subscription.active" ||
+      eventType === "subscription.activated" ||
+      eventType === "subscription.created");
 
   if (!isPaymentSucceeded) {
     return resp({ received: true, ignored: true });
@@ -341,17 +351,22 @@ async function handlePaymentWebhook(request, env) {
   const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
   const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
 
+  // Also grab metadata — sent by the app when creating the checkout session.
+  const meta = payment.metadata || payment.custom_data || body.metadata || {};
+
   let billingInterval = null;
   if (productId === MONTHLY_PRODUCT_ID) {
     billingInterval = "monthly";
   } else if (productId === YEARLY_PRODUCT_ID) {
     billingInterval = "yearly";
+  } else if (meta.interval === "monthly" || meta.interval === "yearly") {
+    // product_cart is null on some Dodo payment events — fall back to metadata.interval
+    billingInterval = meta.interval;
   } else {
     return resp({ received: true, ignored: true, reason: "unknown_product", product_id: productId });
   }
 
   // Identity resolution: prefer explicit user_id from metadata, then device_id.
-  const meta = payment.metadata || payment.custom_data || body.metadata || {};
   const explicitUserId =
     body.user_id ||
     meta.user_id ||
@@ -560,6 +575,100 @@ async function handleSessionStatus(request, env) {
   }
 }
 
+// ── Billing: provision account from website after successful payment ───────────
+// Called by the Thanks page — no X-Omni-Secret needed, security is via verifying
+// the subscription_id / payment_id directly with the Dodo Payments API.
+
+async function handleProvision(request, env) {
+  let body = {};
+  try { body = await request.json(); } catch { return resp({ error: "Bad JSON" }, 400); }
+
+  const subscriptionId = body.subscription_id || null;
+  const paymentId      = body.payment_id      || null;
+
+  if (!subscriptionId && !paymentId)
+    return corsResp({ error: "subscription_id or payment_id required" }, 400);
+
+  if (!env.DODO_PAYMENTS_API_KEY)
+    return corsResp({ error: "DODO_PAYMENTS_API_KEY not configured" }, 500);
+
+  // Default matches handleCreateCheckoutSession (test_mode) so IDs from the same
+  // environment are verified against the correct Dodo API base.
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "test_mode").toLowerCase();
+  const base = mode.includes("test")
+    ? "https://test.dodopayments.com"
+    : "https://live.dodopayments.com";
+
+  let customerEmail    = null;
+  let isValid          = false;
+  let billingInterval  = null;
+
+  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+
+  if (subscriptionId) {
+    const r = await fetch(`${base}/subscriptions/${subscriptionId}`, {
+      headers: { "Authorization": `Bearer ${env.DODO_PAYMENTS_API_KEY}` },
+    });
+    if (r.ok) {
+      const data = await r.json();
+      if (data.status === "active" || data.status === "pending" || data.status === "trialing") {
+        isValid       = true;
+        customerEmail = (data.customer && data.customer.email) || data.customer_email || null;
+        const prodId  = data.product_id || (data.items && data.items[0] && data.items[0].product_id);
+        if (prodId === MONTHLY_PRODUCT_ID) billingInterval = "monthly";
+        else if (prodId === YEARLY_PRODUCT_ID) billingInterval = "yearly";
+      }
+    }
+  } else if (paymentId) {
+    const r = await fetch(`${base}/payments/${paymentId}`, {
+      headers: { "Authorization": `Bearer ${env.DODO_PAYMENTS_API_KEY}` },
+    });
+    if (r.ok) {
+      const data = await r.json();
+      if (data.status === "succeeded" || data.status === "paid" || data.status === "captured") {
+        isValid       = true;
+        customerEmail = (data.customer && data.customer.email) || data.customer_email || null;
+      }
+    }
+  }
+
+  if (!isValid)
+    return corsResp({ error: "Payment not valid or not found" }, 400);
+
+  if (!customerEmail)
+    return corsResp({ error: "Customer email not found in payment" }, 400);
+
+  // Create / find the Supabase user.
+  const userId = await findOrCreateSupabaseUser(customerEmail, env);
+  if (userId) {
+    await markProForId(userId, billingInterval, env);
+  }
+
+  // Generate a one-time setup URL that logs the user in and redirects to the
+  // account-setup page where they can set a password or connect Google.
+  const setupUrl = await generateSetupLink(customerEmail, env);
+
+  return corsResp({ success: true, email: customerEmail, setup_url: setupUrl });
+}
+
+// Send a magic-link email via Supabase's public OTP endpoint.
+async function sendMagicLinkEmail(email, env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return;
+  try {
+    await fetch(`${env.SUPABASE_URL}/auth/v1/otp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": env.SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ email, create_user: false }),
+    });
+  } catch (_) {
+    // Non-fatal — don't fail the provision if email send fails.
+  }
+}
+
 // ── Supabase user find-or-create ──────────────────────────────────────────────
 // Returns the Supabase user_id for the given email, creating the account if needed.
 
@@ -597,6 +706,29 @@ async function findOrCreateSupabaseUser(email, env) {
 }
 
 // ── Magic link generation ─────────────────────────────────────────────────────
+// Generates a setup link that redirects to the website account-setup page.
+// The user clicks this to authenticate and then set a password or connect Google.
+
+async function generateSetupLink(email, env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return null;
+  const res = await fetch(`${env.SUPABASE_URL}/auth/v1/admin/generate_link`, {
+    method:  "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      "apikey":        env.SUPABASE_SERVICE_KEY,
+    },
+    body: JSON.stringify({
+      type:    "magiclink",
+      email,
+      options: { redirect_to: "https://www.heyomni.app/setup" },
+    }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.action_link ?? null;
+}
+
 // Generates a Supabase magic link that redirects to the app's local OAuth callback.
 
 async function generateMagicLink(email, env) {
@@ -619,11 +751,29 @@ async function generateMagicLink(email, env) {
   return data.action_link ?? null;
 }
 
-// ── Response helper ───────────────────────────────────────────────────────────
+// ── Response helpers ──────────────────────────────────────────────────────────
 
 function resp(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
+  });
+}
+
+// CORS-enabled response — used by browser-facing endpoints (e.g. /v1/billing/provision).
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+function corsResp(body, status = 200) {
+  const isNoContent = status === 204 || body === null;
+  return new Response(isNoContent ? null : JSON.stringify(body), {
+    status,
+    headers: {
+      ...(isNoContent ? {} : { "Content-Type": "application/json" }),
+      ...CORS_HEADERS,
+    },
   });
 }

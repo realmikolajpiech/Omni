@@ -76,6 +76,7 @@ def poll_checkout_payment(
     stop_event: threading.Event | None = None,
     interval_secs: float = 3,
     timeout_secs: float = 300,
+    access_token: str | None = None,
 ) -> threading.Thread:
     """Poll /v1/billing/session_status until payment is confirmed.
 
@@ -89,12 +90,15 @@ def poll_checkout_payment(
             if stop_event and stop_event.is_set():
                 break
             try:
+                headers = {
+                    "X-Omni-Secret": OMNI_SECRET,
+                    "X-Device-ID":   DEVICE_ID,
+                }
+                if access_token:
+                    headers["Authorization"] = f"Bearer {access_token}"
                 req = urllib.request.Request(
                     f"{BACKEND_URL}/v1/billing/session_status",
-                    headers={
-                        "X-Omni-Secret": OMNI_SECRET,
-                        "X-Device-ID":   DEVICE_ID,
-                    },
+                    headers=headers,
                 )
                 with urllib.request.urlopen(req, timeout=10) as r:
                     data = json.loads(r.read())

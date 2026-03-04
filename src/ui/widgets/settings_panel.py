@@ -447,6 +447,83 @@ class _UsageBar(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Plan card widget — painted background, immune to parent stylesheet cascade
+# ---------------------------------------------------------------------------
+
+class _PlanCard(QWidget):
+    """
+    Rounded card with a painted background so it renders correctly
+    even when the parent has QWidget { background: transparent }.
+    """
+    _MONTHLY_BG     = QColor(255, 255, 255, 14)   # rgba(255,255,255,0.055)
+    _MONTHLY_BORDER = QColor(255, 255, 255, 28)   # rgba(255,255,255,0.11)
+    _YEARLY_BG      = QColor(99, 102, 241, 46)    # rgba(99,102,241,0.18)
+    _YEARLY_BORDER  = QColor(99, 102, 241, 140)   # rgba(99,102,241,0.55)
+
+    def __init__(self, featured: bool = False, parent=None):
+        super().__init__(parent)
+        self._featured = featured
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(10)
+        self._inner = lay
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 10, 10)
+        bg     = self._YEARLY_BG     if self._featured else self._MONTHLY_BG
+        border = self._YEARLY_BORDER if self._featured else self._MONTHLY_BORDER
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(border, 1))
+        p.drawPath(path)
+
+
+class _UpgradeBox(QWidget):
+    """Outer upgrade card with an indigo-tinted painted background."""
+    _BG     = QColor(99, 102, 241, 20)   # rgba(99,102,241,0.08)
+    _BORDER = QColor(99, 102, 241, 82)   # rgba(99,102,241,0.32)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        self._inner = lay
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 14, 14)
+        p.fillPath(path, QBrush(self._BG))
+        p.setPen(QPen(self._BORDER, 1))
+        p.drawPath(path)
+
+
+# Button stylesheet constants — applied inline so parent cascade can't override
+_PLAN_BTN_SS = (
+    "QPushButton { background: #6366f1; border: none; border-radius: 8px; "
+    "color: #ffffff; font-family: 'Manrope'; font-size: 12px; font-weight: 600; padding: 0px 14px; } "
+    "QPushButton:hover { background: #818cf8; } "
+    "QPushButton:pressed { background: #4f46e5; } "
+    "QPushButton:disabled { background: rgba(99,102,241,0.3); color: rgba(255,255,255,0.4); }"
+)
+_PRIMARY_BTN_SS = (
+    "QPushButton { background: #6366f1; border: none; border-radius: 10px; "
+    "color: #ffffff; font-family: 'Manrope'; font-size: 12px; font-weight: 600; padding: 0px 18px; } "
+    "QPushButton:hover { background: #818cf8; } "
+    "QPushButton:pressed { background: #4f46e5; } "
+    "QPushButton:disabled { background: rgba(99,102,241,0.3); color: rgba(255,255,255,0.4); }"
+)
+
+
+# ---------------------------------------------------------------------------
 # Settings Page Base
 # ---------------------------------------------------------------------------
 
@@ -827,8 +904,91 @@ class SettingsPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
+        # ── Upgrade CTA (primary — shown first so it's the hero action) ──
+        self.upgrade_box_login = _UpgradeBox()
+        ub = self.upgrade_box_login._inner
+
+        title = QLabel("Upgrade to Pro")
+        title.setFont(_font("Manrope", 15, bold=True))
+        ub.addWidget(title)
+
+        tagline = QLabel("Unlimited AI queries, no daily limits.")
+        tagline.setObjectName("DescLbl")
+        tagline.setFont(_font("Manrope", 11))
+        ub.addWidget(tagline)
+
+        ub.addSpacing(2)
+
+        # Monthly plan card
+        monthly_card = _PlanCard(featured=False)
+        mc = monthly_card._inner
+        mc_info = QVBoxLayout()
+        mc_info.setSpacing(2)
+        mc_name = QLabel("Monthly")
+        mc_name.setFont(_font("Manrope", 12, bold=True))
+        mc_desc = QLabel("Billed month to month")
+        mc_desc.setObjectName("PlanCardDesc")
+        mc_info.addWidget(mc_name)
+        mc_info.addWidget(mc_desc)
+        mc.addLayout(mc_info)
+        mc.addStretch()
+        self.upgrade_monthly_btn_login = QPushButton("Choose  →")
+        self.upgrade_monthly_btn_login.setFixedHeight(34)
+        self.upgrade_monthly_btn_login.setFixedWidth(110)
+        self.upgrade_monthly_btn_login.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
+        mc.addWidget(self.upgrade_monthly_btn_login)
+        ub.addWidget(monthly_card)
+
+        # Yearly plan card (featured)
+        yearly_card = _PlanCard(featured=True)
+        yc = yearly_card._inner
+        yc_info = QVBoxLayout()
+        yc_info.setSpacing(2)
+        yc_name_row = QHBoxLayout()
+        yc_name_row.setSpacing(6)
+        yc_name_row.setContentsMargins(0, 0, 0, 0)
+        yc_name = QLabel("Yearly")
+        yc_name.setFont(_font("Manrope", 12, bold=True))
+        yc_badge = QLabel("Best value")
+        yc_badge.setObjectName("BestValueBadge")
+        yc_badge.setFont(_font("Manrope", 9, bold=True))
+        yc_name_row.addWidget(yc_name)
+        yc_name_row.addWidget(yc_badge)
+        yc_name_row.addStretch()
+        yc_desc = QLabel("Billed annually")
+        yc_desc.setObjectName("PlanCardDesc")
+        yc_info.addLayout(yc_name_row)
+        yc_info.addWidget(yc_desc)
+        yc.addLayout(yc_info)
+        yc.addStretch()
+        self.upgrade_yearly_btn_login = QPushButton("Choose  →")
+        self.upgrade_yearly_btn_login.setFixedHeight(34)
+        self.upgrade_yearly_btn_login.setFixedWidth(110)
+        self.upgrade_yearly_btn_login.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
+        yc.addWidget(self.upgrade_yearly_btn_login)
+        ub.addWidget(yearly_card)
+
+        self.upgrade_status_lbl_login = QLabel("")
+        self.upgrade_status_lbl_login.setObjectName("DescLbl")
+        self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
+        self.upgrade_status_lbl_login.setWordWrap(True)
+        ub.addWidget(self.upgrade_status_lbl_login)
+
+        lay.addWidget(self.upgrade_box_login)
+
+        # ── Divider ───────────────────────────────────────────────────────
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setObjectName("SepLine")
+        lay.addWidget(div)
+
+        # ── Sign-in / Sign-up form ────────────────────────────────────────
         lay.addWidget(self._desc(
-            "Sign in to sync your memory across devices and unlock Pro features."
+            "Already paid? Sign in with your checkout email to activate Pro."
         ))
 
         self.auth_email_edit = self._edit("Email")
@@ -845,8 +1005,8 @@ class SettingsPanel(QWidget):
         btn_row.setSpacing(8)
 
         self.sign_in_btn = QPushButton("Sign In")
-        self.sign_in_btn.setObjectName("SaveBtn")
         self.sign_in_btn.setFixedHeight(38)
+        self.sign_in_btn.setStyleSheet(_PRIMARY_BTN_SS)
         self.sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sign_in_btn.clicked.connect(self._do_sign_in)
 
@@ -889,55 +1049,6 @@ class SettingsPanel(QWidget):
         self.github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
         lay.addWidget(self.github_btn)
-
-        lay.addSpacing(10)
-
-        # Upgrade CTA (works without login; attaches to device_id if no account)
-        self.upgrade_box_login = QFrame()
-        self.upgrade_box_login.setObjectName("UpgradeBox")
-        ub = QVBoxLayout(self.upgrade_box_login)
-        ub.setContentsMargins(12, 12, 12, 12)
-        ub.setSpacing(8)
-
-        title = QLabel("Upgrade to Pro")
-        title.setObjectName("FieldLbl")
-        title.setFont(_font("Manrope", 11, bold=True))
-        ub.addWidget(title)
-
-        subtitle = QLabel("Checkout opens in your browser. If you’re not signed in, Pro will apply to this device.")
-        subtitle.setObjectName("DescLbl")
-        subtitle.setFont(_font("Manrope", 10))
-        subtitle.setWordWrap(True)
-        ub.addWidget(subtitle)
-
-        btns = QHBoxLayout()
-        btns.setContentsMargins(0, 2, 0, 0)
-        btns.setSpacing(8)
-
-        self.upgrade_monthly_btn_login = QPushButton("Pro Monthly")
-        self.upgrade_monthly_btn_login.setObjectName("SaveBtn")
-        self.upgrade_monthly_btn_login.setFixedHeight(36)
-        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
-
-        self.upgrade_yearly_btn_login = QPushButton("Pro Yearly")
-        self.upgrade_yearly_btn_login.setObjectName("SaveBtn")
-        self.upgrade_yearly_btn_login.setFixedHeight(36)
-        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
-
-        btns.addWidget(self.upgrade_monthly_btn_login)
-        btns.addWidget(self.upgrade_yearly_btn_login)
-        btns.addStretch()
-        ub.addLayout(btns)
-
-        self.upgrade_status_lbl_login = QLabel("")
-        self.upgrade_status_lbl_login.setObjectName("DescLbl")
-        self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
-        self.upgrade_status_lbl_login.setWordWrap(True)
-        ub.addWidget(self.upgrade_status_lbl_login)
-
-        lay.addWidget(self.upgrade_box_login)
 
         return w
 
@@ -987,46 +1098,73 @@ class SettingsPanel(QWidget):
         self.usage_lbl.setFont(_font("Manrope", 10))
         lay.addWidget(self.usage_lbl)
 
-        lay.addSpacing(6)
-
         # Upgrade CTA (hidden for pro)
-        self.upgrade_box = QFrame()
-        self.upgrade_box.setObjectName("UpgradeBox")
-        ub = QVBoxLayout(self.upgrade_box)
-        ub.setContentsMargins(12, 12, 12, 12)
-        ub.setSpacing(8)
+        self.upgrade_box = _UpgradeBox()
+        ub = self.upgrade_box._inner
 
         title = QLabel("Upgrade to Pro")
-        title.setObjectName("FieldLbl")
-        title.setFont(_font("Manrope", 11, bold=True))
+        title.setFont(_font("Manrope", 15, bold=True))
         ub.addWidget(title)
 
-        subtitle = QLabel("Checkout opens in your browser. After paying, come back and press refresh (↻).")
-        subtitle.setObjectName("DescLbl")
-        subtitle.setFont(_font("Manrope", 10))
-        subtitle.setWordWrap(True)
-        ub.addWidget(subtitle)
+        tagline = QLabel("Unlimited AI queries, no daily limits.")
+        tagline.setObjectName("DescLbl")
+        tagline.setFont(_font("Manrope", 11))
+        ub.addWidget(tagline)
 
-        btns = QHBoxLayout()
-        btns.setContentsMargins(0, 2, 0, 0)
-        btns.setSpacing(8)
+        ub.addSpacing(2)
 
-        self.upgrade_monthly_btn = QPushButton("Pro Monthly")
-        self.upgrade_monthly_btn.setObjectName("SaveBtn")
-        self.upgrade_monthly_btn.setFixedHeight(36)
+        # Monthly plan card
+        monthly_card = _PlanCard(featured=False)
+        mc = monthly_card._inner
+        mc_info = QVBoxLayout()
+        mc_info.setSpacing(2)
+        mc_name = QLabel("Monthly")
+        mc_name.setFont(_font("Manrope", 12, bold=True))
+        mc_desc = QLabel("Billed month to month")
+        mc_desc.setObjectName("PlanCardDesc")
+        mc_info.addWidget(mc_name)
+        mc_info.addWidget(mc_desc)
+        mc.addLayout(mc_info)
+        mc.addStretch()
+        self.upgrade_monthly_btn = QPushButton("Choose  →")
+        self.upgrade_monthly_btn.setFixedHeight(34)
+        self.upgrade_monthly_btn.setFixedWidth(110)
+        self.upgrade_monthly_btn.setStyleSheet(_PLAN_BTN_SS)
         self.upgrade_monthly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
+        mc.addWidget(self.upgrade_monthly_btn)
+        ub.addWidget(monthly_card)
 
-        self.upgrade_yearly_btn = QPushButton("Pro Yearly")
-        self.upgrade_yearly_btn.setObjectName("SaveBtn")
-        self.upgrade_yearly_btn.setFixedHeight(36)
+        # Yearly plan card (featured)
+        yearly_card = _PlanCard(featured=True)
+        yc = yearly_card._inner
+        yc_info = QVBoxLayout()
+        yc_info.setSpacing(2)
+        yc_name_row = QHBoxLayout()
+        yc_name_row.setSpacing(6)
+        yc_name_row.setContentsMargins(0, 0, 0, 0)
+        yc_name = QLabel("Yearly")
+        yc_name.setFont(_font("Manrope", 12, bold=True))
+        yc_badge = QLabel("Best value")
+        yc_badge.setObjectName("BestValueBadge")
+        yc_badge.setFont(_font("Manrope", 9, bold=True))
+        yc_name_row.addWidget(yc_name)
+        yc_name_row.addWidget(yc_badge)
+        yc_name_row.addStretch()
+        yc_desc = QLabel("Billed annually")
+        yc_desc.setObjectName("PlanCardDesc")
+        yc_info.addLayout(yc_name_row)
+        yc_info.addWidget(yc_desc)
+        yc.addLayout(yc_info)
+        yc.addStretch()
+        self.upgrade_yearly_btn = QPushButton("Choose  →")
+        self.upgrade_yearly_btn.setFixedHeight(34)
+        self.upgrade_yearly_btn.setFixedWidth(110)
+        self.upgrade_yearly_btn.setStyleSheet(_PLAN_BTN_SS)
         self.upgrade_yearly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.upgrade_yearly_btn.clicked.connect(lambda: self._start_checkout("yearly"))
-
-        btns.addWidget(self.upgrade_monthly_btn)
-        btns.addWidget(self.upgrade_yearly_btn)
-        btns.addStretch()
-        ub.addLayout(btns)
+        yc.addWidget(self.upgrade_yearly_btn)
+        ub.addWidget(yearly_card)
 
         self.upgrade_status_lbl = QLabel("")
         self.upgrade_status_lbl.setObjectName("DescLbl")
@@ -1035,11 +1173,10 @@ class SettingsPanel(QWidget):
         ub.addWidget(self.upgrade_status_lbl)
 
         lay.addWidget(self.upgrade_box)
-        lay.addSpacing(10)
 
         # Sync status row
         sync_row = QHBoxLayout()
-        sync_row.setContentsMargins(0, 0, 0, 0)
+        sync_row.setContentsMargins(0, 4, 0, 4)
         sync_row.setSpacing(8)
 
         self.sync_status_lbl = QLabel("Memory sync: —")
@@ -1048,7 +1185,7 @@ class SettingsPanel(QWidget):
 
         self.sync_btn = QPushButton("Sync Now")
         self.sync_btn.setObjectName("ResetBtn")
-        self.sync_btn.setFixedHeight(32)
+        self.sync_btn.setFixedHeight(28)
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sync_btn.clicked.connect(self._do_sync_now)
 
@@ -1057,19 +1194,20 @@ class SettingsPanel(QWidget):
         sync_row.addWidget(self.sync_btn)
         lay.addLayout(sync_row)
 
-        lay.addSpacing(10)
+        # Account Security — collapsible, hidden by default
+        self._security_toggle_btn = QPushButton("Account Security  ▾")
+        self._security_toggle_btn.setObjectName("ResetBtn")
+        self._security_toggle_btn.setFixedHeight(32)
+        self._security_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._security_toggle_btn.clicked.connect(self._toggle_security)
+        lay.addWidget(self._security_toggle_btn)
 
-        # Set password / connect Google (always available; useful after magic-link signup)
         self.secure_box = QFrame()
         self.secure_box.setObjectName("UpgradeBox")
+        self.secure_box.setVisible(False)
         sb = QVBoxLayout(self.secure_box)
         sb.setContentsMargins(12, 12, 12, 12)
         sb.setSpacing(8)
-
-        secure_title = QLabel("Account Security")
-        secure_title.setObjectName("FieldLbl")
-        secure_title.setFont(_font("Manrope", 11, bold=True))
-        sb.addWidget(secure_title)
 
         secure_desc = QLabel("Set a password or connect Google so you can sign in without a magic link.")
         secure_desc.setObjectName("DescLbl")
@@ -1107,7 +1245,6 @@ class SettingsPanel(QWidget):
         sb.addLayout(secure_btns)
 
         lay.addWidget(self.secure_box)
-        lay.addSpacing(10)
 
         # Sign out
         self.sign_out_btn = QPushButton("Sign Out")
@@ -1203,22 +1340,21 @@ class SettingsPanel(QWidget):
 
     def refresh_account(self):
         """Refresh both auth state and subscription status."""
-        # Only clear stale checkout messages when no poller is actively waiting.
-        _checkout_active = (
-            hasattr(self, "_checkout_stop") and not self._checkout_stop.is_set()
-        )
-        if not _checkout_active:
-            _stale_msgs = {"Checkout opened — waiting for payment…", "Opening checkout…"}
-            for _attr in ("upgrade_status_lbl", "upgrade_status_lbl_login"):
-                _lbl = getattr(self, _attr, None)
-                if _lbl and _lbl.text() in _stale_msgs:
-                    _lbl.setText("")
+        # Always clear stale checkout messages — the poller keeps running silently in
+        # the background, and _handle_payment_complete will show "Payment confirmed!"
+        # if/when it fires. Leaving the "waiting" message visible after the user
+        # manually opens the app is confusing.
+        _stale_msgs = {"Checkout opened — waiting for payment…", "Opening checkout…"}
+        for _attr in ("upgrade_status_lbl", "upgrade_status_lbl_login"):
+            _lbl = getattr(self, _attr, None)
+            if _lbl and _lbl.text() in _stale_msgs:
+                _lbl.setText("")
 
-        # If not yet signed in, do a one-shot check for a pending confirmed payment.
-        # This covers the case where the user paid while the window was hidden / after
-        # restarting the app, so the continuous poller never got a chance to fire.
-        if not auth.is_logged_in():
-            self._check_pending_payment()
+        # One-shot check for a pending confirmed payment — covers the case where the
+        # user paid while the window was hidden / after restarting, so the continuous
+        # poller never fired.  Run regardless of login state so logged-in users who
+        # paid are also detected here.
+        self._check_pending_payment()
 
         # Show correct stack page
         logged_in = auth.is_logged_in()
@@ -1335,17 +1471,13 @@ class SettingsPanel(QWidget):
     def _on_checkout_ready(self, url: str):
         """Called on the main thread once the checkout URL is ready."""
         self._set_checkout_busy(False)
-        msg = "Checkout opened — waiting for payment…"
+        self._payment_handled = False  # Reset guard so this checkout can be handled
         if hasattr(self, "upgrade_status_lbl"):
-            self.upgrade_status_lbl.setText(msg)
+            self.upgrade_status_lbl.setText("After paying, press ↻ to activate your Pro plan.")
         if hasattr(self, "upgrade_status_lbl_login"):
-            self.upgrade_status_lbl_login.setText(msg)
+            self.upgrade_status_lbl_login.setText("After paying, sign in below with your checkout email to activate Pro.")
         import threading as _threading
         self._checkout_stop = _threading.Event()
-        billing.poll_checkout_payment(
-            lambda data: self._payment_detected.emit(data),
-            stop_event=self._checkout_stop,
-        )
 
     def _on_checkout_error_occurred(self, err_msg: str):
         """Called on the main thread when checkout URL creation fails."""
@@ -1362,18 +1494,25 @@ class SettingsPanel(QWidget):
         """
         if getattr(self, "_payment_check_in_flight", False):
             return
+        if getattr(self, "_payment_handled", False):
+            return
         self._payment_check_in_flight = True
 
         import threading, urllib.request, json as _json
 
+        token = auth.get_access_token()
+
         def _run():
             try:
+                headers = {
+                    "X-Omni-Secret": OMNI_SECRET,
+                    "X-Device-ID":   DEVICE_ID,
+                }
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
                 req = urllib.request.Request(
                     f"{BACKEND_URL}/v1/billing/session_status",
-                    headers={
-                        "X-Omni-Secret": OMNI_SECRET,
-                        "X-Device-ID":   DEVICE_ID,
-                    },
+                    headers=headers,
                 )
                 with urllib.request.urlopen(req, timeout=8) as r:
                     data = _json.loads(r.read())
@@ -1388,6 +1527,11 @@ class SettingsPanel(QWidget):
 
     def _handle_payment_complete(self, data: dict):
         """Called on the main thread when the payment poller detects a successful payment."""
+        # Guard against re-entry: the poller AND _check_pending_payment can both fire.
+        if getattr(self, "_payment_handled", False):
+            return
+        self._payment_handled = True
+
         # Stop the poller (already stopped itself, but be safe)
         if hasattr(self, "_checkout_stop"):
             self._checkout_stop.set()
@@ -1396,15 +1540,30 @@ class SettingsPanel(QWidget):
         win = self.window()
         if win is not None:
             if not win.isVisible():
-                win.toggle_visibility_safe("manual")
+                # Show the window directly (avoid toggle_visibility_safe which could debounce).
+                win.setWindowOpacity(0.0)
+                win.show()
+                win.center()
+                if win.is_settings_mode:
+                    win.resize(win.width(), win._SETTINGS_HEIGHT)
+                win.animate_entry()
+                win.force_focus()
             else:
                 win.raise_()
                 win.activateWindow()
-            # Open settings mode if not already in it, then navigate to Account tab.
-            if hasattr(win, "enter_settings_mode") and not win.is_settings_mode:
+                win.force_focus()
+
+            # Ensure settings panel is visible — the QGraphicsOpacityEffect from a
+            # partial enter_settings_mode animation can leave it at opacity 0.
+            self.setGraphicsEffect(None)
+            self.show()
+
+            # Enter settings mode if not already in it (e.g. user closed settings before paying).
+            if not win.is_settings_mode:
                 win.enter_settings_mode()
-            delay = 250 if not win.is_settings_mode else 50
-            QTimer.singleShot(delay, self._focus_account_tab)
+
+            # Give animations time to settle before switching the sidebar tab.
+            QTimer.singleShot(400, self._focus_account_tab)
 
         magic_link = data.get("magic_link") or ""
         email      = data.get("email") or ""
@@ -1456,10 +1615,20 @@ class SettingsPanel(QWidget):
                 self.sidebar.setCurrentRow(i)
                 break
 
+    def _toggle_security(self):
+        """Expand / collapse the Account Security box."""
+        visible = self.secure_box.isVisible()
+        self.secure_box.setVisible(not visible)
+        self._security_toggle_btn.setText(
+            "Account Security  ▴" if not visible else "Account Security  ▾"
+        )
+
     def _show_secure_account_prompt(self):
         """Reveal the 'Account Security' box after auto-login from checkout."""
         if hasattr(self, "secure_box"):
             self.secure_box.setVisible(True)
+        if hasattr(self, "_security_toggle_btn"):
+            self._security_toggle_btn.setText("Account Security  ▴")
         # Switch to the logged-in Account view if not already there.
         if auth.is_logged_in() and self.account_stack.currentIndex() != 1:
             self.account_stack.setCurrentIndex(1)
@@ -1843,9 +2012,65 @@ class SettingsPanel(QWidget):
                 margin-top: 4px;
             }}
             QFrame#UpgradeBox {{
-                background: {sidebar_bg};
-                border: 1px solid {border};
-                border-radius: 12px;
+                background: rgba(99,102,241,0.08);
+                border: 1px solid rgba(99,102,241,0.32);
+                border-radius: 14px;
+            }}
+            QFrame#PlanCard {{
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 10px;
+            }}
+            QFrame#PlanCardFeatured {{
+                background: rgba(99,102,241,0.18);
+                border: 1px solid rgba(99,102,241,0.55);
+                border-radius: 10px;
+            }}
+            QLabel#PlanCardDesc {{
+                color: {secondary};
+                font-family: "Manrope";
+                font-size: 10px;
+            }}
+            QLabel#BestValueBadge {{
+                background: rgba(99,102,241,0.4);
+                border: 1px solid rgba(99,102,241,0.7);
+                border-radius: 4px;
+                color: #c7d2fe;
+                padding: 1px 6px;
+                font-family: "Manrope";
+                font-size: 9px;
+            }}
+            QPushButton#ProPlanBtn {{
+                background: #6366f1;
+                border: none;
+                border-radius: 8px;
+                color: #ffffff;
+                font-family: "Manrope";
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0px 14px;
+            }}
+            QPushButton#ProPlanBtn:hover {{ background: #818cf8; }}
+            QPushButton#ProPlanBtn:pressed {{ background: #4f46e5; }}
+            QPushButton#ProPlanBtn:disabled {{
+                background: rgba(99,102,241,0.3);
+                color: rgba(255,255,255,0.4);
+            }}
+            QPushButton#PrimaryBtn {{
+                background: #6366f1;
+                border: none;
+                border-radius: 10px;
+                color: #ffffff;
+                font-family: "Manrope";
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0px 18px;
+            }}
+            QPushButton#PrimaryBtn:hover {{ background: #818cf8; }}
+            QPushButton#PrimaryBtn:pressed {{ background: #4f46e5; }}
+            QPushButton#PrimaryBtn:disabled {{
+                background: rgba(99,102,241,0.3);
+                color: rgba(255,255,255,0.4);
             }}
             QPushButton#OAuthBtn {{
                 background: {field_bg};
