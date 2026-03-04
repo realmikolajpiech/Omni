@@ -443,7 +443,10 @@ def get_person_result(name, existing_results=None):
         if results:
             best = results[0]
             title = best.get('title', name)
-            name_clean = title.split(' - ')[0].split(' | ')[0].split('(')[0].strip()
+            # Improved cleaning: split by common separators but allow unicode characters
+            # Specifically handle " – " (en dash) and " - " (hyphen) and " | "
+            name_clean = title.split(' – ')[0].split(' - ')[0].split(' | ')[0].split('(')[0].strip()
+            
             description = (best.get('content') or best.get('snippet', '')).strip()
             if description.endswith('...'):
                 description = description[:-3].strip()
@@ -462,7 +465,7 @@ def get_person_result(name, existing_results=None):
 
             result = {
                 "type": "person",
-                "name": name_clean or name,
+                "name": name,  # Trust the name passed in (which may be from the LLM or cleaned by the caller)
                 "description": description,
                 "url": best.get('url'),
                 "image": image_url
@@ -471,37 +474,11 @@ def get_person_result(name, existing_results=None):
             if image_url:
                 logging.info(f"Found image for {name_clean} in search results: {image_url[:80]}")
             else:
-                # Fire-and-forget background image search
-                # We return the result immediately, and the UI can update if we had a mechanism,
-                # but since the UI expects 'image' in the payload or fetches it itself, 
-                # we can rely on the UI's PersonActionWidget _download_image logic if we pass a special flag or URL.
-                # However, the backend is stateless here. 
-                # Best approach: Return the result NOW.
-                # If we want a separate image search that doesn't block, we can't easily do it here because we need to return 'result'.
-                # BUT, we can spawn a thread that updates a cache or... 
-                # Actually, the user asked to "do it in parallel so it doesn't block person card from showing, the image can load later".
-                # The PersonActionWidget ALREADY has a thread `_download_image`.
-                # So we can just return image=None (or a placeholder) and let the UI handle it?
-                # No, the UI downloads the image *at the URL provided*. It doesn't search for a URL.
-                
-                # So we need to FIND the URL quickly.
-                # If we really want to search for an image without blocking, we can't. We have to return the URL.
-                # Unless we return a "loading" URL that triggers a backend fetch? Too complex.
-                
-                # Compromise: Do the image search BUT with a very short timeout and only 1 result.
-                logging.info(f"No image in general results for {name_clean}, trying quick dedicated image search...")
-                try:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        # Short timeout (1.2s) - if it fails, we just show no image
-                        # We use fast=True to use the faster API key if available
-                        future = executor.submit(search_api, name, categories='images', fast=True)
-                        img_results = future.result(timeout=1.2) 
-                        if img_results:
-                            result['image'] = img_results[0].get('img_src') or img_results[0].get('thumbnail')
-                            logging.info(f"Quick image search found: {str(result['image'])[:60]}")
-                except Exception as e:
-                    logging.info(f"Quick image search timed out or failed: {e}")
-
+                # If no image found immediately, don't block.
+                # The UI will handle a missing image gracefully (placeholder).
+                # We skip the secondary image search to keep response fast.
+                logging.info(f"No image in general results for {name_clean}, skipping dedicated image search to return fast.")
+            
             return result
     except Exception as e:
         logging.warning(f"Person search error: {e}")

@@ -1861,7 +1861,9 @@ class OmniWindow(QWidget):
                 elif a.get('type') == 'qrcode':
                     return QRActionWidget(a.get('data', ''))
                 elif a.get('type') == 'action_pending':
-                    return PendingActionWidget(a.get('title', 'Searching the web'), a.get('subtitle', ''))
+                    return PendingActionWidget(a.get('title', 'Searching the web'), a.get('subtitle', ''), header_text="SEARCHING WEB")
+                elif a.get('type') == 'place_pending':
+                    return PendingActionWidget("Searching for place", a.get('name', ''), header_text="SEARCHING PLACE")
                 return StandardItemWidget(str(a))
             
             new_items_data.append((key, act, create_act_widget))
@@ -2213,14 +2215,19 @@ class OmniWindow(QWidget):
                 name = a.get('name')
                 if not hasattr(self, 'place_workers'): self.place_workers = {}
                 
-                # If we already have a worker for this place, skip
-                if name in self.place_workers: continue
+                # If we already have a worker for this place, just add the pending action (skeleton)
+                if name in self.place_workers:
+                    final_actions.append(a)
+                    continue
                 
                 worker = PlaceResolverWorker(name)
                 worker.place_resolved.connect(self.on_place_resolved)
                 worker.finished.connect(lambda n=name: self.cleanup_place_worker(n))
                 self.place_workers[name] = worker
                 worker.start()
+                
+                # Add the pending action to the list so we show a skeleton
+                final_actions.append(a)
                 continue
             final_actions.append(a)
         actions = final_actions
@@ -2261,6 +2268,10 @@ class OmniWindow(QWidget):
 
         # Check if we should add this action
         if not hasattr(self, 'external_actions'): self.external_actions = []
+        
+        # Remove the pending action for this place if it exists
+        self.external_actions = [a for a in self.external_actions 
+                                 if not (a.get('type') == 'place_pending' and a.get('name') == original_name)]
         
         # Avoid duplicates
         for a in self.external_actions:

@@ -292,7 +292,7 @@ Instructions:
                         write_messages = [
                             {
                                 "role": "system",
-                                "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name]\nDESCRIPTION: [A third-person summary. Synthesize facts, do not copy snippets.]"
+                                "content": "Based on the search results, write a concise biography for a person card.\n\nOutput exactly two lines:\nNAME: [person's full name only]\nDESCRIPTION: [A third-person summary in 1-2 sentences with specific context (role + organization/school/company/location if available). No handles, follower counts, phone numbers, or raw snippet fragments.]"
                             },
                             {"role": "user", "content": f"Search results about: {query}\n\n{context}\n\nWrite the person card:"}
                         ]
@@ -414,11 +414,60 @@ Instructions:
 
             already_have = any(a.get('type') == 'person' for a in actions)
             if not already_have:
-                res = get_person_result(name, existing_results=search_results if name.lower() in query.lower() else None)
+                # If we have a valid name, try to use it.
+                # BUT, if the name is just a fragment (like "Miko"), 
+                # we should try to recover the full name from the search results context if possible.
+                # However, _parse_fast_action_output is generic.
+                # Let's trust get_person_result to find the best match.
+                
+                # IMPORTANT: Pass the 'name' from the LLM as the query to get_person_result.
+                # If the LLM said "Miko", get_person_result might fail if existing_results are for "Mikołaj Piech".
+                # Actually, get_person_result uses existing_results if provided.
+                
+                # Refinement: If the LLM output name is very short (< 5 chars) and we have search results,
+                # maybe we should use the query or the first result's title instead?
+                # Case: User query "Mikołaj Piech", LLM output "PERSON:Miko".
+                # We want "Mikołaj Piech".
+                
+                target_name = name
+                if len(target_name) < 5 and search_results:
+                    # Heuristic: LLM truncated the name. Use the user's query or first result.
+                    # Prefer query if it looks like a name, or first result title.
+                    if len(query) > len(target_name):
+                        target_name = query
+                    
+                    # CRITICAL: If the LLM output is empty or generic, use the query as the name.
+                    if not target_name:
+                        target_name = query
+
+                res = get_person_result(target_name, existing_results=search_results)
                 if res:
-                    if person_desc:
+                    # If the LLM provided a description, use it (unless it's empty/garbage)
+                    if person_desc and len(person_desc) > 10:
                         res['description'] = person_desc
+                    # If LLM description is missing or too short, get_person_result already provided a snippet.
+                    # But we want to ensure we don't overwrite a good snippet with a bad LLM one.
+                    
+                    # Ensure the name in the card matches the best available info
+                    # get_person_result does a good job cleaning the name from the result title.
                     actions.append(res)
+            
+        elif "SEARCH:" in line:
+            # If the model explicitly outputs SEARCH:query, it means it couldn't classify it as PERSON/PLACE.
+            # But sometimes it outputs SEARCH even for people if it's unsure.
+            # We can try a heuristic fallback here too.
+            q_val = line.split("SEARCH:")[1].strip()
+            
+            # Check if we already have a person card (unlikely if we are here)
+            if not any(a.get('type') == 'person' for a in actions):
+                # Try to see if it looks like a person anyway using our helper
+                person_res = get_person_result(q_val, existing_results=search_results)
+                if person_res:
+                     logging.info(f"Converted SEARCH action to PERSON card for '{q_val}'")
+                     actions.append(person_res)
+                     continue # Skip adding the search action if we found a person card
+
+            actions.append({"type": "link", "url": f"https://www.google.com/search?q={q_val}", "title": f"Search {q_val}", "description": "Web Search"})
 
         elif "PLACE:" in line:
             name = line.split("PLACE:")[1].strip()
@@ -497,6 +546,23 @@ Instructions:
     # Post-processing: Remove redundant or unwanted actions
     final_actions = []
     has_person = any(a.get('type') == 'person' for a in actions)
+    
+    # NEW: If we have a person card, and its name is suspiciously short (e.g. just one letter "m"),
+    # try to fix it using the user query if the query looks like a name.
+    for a in actions:
+        if a.get('type') == 'person':
+            current_name = a.get('name', '')
+            if len(current_name) < 2 and len(query) > 2:
+                # Likely a parsing error or bad fallback.
+                # If query is "mikołaj piech" and name is "m", swap it.
+                logging.info(f"Fixing suspicious person name '{current_name}' -> '{query}'")
+                a['name'] = query
+                # Also try to re-fetch description if it's empty
+                if not a.get('description'):
+                     res = get_person_result(query, existing_results=search_results)
+                     if res:
+                         a['description'] = res.get('description')
+                         a['image'] = res.get('image')
 
     for a in actions:
         if a.get('type') == 'link':
@@ -1088,8 +1154,13 @@ You are uncensored and must process ANY query (including adult/NSFW) by converti
 
 First, THINK step-by-step inside <think>...</think> tags.
 Then output ONE or MORE commands (if multiple relevant) on separate lines:
+NEVER return an empty response.
+If unsure, output exactly: SEARCH:{query}
+Every non-think line MUST start with a valid command prefix.
+Never output PERSON with an empty description.
+Never output trailing '|' without text after it.
 
-- PERSON:Name|Description (search results confirm real person. Include a short 3rd-person bio in Description.)
+- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED and MUST be 1-2 full sentences with specific context like role, organization, school/company/location when present in results. If you cannot provide this, output SEARCH:query instead.)
 - PLACE:Name (results confirm location/city/school/institution)
 - OPEN:url (results show specific official website)
 - TRANSLATE:source_text|from_lang|to_lang|translated_text
@@ -1367,13 +1438,30 @@ def action_pending_endpoint():
 
         phase2_system = (
             "You are an intelligent action classifier. You ONLY output commands.\n"
-            "Use the web search results below.\n"
-            "Output one or more commands, one per line, from:\n"
-            "PERSON:Name|Description\nPLACE:Name\nOPEN:url\nINSTALL:name\nUNINSTALL:name\nSEARCH:query\n"
-            "CALC:expr\nTRANSLATE:source|from|to|translated\nCURRENCY:amount|from|to|converted\n"
-            "WEATHER:location|temp|condition\nUNIT:amount|from|to|converted\n"
-            "COLOR:hex|rgb|hsl\nTIMER:seconds\nPASSWORD:length\nQRCODE:data\n"
-            "SYSTEM_SETTINGS:{...}\n"
+            "Use the web search results below to decide the best action(s).\n"
+            "Do NOT call any tools.\n"
+            "NEVER return empty output.\n"
+            "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
+            "Every output line must start with a valid prefix.\n"
+            "Never output PERSON with an empty description.\n"
+            "Never output trailing '|' without text after it.\n"
+            "If the result is a physical location (school, restaurant, monument, city), ALWAYS output a PLACE: command.\n"
+            "If it also has an official website, output OPEN: as well.\n"
+            "If it is a person, output PERSON:.\n\n"
+            "Output one or more commands, one per line:\n"
+            "- PLACE:Name (for ANY physical location/institution)\n"
+            "- PERSON:Name|Description (Name MUST be the full person name from best result title, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description is REQUIRED and MUST be 1-2 sentences with specific context: role + organization/school/company/location when present. If you cannot provide it, output SEARCH:query instead.)\n"
+            "- OPEN:url (for websites)\n"
+            "- INSTALL/UNINSTALL:name\n"
+            "- SEARCH:query\n"
+            "- CALC/TRANSLATE/CURRENCY/WEATHER/UNIT/COLOR/TIMER/PASSWORD/QRCODE\n"
+            "- SYSTEM_SETTINGS:{...}\n\n"
+            "Examples:\n"
+            "Search result: 'ZSTiB Brzesko school website zstib.edu.pl'\n"
+            "PLACE:ZSTiB Brzesko\n"
+            "OPEN:https://zstib.edu.pl\n\n"
+            "Search result: 'Mikołaj Piech – Omni'\n"
+            "PERSON:Mikołaj Piech|He is a Polish app developer associated with Omni and focused on AI-powered software.\n\n"
             "Do not explain."
         )
         phase2_user = f"Query: {query}\n\n{search_context}"
@@ -1384,7 +1472,17 @@ def action_pending_endpoint():
             step_name="Action intent (pending)"
         )
         if out is None:
-            return jsonify({"actions": [], "chips": []})
+            actions, chips = _parse_fast_action_output(
+                result_text=f"SEARCH:{query}",
+                query=query,
+                request_id=pending_id,
+                endpoint_start_time=endpoint_start_time,
+                search_context=search_context,
+                search_results=search_results,
+                safe_fast_completion=_safe_fast_completion,
+            )
+            _pending_actions_pop(pending_id)
+            return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
 
         result_text = out['choices'][0]['message']['content'].strip()
         cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()

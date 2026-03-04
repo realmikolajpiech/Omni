@@ -184,6 +184,7 @@ class LinkActionWidget(QWidget):
             req = QNetworkRequest(QUrl(icon_url))
             req.setRawHeader(b"User-Agent", b"Mozilla/5.0")
             
+            # Asynchronous request does not block UI
             reply = self.nam.get(req)
             reply.finished.connect(lambda: self._on_icon_reply(reply))
         except Exception: pass
@@ -4758,7 +4759,7 @@ class SkeletonLine(QWidget):
 
 class PendingActionWidget(QWidget):
     """Skeleton card shown while web search is running."""
-    def __init__(self, title="Searching the web", subtitle="", parent=None):
+    def __init__(self, title="Searching the web", subtitle="", header_text="SEARCHING WEB", parent=None):
         super().__init__(parent)
         self.current_theme = "light"
         
@@ -4781,7 +4782,7 @@ class PendingActionWidget(QWidget):
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.action_label = QLabel("SEARCHING WEB")
+        self.action_label = QLabel(header_text)
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
 
         top_layout.addWidget(self.icon_label)
