@@ -592,6 +592,7 @@ class SettingsPanel(QWidget):
     _checkout_ready     = pyqtSignal(str)   # emitted with checkout URL on success
     _checkout_error_sig = pyqtSignal(str)   # emitted with error message on failure
     _payment_detected   = pyqtSignal(object)  # emitted with payment data dict
+    _dispatch           = pyqtSignal(object)  # carries a callable to run on the main thread
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -602,6 +603,7 @@ class SettingsPanel(QWidget):
         self._checkout_ready.connect(self._on_checkout_ready)
         self._checkout_error_sig.connect(self._on_checkout_error_occurred)
         self._payment_detected.connect(self._handle_payment_complete)
+        self._dispatch.connect(lambda fn: fn())
 
     # ── Build ────────────────────────────────────────────────────────
 
@@ -1681,7 +1683,7 @@ class SettingsPanel(QWidget):
                     subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
                 else:
                     self._account_status(msg, error=True)
-            QTimer.singleShot(0, _done)
+            self._dispatch.emit(_done)
         threading.Thread(target=_run, daemon=True).start()
 
     def _do_sign_up(self):
@@ -1699,7 +1701,7 @@ class SettingsPanel(QWidget):
                 self._account_status(msg, error=not ok)
                 if ok and auth.is_logged_in():
                     self.refresh_account()
-            QTimer.singleShot(0, _done)
+            self._dispatch.emit(_done)
         threading.Thread(target=_run, daemon=True).start()
 
     def _do_oauth(self, provider: str):
@@ -1714,7 +1716,7 @@ class SettingsPanel(QWidget):
                     subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
                 else:
                     self._account_status(msg, error=True)
-            QTimer.singleShot(0, _finish)
+            self._dispatch.emit(_finish)
 
         auth.start_oauth(provider, _on_done)
 
