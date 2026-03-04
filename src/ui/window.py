@@ -2836,7 +2836,7 @@ class OmniWindow(QWidget):
             # Upgrade any leftover simple answer widgets to chat bubbles (first follow-up transition)
             self._upgrade_to_chat_bubbles()
 
-            # Chat mode: immediately show user bubble + AI area; no spinner widget
+            # Chat mode: show user bubble + AI area
             if self.list_widget.count() > 0:
                 self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
 
@@ -2854,7 +2854,6 @@ class OmniWindow(QWidget):
             if self.list_widget.count() > 0:
                 self.list_widget.scrollToItem(self.list_widget.item(0))
             self.list_widget.update()
-            QApplication.processEvents()
             # After Qt has processed events and run the layout pass, re-measure so sizes are correct
             QTimer.singleShot(0, answer_widget.update_item_size)
         else:
@@ -2989,7 +2988,7 @@ class OmniWindow(QWidget):
                 # Don't split on comma alone as it breaks flow too much, but .!? is good.
                 # User wants faster TTS start, so we include comma/colon/semicolon too.
                 # Added comma to make it more responsive
-                parts = re.split(r'([.,!?;:]+[\s\n]+)', self.tts_buffer)
+                parts = re.split(r'([.!?]+[\s\n]+)', self.tts_buffer)
                 
                 # If we have at least one delimiter, we can process the sentence
                 # We need [Sentence, Delimiter, NextPart...]

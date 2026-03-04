@@ -109,9 +109,19 @@ def _get_stdin_player_cmd():
     return None
 
 
+def _add_sentence_breaks(text: str, pause_ms: int = 50) -> str:
+    """Insert SSML <break> tags between sentences."""
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    parts = [p for p in parts if p.strip()]
+    if len(parts) <= 1:
+        return text
+    break_tag = f'<break time="{pause_ms}ms"/>'
+    return f" {break_tag} ".join(parts)
+
+
 async def _run_tts(text: str, voice: str, stop_event: threading.Event):
     import edge_tts
-    communicate = edge_tts.Communicate(text, voice=voice, rate="+30%")
+    communicate = edge_tts.Communicate(_add_sentence_breaks(text), voice=voice, rate="5%")
 
     stdin_cmd = _get_stdin_player_cmd()
 
@@ -176,6 +186,63 @@ def _play_file(path: str, stop_event: threading.Event):
             proc.terminate()
             break
         time.sleep(0.05)
+
+
+async def _collect_audio_bytes(text: str, voice: str) -> bytes:
+    """Generate and return all audio bytes without playing."""
+    import edge_tts
+    communicate = edge_tts.Communicate(_add_sentence_breaks(text), voice=voice, rate="-20%")
+    chunks = []
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            chunks.append(chunk["data"])
+    return b"".join(chunks)
+
+
+def generate_audio_bytes(text: str, voice: str = None) -> bytes:
+    """Generate audio bytes for text (blocking). Returns empty bytes on error."""
+    text = _clean_for_tts(text)
+    if not text:
+        return b""
+    if voice is None:
+        voice = _detect_voice(text)
+    logging.info(f"TTS generating [{voice}]: {text[:60]}...")
+    try:
+        return asyncio.run(_collect_audio_bytes(text, voice))
+    except Exception as e:
+        logging.error(f"edge-tts generate error: {e}")
+        return b""
+
+
+def play_audio_bytes(data: bytes, stop_event: threading.Event):
+    """Play raw MP3 bytes, respecting stop_event."""
+    import time
+    if not data:
+        return
+    stdin_cmd = _get_stdin_player_cmd()
+    if stdin_cmd:
+        proc = subprocess.Popen(stdin_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        while proc.poll() is None:
+            if stop_event.is_set():
+                proc.terminate()
+                break
+            time.sleep(0.05)
+    else:
+        tmp = tempfile.mktemp(suffix=".mp3")
+        with open(tmp, "wb") as f:
+            f.write(data)
+        try:
+            _play_file(tmp, stop_event)
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
 
 def stop_playback():

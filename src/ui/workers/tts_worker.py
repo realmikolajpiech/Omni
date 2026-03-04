@@ -1,7 +1,8 @@
 from PyQt6.QtCore import QThread, pyqtSignal
 import logging
 import queue
-from src.services.voice.tts import speak
+import threading
+from src.services.voice.tts import generate_audio_bytes, play_audio_bytes, _stop_event
 
 
 class TTSWorker(QThread):
@@ -23,7 +24,7 @@ class TTSWorker(QThread):
 
     def stop(self):
         """Graceful stop: process all items already in the queue, then stop."""
-        self.queue.put(None)  # sentinel — processed in order after queued text
+        self.queue.put(None)
 
     def force_stop(self):
         """Immediate stop: drop remaining queue items."""
@@ -31,20 +32,51 @@ class TTSWorker(QThread):
         self.queue.put(None)
 
     def run(self):
-        """Process text items until the None sentinel is encountered."""
+        """
+        Pipeline: a generation thread pre-fetches audio bytes while the main
+        thread plays the previous chunk. This eliminates the gap between
+        consecutive TTS chunks.
+        """
+        audio_queue = queue.Queue()
+
+        def generation_thread():
+            while not self._force_stop:
+                try:
+                    text = self.queue.get(timeout=30)
+                except queue.Empty:
+                    audio_queue.put(None)
+                    break
+
+                if text is None:
+                    audio_queue.put(None)
+                    break
+
+                try:
+                    audio = generate_audio_bytes(text)
+                    audio_queue.put(audio)
+                    self.queue.task_done()
+                except Exception as e:
+                    logging.error(f"TTS generation error: {e}")
+                    audio_queue.put(b"")
+
+        gen = threading.Thread(target=generation_thread, daemon=True)
+        gen.start()
+
         while not self._force_stop:
             try:
-                text = self.queue.get(timeout=30)
+                audio = audio_queue.get(timeout=35)
             except queue.Empty:
-                break  # Hung for 30s — bail out
+                break
 
-            if text is None:
-                break  # Graceful stop sentinel reached
+            if audio is None:
+                break
 
-            try:
-                speak(text)
-                self.queue.task_done()
-            except Exception as e:
-                logging.error(f"TTS Worker Error: {e}")
+            if audio:
+                try:
+                    _stop_event.clear()
+                    play_audio_bytes(audio, _stop_event)
+                except Exception as e:
+                    logging.error(f"TTS playback error: {e}")
 
+        gen.join(timeout=5)
         self.finished_speaking.emit()

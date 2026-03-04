@@ -683,10 +683,11 @@ class _BubbleInner(QWidget):
 
         if is_markdown:
             # Placeholder shown while AI is "thinking" (no answer/thinking content yet)
-            self.thinking_placeholder = QLabel("Thinking…")
-            self.thinking_placeholder.setFont(QFont("Manrope", 14, QFont.Weight.Normal))
-            self.thinking_placeholder.setMinimumHeight(28)
-            self.thinking_placeholder.setStyleSheet("color: rgba(128,128,128,0.9); background: transparent;")
+            self.thinking_placeholder = QLabel("Thinking...")
+            _ph_font = QFont("Instrument Serif", 22, QFont.Weight.Normal)
+            _ph_font.setItalic(True)
+            self.thinking_placeholder.setFont(_ph_font)
+            self.thinking_placeholder.setMinimumHeight(48)
             lay.addWidget(self.thinking_placeholder)
             self._placeholder_shown = True  # placeholder starts visible
 
