@@ -51,37 +51,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "request_permission",
-            "description": (
-                "Request elevated trust permission from the user before performing an action "
-                "that requires Automation (level 2) or Full Control (level 3) trust. "
-                "Call this FIRST when you're about to do something that modifies system state, "
-                "files, or settings, or installs/removes software — especially if trust may be insufficient. "
-                "Level 2 (Automation): file writes, system settings changes, process management. "
-                "Level 3 (Full Control): file deletions, package installs/uninstalls, sudo commands. "
-                "If permission is granted, proceed immediately with the actual action. "
-                "If denied, stop and inform the user gracefully."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "required_level": {
-                        "type": "integer",
-                        "enum": [2, 3],
-                        "description": "Minimum trust level needed: 2=Automation (writes/settings), 3=Full Control (deletions/installs).",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Short human-readable description of what you want to do, e.g. 'delete old log files from Desktop'.",
-                    },
-                },
-                "required": ["required_level", "description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "search_web",
             "description": (
                 "Search the web for current information, news, recent events, facts, "
@@ -393,12 +362,7 @@ TOOL_SCHEMAS = [
 def execute_tool(name: str, arguments: dict) -> str:
     """Dispatch a tool call by name and return the result as a plain string."""
     try:
-        if name == "request_permission":
-            return _tool_request_permission(
-                arguments.get("required_level", 2),
-                arguments.get("description", ""),
-            )
-        elif name == "search_web":
+        if name == "search_web":
             return _tool_search_web(arguments.get("query", ""))
         elif name == "search_files":
             return _tool_search_files(arguments.get("query", ""))
@@ -571,37 +535,6 @@ def _terminal_required_trust_level(command: str) -> int:
     return 1
 
 
-def _tool_request_permission(required_level: int, description: str) -> str:
-    """Check / request elevated trust from the user.
-
-    Returns "Permission granted." when effective trust >= required_level,
-    otherwise queues a trust_request action (source="request_permission") for
-    the UI to show a popup, and returns a [Permission required] message so the
-    AI knows to stop and wait.
-    """
-    _LEVEL_NAMES = {1: "Assistant", 2: "Automation", 3: "Full Control"}
-    required_level = max(2, min(3, int(required_level)))  # clamp to 2-3
-    current = get_effective_trust()
-
-    if current >= required_level:
-        return f"Permission granted. Trust level: {_LEVEL_NAMES[current]}. Proceed with the action."
-
-    description = (description or "perform this action").strip()
-    _get_pending().append({
-        "type":             "trust_request",
-        "required_level":   required_level,
-        "command":          "",   # no command — UI will re-run the AI query
-        "description":      description,
-        "source":           "request_permission",
-    })
-    logging.info(f"[tool:request_permission] queued trust_request level={required_level} desc={description!r}")
-    return (
-        f"[Permission required] '{_LEVEL_NAMES[required_level]}' trust is needed to {description}. "
-        f"Current trust: '{_LEVEL_NAMES[current]}'. "
-        f"A permission request has been sent to the user — do not attempt the action now."
-    )
-
-
 def _tool_run_terminal(command: str, description: str = "") -> str:
     import subprocess
 
@@ -692,6 +625,18 @@ def _tool_install_app(name: str) -> str:
     name = name.strip().lower()
     if not name:
         return "Error: empty app name."
+
+    # Trust level 3 required for installing software
+    current = get_effective_trust()
+    if current < 3:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 3,
+            "command":        f"brew install {name}",
+            "description":    f"Install {name} via Homebrew",
+        })
+        return "[Permission required] 'Full Control' trust is needed to install software."
+
     brew = _find_brew()
     if not brew:
         return "Error: Homebrew not found. Install it from https://brew.sh"
@@ -715,6 +660,18 @@ def _tool_uninstall_app(name: str) -> str:
     name = name.strip().lower()
     if not name:
         return "Error: empty app name."
+
+    # Trust level 3 required for uninstalling software
+    current = get_effective_trust()
+    if current < 3:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 3,
+            "command":        f"brew uninstall {name}",
+            "description":    f"Uninstall {name} via Homebrew",
+        })
+        return "[Permission required] 'Full Control' trust is needed to uninstall software."
+
     brew = _find_brew()
     if not brew:
         return "Error: Homebrew not found."
@@ -737,5 +694,17 @@ def _tool_organize_folder(path: str, strategy: str) -> str:
     path = path.strip()
     if not path:
         return "Error: empty path."
+
+    # Trust level 2 required for organizing files
+    current = get_effective_trust()
+    if current < 2:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 2,
+            "command":        f"organize {path}",
+            "description":    f"Organize files in {path}",
+        })
+        return "[Permission required] 'Automation' trust is needed to organize files."
+
     logging.info(f"[tool:organize_folder] path={path!r} strategy={strategy!r}")
     return organize_folder(path, strategy)

@@ -21,7 +21,6 @@ import src.core.settings_store as settings_store
 # ── Tool call display helpers ─────────────────────────────────────────────────
 
 _TOOL_META = {
-    "request_permission": {"icon": "🔐", "label": "Permission"},
     "search_web":    {"icon": "🌐", "label": "Web search"},
     "search_files":  {"icon": "📂", "label": "File search"},
     "calculate":     {"icon": "🧮", "label": "Calculate"},
@@ -39,15 +38,6 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
     """Return a one-liner header for a tool call, e.g. '🌐 Web search  "query..."'."""
     meta = _TOOL_META.get(tool_name, {"icon": "⚙", "label": tool_name})
     icon, label = meta["icon"], meta["label"]
-
-    if tool_name == "request_permission":
-        lvl = args.get("required_level", 2)
-        desc = args.get("description", "")
-        if len(desc) > 60:
-            desc = desc[:57] + "…"
-        lvl_name = {2: "Automation", 3: "Full Control"}.get(lvl, str(lvl))
-        arg_part = f"{lvl_name} — {desc}"
-        return f"{icon}  {label}  {arg_part}"
 
     if tool_name in ("search_web", "search_files", "search_images", "memory_recall", "memory_delete"):
         q = args.get("query", "")
@@ -79,13 +69,6 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
 
 def _tool_result_summary(tool_name: str, result: str) -> str:
     """One-line summary of what the tool returned."""
-    if tool_name == "request_permission":
-        if "Permission granted" in result:
-            return "granted"
-        if "[Permission required]" in result:
-            return "awaiting user approval"
-        return result.strip()[:60]
-
     if tool_name == "calculate":
         if "Result: " in result:
             val = result.split("Result: ")[1].split("\n")[0].strip()
@@ -685,7 +668,6 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
 Location: {user_loc} | Date: {current_date}
 
 ## Tools available (use via function calling when needed)
-- **request_permission** — request elevated trust from the user before doing anything that modifies the system. Call FIRST when about to write/delete files, change settings, or install software. Level 2=Automation (writes, settings), Level 3=Full Control (deletions, installs). If granted → proceed immediately. If denied → stop gracefully.
 - **search_web** — current events, news, prices, weather, people, any up-to-date info
 - **search_files** — user's local documents, notes, code files, PDFs on this machine
 - **calculate** — precise arithmetic or algebraic expressions
@@ -755,7 +737,6 @@ Available settings and values:
 - For any command: just DO it. Never ask "would you like me to…?" — act immediately.
 - NEVER instruct user to open Terminal or manually run commands. Always use run_terminal tool.
 - NEVER tell user to install anything manually. Always use install_app / uninstall_app tools.
-- Before modifying files, system settings, or running destructive terminal commands: call **request_permission** first. If it returns "granted", proceed immediately with the action. If it returns "[Permission required]", STOP — the user will be prompted, and you'll be given another chance to complete the task once they approve.
 - If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
 - "Find / open / show me [file]" → search_files THEN immediately open the best match with the run_terminal tool. Never just report the path.

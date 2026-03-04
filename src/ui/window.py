@@ -2538,16 +2538,24 @@ class OmniWindow(QWidget):
 
     # ── Trusted terminal execution (one-time permission) ──────────────────────
 
-    def _run_trusted_terminal(self, command: str, insert_pos: int = -1):
-        """Run a terminal command granted one-time trust silently."""
+    def _run_trusted_terminal(self, command: str, insert_pos: int = -1) -> str:
+        """Run a terminal command granted one-time trust and return output."""
         import subprocess
         import logging
         try:
             proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
             if proc.returncode != 0:
-                logging.error(f"Trusted terminal command failed with exit code {proc.returncode}: {proc.stderr}")
+                logging.error(f"Trusted terminal command failed with exit code {proc.returncode}: {stderr}")
+                return stderr or f"Command failed (exit code {proc.returncode})"
+            return stdout or "Done."
+        except subprocess.TimeoutExpired:
+            logging.error(f"Trusted terminal command timed out: {command}")
+            return "Command timed out."
         except Exception as e:
             logging.error(f"Error executing trusted terminal command: {e}")
+            return f"Error: {e}"
 
     # ── Computer control execution ────────────────────────────────────────────
 
@@ -3325,11 +3333,12 @@ class OmniWindow(QWidget):
                                             # Boost trust and re-run — widget updates in-place
                                             from src.services.llm.tools import set_trust_boost
                                             set_trust_boost(_lvl)
+                                            self.logo_label.boost_speed()
+                                            _w.set_answer("Running...")
                                             QTimer.singleShot(100, lambda: self.start_ai_worker(
                                                 getattr(self, '_last_ai_query', ''), None
                                             ))
                                         else:
-                                            _w.set_answer_visible(True)
                                             _row = -1
                                             for _i in range(self.list_widget.count()):
                                                 _itm = self.list_widget.item(_i)
@@ -3337,7 +3346,9 @@ class OmniWindow(QWidget):
                                                 if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
                                                     _row = _i + 1
                                                     break
-                                            self._run_trusted_terminal(_cmd, _row)
+                                            result = self._run_trusted_terminal(_cmd, _row)
+                                            _w.set_answer(result)
+                                            _w.set_answer_visible(True)
                                             if _was_voice:
                                                 self.cleanup_worker('tts_worker')
                                                 self.tts_worker = TTSWorker("Gotowe.")
@@ -3744,11 +3755,13 @@ class OmniWindow(QWidget):
                                         self.voice_triggered_query = True
                                     from src.services.llm.tools import set_trust_boost
                                     set_trust_boost(_lvl)
+                                    self.logo_label.boost_speed()
+                                    if _w:
+                                        _w.set_answer("Running...")
                                     QTimer.singleShot(100, lambda: self.start_ai_worker(
                                         getattr(self, '_last_ai_query', ''), None
                                     ))
                                 else:
-                                    if _w: _w.set_answer_visible(True)
                                     _row = -1
                                     for _i in range(self.list_widget.count()):
                                         _itm = self.list_widget.item(_i)
@@ -3756,7 +3769,10 @@ class OmniWindow(QWidget):
                                         if _w_itm and getattr(_w_itm, 'content_widget', _w_itm) is _perm_widget:
                                             _row = _i + 1
                                             break
-                                    self._run_trusted_terminal(_cmd, _row)
+                                    result = self._run_trusted_terminal(_cmd, _row)
+                                    if _w:
+                                        _w.set_answer(result)
+                                        _w.set_answer_visible(True)
                                     if _was_voice:
                                         self.cleanup_worker('tts_worker')
                                         self.tts_worker = TTSWorker("Gotowe.")
