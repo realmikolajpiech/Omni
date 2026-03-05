@@ -118,8 +118,11 @@ SILENCE_THRESHOLD = 0.003  # slightly higher so brief inter-syllable dips don't 
 SILENCE_DURATION = 1.8   # seconds of sustained silence before triggering transcription
 UDP_PORT = 5557
 
-# Minimum consecutive frames above threshold before wake word fires (debounce)
-OWW_TRIGGER_FRAMES = 2
+# Wake word trigger: require N frames above threshold within a sliding window
+# (not necessarily consecutive — natural speech scores fluctuate frame-to-frame)
+OWW_TRIGGER_FRAMES = 2       # how many frames must be above threshold
+OWW_TRIGGER_WINDOW = 4       # within this many recent frames
+OWW_COOLDOWN_SECONDS = 3.0   # ignore re-triggers for this long after a detection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,6 +150,8 @@ class VoiceService:
         self.udp_sock = None
         self.native_rate = SAMPLE_RATE
         self._oww_trigger_count = 0  # consecutive frames above threshold
+        self._oww_score_window = []   # sliding window of recent scores
+        self._oww_last_trigger_time = 0.0  # cooldown timer
         self._oww_last_log_time = 0.0  # for periodic score logging
 
         self.setup_models()
@@ -381,6 +386,7 @@ class VoiceService:
                 self.silence_frames = 0
                 self.energy_history = []
                 self._oww_trigger_count = 0
+                self._oww_score_window = []
                 # Reset OWW prediction ring-buffer so residual speech doesn't re-trigger wake word
                 if self.oww_model:
                     try:
@@ -497,17 +503,28 @@ class VoiceService:
                 self._oww_last_log_time = now
                 logger.info(f"[WakeWord] current score: {score:.4f} (threshold={OWW_DETECTION_THRESHOLD})")
 
+            # Sliding window: track recent scores and count how many exceed threshold
+            self._oww_score_window.append(score)
+            if len(self._oww_score_window) > OWW_TRIGGER_WINDOW:
+                self._oww_score_window.pop(0)
+
+            hits = sum(1 for s in self._oww_score_window if s >= OWW_DETECTION_THRESHOLD)
+
             if score >= OWW_DETECTION_THRESHOLD:
-                self._oww_trigger_count += 1
-                logger.info(f"[WakeWord] above threshold: {score:.3f} (frame {self._oww_trigger_count}/{OWW_TRIGGER_FRAMES})")
-                if self._oww_trigger_count >= OWW_TRIGGER_FRAMES:
-                    logger.info(f"Wake Word Detected! (score={score:.3f})")
-                    self._oww_trigger_count = 0
-                    self.set_mode("LISTENING")
-                    self.play_cue(active=True)
-                    self.send_ipc(b"TOGGLE")
-            else:
+                logger.info(f"[WakeWord] above threshold: {score:.3f} (hits {hits}/{OWW_TRIGGER_FRAMES} in last {OWW_TRIGGER_WINDOW} frames)")
+
+            if hits >= OWW_TRIGGER_FRAMES:
+                # Cooldown: don't re-trigger too quickly after a recent detection
+                if now - self._oww_last_trigger_time < OWW_COOLDOWN_SECONDS:
+                    return
+
+                logger.info(f"Wake Word Detected! (score={score:.3f}, hits={hits})")
+                self._oww_last_trigger_time = now
+                self._oww_score_window = []
                 self._oww_trigger_count = 0
+                self.set_mode("LISTENING")
+                self.play_cue(active=True)
+                self.send_ipc(b"TOGGLE")
 
         except Exception as e:
             logger.error(f"Wake word detection error: {e}")
