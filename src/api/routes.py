@@ -1148,6 +1148,120 @@ def action_endpoint():
         act = {"type": "qrcode", "data": data}
         return jsonify({"actions": [act], "chips": []})
 
+    # 1.74 Unit Conversion Fast Path (no LLM needed)
+    _UNIT_CONV_RE = re.compile(
+        r'^(?:convert\s+)?(\d+(?:[.,]\d+)?)\s*([a-zA-Z°²³/µ]+(?:\^[23])?)\s+(?:to|in)\s+([a-zA-Z°²³/µ]+(?:\^[23])?)$',
+        re.IGNORECASE
+    )
+    _unit_m = _UNIT_CONV_RE.match(query.strip())
+    if _unit_m:
+        _amt_raw = _unit_m.group(1).replace(',', '.')
+        _from = _unit_m.group(2).lower().strip()
+        _to   = _unit_m.group(3).lower().strip()
+        try:
+            _amt_f = float(_amt_raw)
+            # ── conversion tables (to SI base) ──
+            # Length → metres
+            _LEN = {'m':1,'meter':1,'meters':1,'metre':1,'metres':1,
+                    'km':1e3,'kilometre':1e3,'kilometre':1e3,'kilometers':1e3,'kilometre':1e3,
+                    'cm':1e-2,'centimeter':1e-2,'centimeters':1e-2,
+                    'mm':1e-3,'millimeter':1e-3,'millimeters':1e-3,
+                    'um':1e-6,'µm':1e-6,'micrometer':1e-6,
+                    'nm':1e-9,'nanometer':1e-9,
+                    'mi':1609.344,'mile':1609.344,'miles':1609.344,
+                    'ft':0.3048,'foot':0.3048,'feet':0.3048,
+                    'in':0.0254,'inch':0.0254,'inches':0.0254,
+                    'yd':0.9144,'yard':0.9144,'yards':0.9144}
+            # Mass → kilograms
+            _MASS = {'kg':1,'kilogram':1,'kilograms':1,
+                     'g':1e-3,'gram':1e-3,'grams':1e-3,
+                     'mg':1e-6,'milligram':1e-6,'milligrams':1e-6,
+                     't':1e3,'tonne':1e3,'ton':1e3,'tonnes':1e3,'tons':1e3,
+                     'lb':0.453592,'lbs':0.453592,'pound':0.453592,'pounds':0.453592,
+                     'oz':0.0283495,'ounce':0.0283495,'ounces':0.0283495}
+            # Volume → litres
+            _VOL = {'l':1,'liter':1,'litre':1,'liters':1,'litres':1,
+                    'ml':1e-3,'milliliter':1e-3,'millilitre':1e-3,
+                    'dl':0.1,'cl':0.01,
+                    'gal':3.78541,'gallon':3.78541,'gallons':3.78541,
+                    'pt':0.473176,'pint':0.473176,'pints':0.473176,
+                    'qt':0.946353,'quart':0.946353,'quarts':0.946353,
+                    'floz':0.0295735,'fl oz':0.0295735}
+            # Area → m²
+            _AREA = {'m2':1,'m²':1,'sqm':1,
+                     'cm2':1e-4,'cm²':1e-4,
+                     'km2':1e6,'km²':1e6,
+                     'ft2':0.092903,'ft²':0.092903,'sqft':0.092903,
+                     'in2':6.4516e-4,'in²':6.4516e-4,
+                     'ha':1e4,'hectare':1e4,'hectares':1e4,
+                     'ac':4046.86,'acre':4046.86,'acres':4046.86}
+            # Speed → m/s
+            _SPD = {'m/s':1,'ms':1,
+                    'km/h':1/3.6,'kmh':1/3.6,'kph':1/3.6,
+                    'mph':0.44704,'mi/h':0.44704,
+                    'kn':0.514444,'knot':0.514444,'knots':0.514444}
+            # Data → bytes
+            _DATA = {'b':1,'byte':1,'bytes':1,
+                     'kb':1024,'kilobyte':1024,'kilobytes':1024,
+                     'mb':1024**2,'megabyte':1024**2,'megabytes':1024**2,
+                     'gb':1024**3,'gigabyte':1024**3,'gigabytes':1024**3,
+                     'tb':1024**4,'terabyte':1024**4,'terabytes':1024**4,
+                     'pb':1024**5,'petabyte':1024**5,'petabytes':1024**5}
+            # Time → seconds
+            _TIME = {'s':1,'sec':1,'second':1,'seconds':1,
+                     'ms':1e-3,'millisecond':1e-3,'milliseconds':1e-3,
+                     'min':60,'minute':60,'minutes':60,
+                     'h':3600,'hr':3600,'hour':3600,'hours':3600,
+                     'd':86400,'day':86400,'days':86400,
+                     'w':604800,'week':604800,'weeks':604800,
+                     'mo':2592000,'month':2592000,'months':2592000,
+                     'yr':31536000,'year':31536000,'years':31536000}
+
+            def _fmt(v):
+                if v == 0: return '0'
+                if isinstance(v, float) and v.is_integer() and abs(v) < 1e15:
+                    return str(int(v))
+                return f'{v:.10g}'
+
+            def _try_tables(tables, f, t, amt):
+                for tbl in tables:
+                    if f in tbl and t in tbl:
+                        si = amt * tbl[f]
+                        return _fmt(si / tbl[t])
+                return None
+
+            # Temperature (special case)
+            _temp_aliases = {'c':'c','celsius':'c','°c':'c',
+                             'f':'f','fahrenheit':'f','°f':'f',
+                             'k':'k','kelvin':'k'}
+            _fa, _ta = _temp_aliases.get(_from), _temp_aliases.get(_to)
+            result_str = None
+            if _fa and _ta and _fa != _ta:
+                if _fa == 'c' and _ta == 'f':
+                    result_str = _fmt(_amt_f * 9/5 + 32)
+                elif _fa == 'f' and _ta == 'c':
+                    result_str = _fmt((_amt_f - 32) * 5/9)
+                elif _fa == 'c' and _ta == 'k':
+                    result_str = _fmt(_amt_f + 273.15)
+                elif _fa == 'k' and _ta == 'c':
+                    result_str = _fmt(_amt_f - 273.15)
+                elif _fa == 'f' and _ta == 'k':
+                    result_str = _fmt((_amt_f - 32) * 5/9 + 273.15)
+                elif _fa == 'k' and _ta == 'f':
+                    result_str = _fmt((_amt_f - 273.15) * 9/5 + 32)
+            if result_str is None:
+                result_str = _try_tables([_LEN, _MASS, _VOL, _AREA, _SPD, _DATA, _TIME], _from, _to, _amt_f)
+
+            if result_str is not None:
+                _from_disp = _unit_m.group(2)
+                _to_disp   = _unit_m.group(3)
+                logging.info(f"Regex Unit: {_amt_raw} {_from_disp} -> {result_str} {_to_disp}")
+                return jsonify({"actions": [{"type": "unit", "amount": _amt_raw,
+                                             "from_unit": _from_disp, "to_unit": _to_disp,
+                                             "converted_value": result_str}], "chips": []})
+        except Exception as _ue:
+            logging.warning(f"Unit fast path error: {_ue}")
+
     # 1.75 Currency Conversion Fast Path (regex → live rate, no LLM needed)
     _CURRENCY_RE = re.compile(
         r'^(?:convert\s+)?(\d+(?:[.,]\d+)?)\s*([a-zA-Z]{2,4})\s+(?:to|in|na|w|do|auf|en|à)\s+([a-zA-Z]{2,4})$',
