@@ -659,7 +659,7 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _pool:
         _loc_fut = _pool.submit(get_ip_location)
-        _mem_fut = _pool.submit(get_user_memory, query)
+        _mem_fut = _pool.submit(get_user_memory, None)
         user_loc = _loc_fut.result()
         user_personal_context = _mem_fut.result()
 
@@ -690,11 +690,13 @@ Location: {user_loc} | Date: {current_date}
 - **create_file** — create a new text file with content; use for any "create/write/save a file" request; defaults to ~/Desktop; ALWAYS prefer this over run_terminal for file creation
 - **edit_file** — edit an existing file by replacing a specific text snippet with new text; use for any "edit/update/modify/change/fix" file request; first find the file and read its content, then call this with the exact old_text and new_text; ALWAYS prefer this over run_terminal for file edits
 - **compress** — compress files or folders into a ZIP archive; use for any "compress/zip/archive/bundle" request; accepts multiple paths; ALWAYS prefer this over run_terminal for compression
-- **run_terminal** — execute any shell command on macOS (defaults write, osascript, pmset, diskutil, etc.); NEVER tell user to open Terminal manually
+- **run_terminal** — execute any shell command on macOS (defaults write, pmset, diskutil, etc.); NEVER tell user to open Terminal manually; NEVER use run_terminal for tasks that have a dedicated tool (send_email, get_unread_emails, get_calendar_events, create_calendar_event, install_app, uninstall_app, create_file, edit_file, compress, find_file, organize_folder)
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request
-- **send_email** — send an email via macOS Mail app; params: to (address), subject, body; email is sent automatically — do NOT tell user to click Send
-- **get_unread_emails** — get recent unread emails from macOS Mail app; optional param: limit (default 5)
+- **send_email** — send an email via macOS Mail app; params: to (address), subject, body; email is sent automatically — do NOT tell user to click Send; ALWAYS use this instead of run_terminal for sending emails
+- **get_unread_emails** — get recent unread emails from macOS Mail app; optional param: limit (default 5); SLOW (~10s) — only call when user explicitly asks about emails; ALWAYS use this instead of run_terminal for reading emails
+- **get_calendar_events** — SLOW (~10s) — only call when user explicitly asks about calendar/schedule; ALWAYS use this instead of run_terminal for calendar queries
+- **create_calendar_event** — create a new calendar event; params: title, start_iso (YYYY-MM-DD HH:MM:SS), duration_minutes (default 60), description; ALWAYS use this instead of run_terminal for creating events
 
 Memory usage rules:
 - Call **memory_recall** proactively when the answer might depend on something the user told you before.
@@ -705,6 +707,11 @@ Memory usage rules:
 - Privacy: Use memory naturally. If asked "what do you know about me?", summarize key facts conversationally. Do NOT list email addresses, passwords, or sensitive data unless explicitly asked.
 
 Use tools proactively. Do NOT pretend to search or recall — actually call the tool.
+IMPORTANT efficiency rules:
+- Do NOT call more than 3 tools in a single iteration. Pick the most relevant ones.
+- If memory_recall returns nothing for a person's contact info, ASK the user instead of searching files/emails repeatedly.
+- When sending email: if you don't know the recipient's address after one memory_recall, ask the user. Do NOT waste time searching files, emails, and calendar.
+- Match the email subject/body to the user's EXACT request. Read the query carefully.
 
 ---
 ## ACTIONS — output a ```json``` block for every action
@@ -978,6 +985,10 @@ Available settings and values:
 
                         # Execute each tool and show real-time progress
                         for tc in tool_calls:
+                            # Check abort before each tool execution
+                            if model_manager.abort_fast_event.is_set():
+                                logging.info("Chat Request Aborted before tool execution.")
+                                return
                             tool_start = time.time()
                             tool_name = tc["function"]["name"]
                             try:
@@ -1003,6 +1014,10 @@ Available settings and values:
                             })
 
                             result = execute_tool(tool_name, args)
+                            # Check abort after tool execution (tool may have been slow)
+                            if model_manager.abort_fast_event.is_set():
+                                logging.info("Chat Request Aborted after tool execution.")
+                                return
                             if result and "[Permission required]" in str(result):
                                 has_pending_trust = True
                             tool_dur = time.time() - tool_start
@@ -1092,7 +1107,7 @@ Available settings and values:
 
                 # Max tool iterations reached
                 logging.warning("[tool] Max tool iterations reached in streaming mode")
-                yield ("final", {"answer": "I got stuck calling tools. Please try again.", "actions": [], "thinking": accumulated_tool_thinking})
+                yield ("final", {"answer": "I got stuck calling tools. Please try again.", "actions": [], "thinking": thinking_content})
 
             else:
                 # ── Non-streaming with tool-calling loop ─────────────────────

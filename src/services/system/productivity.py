@@ -9,7 +9,7 @@ def _run_osascript(script: str) -> str:
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=10
         )
         if result.returncode != 0:
             logging.error(f"[productivity] AppleScript error: {result.stderr}")

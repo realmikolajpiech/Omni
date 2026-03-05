@@ -245,6 +245,11 @@ class XAIMainWrapper:
         if tools:
             extra["tools"] = tools
 
+        # Limit reasoning effort for reasoning models to reduce thinking time
+        # Note: xAI grok models don't support reasoning_effort parameter
+        if "reasoning" in self.model and "grok" not in self.model:
+            extra["reasoning_effort"] = "low"
+
         start_time = time.time()
 
         if stream:
