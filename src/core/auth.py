@@ -72,8 +72,21 @@ def remove_listener(fn):
 
 # ── Session persistence ────────────────────────────────────────────────────────
 
-def load_saved_session():
-    """Load stored tokens and refresh them in a background thread."""
+def load_saved_session(on_done=None):
+    """Load stored tokens and refresh them in a background thread.
+
+    on_done() is called on the background thread after the refresh completes
+    (whether it succeeds or fails), so callers can chain work that needs the
+    session to be populated first.
+    """
+    def _run(rt):
+        _refresh_tokens(rt)
+        if on_done:
+            try:
+                on_done()
+            except Exception:
+                pass
+
     try:
         if not os.path.exists(_TOKEN_FILE):
             return
@@ -81,7 +94,7 @@ def load_saved_session():
             data = json.load(f)
         rt = data.get("refresh_token", "")
         if rt:
-            threading.Thread(target=lambda: _refresh_tokens(rt), daemon=True).start()
+            threading.Thread(target=_run, args=(rt,), daemon=True).start()
     except Exception as e:
         logging.debug(f"[auth] load_saved_session: {e}")
 
@@ -150,6 +163,7 @@ def sign_up(email: str, password: str) -> tuple[bool, str]:
 
 
 def sign_in(email: str, password: str) -> tuple[bool, str]:
+    import urllib.error
     try:
         payload = json.dumps({"email": email.strip(), "password": password}).encode()
         req = urllib.request.Request(
@@ -166,6 +180,13 @@ def sign_in(email: str, password: str) -> tuple[bool, str]:
 
         _save_session(data["access_token"], data.get("refresh_token", ""), data.get("user", {}))
         return True, "Signed in!"
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+            msg = body.get("error_description") or body.get("msg") or body.get("error") or "Sign-in failed."
+        except Exception:
+            msg = "Invalid email or password."
+        return False, msg
     except Exception as e:
         return False, f"Connection error: {e}"
 

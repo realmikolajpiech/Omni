@@ -83,11 +83,34 @@ def _fetch_status() -> dict:
     if _ss.get("dev_pro_override", False):
         return {"plan": "pro", "daily_usage": 0, "daily_limit": 999}
 
-    try:
-        # Include JWT if the user is logged in
-        from src.core import auth as _auth
-        token = _auth.get_access_token()
+    from src.core import auth as _auth
+    from src.core.config import SUPABASE_URL, SUPABASE_ANON_KEY
+    token = _auth.get_access_token()
 
+    # Primary check: query the subscriptions table directly with the user's JWT.
+    # RLS ensures they can only read their own row. This is the most reliable
+    # source of truth and doesn't depend on the worker or KV being correct.
+    print(f"[subscription] token={'YES' if token else 'NO'}")
+    if token:
+        try:
+            req = urllib.request.Request(
+                f"{SUPABASE_URL}/rest/v1/subscriptions"
+                f"?select=plan,status&limit=1",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey":        SUPABASE_ANON_KEY,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as r:
+                rows = json.loads(r.read())
+            print(f"[subscription] supabase rows: {rows}")
+            if rows and rows[0].get("plan") == "pro" and rows[0].get("status") == "active":
+                return {"plan": "pro", "daily_usage": 0, "daily_limit": 999, "error": None}
+        except Exception as e:
+            print(f"[subscription] supabase check failed: {e}")
+
+    # Fallback: ask the worker (handles anonymous device-ID rate limiting too).
+    try:
         headers = {
             "X-Omni-Secret": OMNI_SECRET,
             "X-Device-ID":   DEVICE_ID,

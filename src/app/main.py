@@ -175,8 +175,10 @@ def main():
     from src.core import subscription as _subscription
     from src.services.sync import memory_sync as _memory_sync
 
-    _auth.load_saved_session()
-    _subscription.refresh_status()
+    # Pass refresh_status as the on_done callback so it runs *after* the saved
+    # token is refreshed, avoiding a race where the status fetch fires before
+    # the session is loaded and gets a "free" response from the worker.
+    _auth.load_saved_session(on_done=_subscription.refresh_status)
     _memory_sync.start(_auth.get_access_token)
 
     # Global Hotkey Setup

@@ -895,7 +895,7 @@ class SettingsPanel(QWidget):
         self._dev_update_toggle_text()
         # Immediately re-fetch subscription so the Account tab reflects the change.
         subscription.refresh_status(
-            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+            callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
         )
 
     # ── Logged-out: sign-in / sign-up form ───────────────────────────
@@ -1363,7 +1363,7 @@ class SettingsPanel(QWidget):
         self.account_stack.setCurrentIndex(1 if logged_in else 0)
 
         def _on_done(status):
-            QTimer.singleShot(0, lambda: self._update_account_ui(status))
+            self._dispatch.emit(lambda: self._update_account_ui(status))
 
         if logged_in:
             user = auth.get_user() or {}
@@ -1381,6 +1381,7 @@ class SettingsPanel(QWidget):
         self._update_sync_ui(memory_sync.get_state())
 
     def _update_account_ui(self, status: dict):
+        print(f"[ui] _update_account_ui called: plan={status.get('plan')}")
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("↻")
 
@@ -1583,7 +1584,7 @@ class SettingsPanel(QWidget):
                     if ok:
                         self.refresh_account()
                         subscription.refresh_status(
-                            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+                            callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
                         )
                         QTimer.singleShot(300, self._show_secure_account_prompt)
                     else:
@@ -1594,7 +1595,7 @@ class SettingsPanel(QWidget):
                         if hasattr(self, "upgrade_status_lbl_login"):
                             self.upgrade_status_lbl_login.setText(ok_msg)
                         subscription.refresh_status(
-                            callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+                            callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
                         )
                 QTimer.singleShot(0, _done)
 
@@ -1603,7 +1604,7 @@ class SettingsPanel(QWidget):
             # User was already logged in, or no magic link available — just refresh.
             self.refresh_account()
             subscription.refresh_status(
-                callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s))
+                callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
             )
             if hasattr(self, "upgrade_status_lbl"):
                 self.upgrade_status_lbl.setText("Payment confirmed! Plan updated.")
@@ -1680,7 +1681,7 @@ class SettingsPanel(QWidget):
                 if ok:
                     self.auth_pass_edit.clear()
                     self.refresh_account()
-                    subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
+                    subscription.refresh_status(callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s)))
                 else:
                     self._account_status(msg, error=True)
             self._dispatch.emit(_done)
@@ -1713,7 +1714,7 @@ class SettingsPanel(QWidget):
                 self._set_auth_busy(False)
                 if ok:
                     self.refresh_account()
-                    subscription.refresh_status(callback=lambda s: QTimer.singleShot(0, lambda: self._update_account_ui(s)))
+                    subscription.refresh_status(callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s)))
                 else:
                     self._account_status(msg, error=True)
             self._dispatch.emit(_finish)
@@ -1755,7 +1756,7 @@ class SettingsPanel(QWidget):
                 self.sync_btn.setEnabled(True)
                 self.sync_btn.setText("Sync Now")
                 self._update_sync_ui(state)
-            QTimer.singleShot(0, _done)
+            self._dispatch.emit(_done)
 
         memory_sync.add_listener(_on_sync)
         memory_sync.sync_now()

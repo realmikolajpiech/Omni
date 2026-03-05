@@ -13,6 +13,11 @@
  *   an authenticated user (plan looked up by user_id).
  *   Otherwise falls back to X-Device-ID for anonymous free-tier rate limiting.
  *
+ * Plan resolution (in priority order):
+ *   1. Supabase user_metadata.plan == "pro"  (set by markProForId, persists across logins)
+ *   2. SUBSCRIPTIONS KV[user_id] == "pro"    (fast cache, same data)
+ *   3. SUBSCRIPTIONS KV[device_id] == "pro"  (anonymous / pre-login fallback)
+ *
  * KV namespaces (bound in wrangler.toml):
  *   USAGE         key: "{id}:{YYYY-MM-DD}" → usage count string  (TTL 2 days)
  *   SUBSCRIPTIONS key: "{user_id}"         → "pro" | "free"
@@ -221,7 +226,8 @@ async function handleCreateCheckoutSession(request, env) {
   let userId = null;
   if (authHeader.startsWith("Bearer ") && env.SUPABASE_URL && env.SUPABASE_ANON_KEY) {
     const token = authHeader.slice(7);
-    userId = await validateSupabaseToken(token, env);
+    const user = await validateSupabaseToken(token, env);
+    userId = user?.id ?? null;
   }
   const deviceId = request.headers.get("X-Device-ID") || "unknown";
 
@@ -294,7 +300,7 @@ async function handlePaymentWebhook(request, env) {
   // 1) Legacy simple webhook shape (kept for backwards compatibility)
   if (body.event === "payment.completed" && body.user_id) {
     const userId = body.user_id;
-    await markProForId(userId, null, env);
+    await markProForId(userId, null, null, env);
     return resp({ received: true, source: "legacy" });
   }
 
@@ -366,6 +372,13 @@ async function handlePaymentWebhook(request, env) {
     return resp({ received: true, ignored: true, reason: "unknown_product", product_id: productId });
   }
 
+  // Extract dodo subscription id if present
+  const dodoSubscriptionId =
+    payment.subscription_id ||
+    payment.subscriptionId ||
+    data.subscription_id ||
+    null;
+
   // Identity resolution: prefer explicit user_id from metadata, then device_id.
   const explicitUserId =
     body.user_id ||
@@ -395,7 +408,7 @@ async function handlePaymentWebhook(request, env) {
   if (!primaryId) {
     return resp({ received: true, ignored: true, reason: "missing_identity" });
   }
-  await markProForId(primaryId, billingInterval, env);
+  await markProForId(primaryId, billingInterval, dodoSubscriptionId, env);
 
   // Also immediately unlock the device (user may not have logged in yet).
   if (deviceId && deviceId !== primaryId) {
@@ -423,22 +436,25 @@ async function handlePaymentWebhook(request, env) {
   return resp({ received: true, source: "dodo", billing_interval: billingInterval });
 }
 
-// Mark an id (Supabase user_id or device_id) as Pro in KV and (optionally) Supabase user_metadata.
-async function markProForId(id, billingInterval, env) {
+// Mark an id (Supabase user_id or device_id) as Pro in KV, Supabase user_metadata,
+// and the subscriptions table.
+async function markProForId(id, billingInterval, dodoSubscriptionId, env) {
   // Fast path: KV used by the worker for rate limiting.
   await env.SUBSCRIPTIONS.put(id, "pro");
 
-  // If this looks like a Supabase UUID and we have admin credentials, store plan on the user.
+  // If this looks like a Supabase UUID and we have admin credentials,
+  // persist plan to user_metadata (so every future JWT contains plan:"pro")
+  // and write to the subscriptions table.
   const isUuidV4 =
     typeof id === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 
   if (isUuidV4 && env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY) {
     const metadata = { plan: "pro" };
-    if (billingInterval) {
-      metadata.billing_interval = billingInterval;
-    }
+    if (billingInterval) metadata.billing_interval = billingInterval;
 
+    // 1. Persist to Supabase auth user_metadata — survives KV expiry and is
+    //    embedded in every future JWT, making plan detection reliable.
     await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users/${id}`, {
       method: "PUT",
       headers: {
@@ -447,8 +463,65 @@ async function markProForId(id, billingInterval, env) {
         "apikey": env.SUPABASE_SERVICE_KEY,
       },
       body: JSON.stringify({ user_metadata: metadata }),
-    });
+    }).catch(() => {});
+
+    // 2. Upsert into the subscriptions table for queryability and history.
+    //    Wrapped in try/catch — safe to fail if the table hasn't been created yet.
+    await upsertSubscription({
+      userId: id,
+      plan: "pro",
+      status: "active",
+      interval: billingInterval,
+      dodoSubscriptionId,
+      env,
+    }).catch(() => {});
   }
+}
+
+// Query the subscriptions table to check if a user has an active pro plan.
+async function isProInSubscriptionsTable(userId, env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return false;
+  try {
+    const res = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${userId}&plan=eq.pro&status=eq.active&select=user_id&limit=1`,
+      {
+        headers: {
+          "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+          "apikey":        env.SUPABASE_SERVICE_KEY,
+        },
+      }
+    );
+    if (!res.ok) return false;
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Upsert a row in public.subscriptions via the Supabase REST API (service role).
+async function upsertSubscription({ userId, plan, status, interval, dodoSubscriptionId, env }) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return;
+
+  const row = {
+    user_id: userId,
+    plan,
+    status,
+    updated_at: new Date().toISOString(),
+  };
+  if (interval)            row.interval             = interval;
+  if (dodoSubscriptionId)  row.dodo_subscription_id = dodoSubscriptionId;
+
+  await fetch(`${env.SUPABASE_URL}/rest/v1/subscriptions`, {
+    method: "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      "apikey":        env.SUPABASE_SERVICE_KEY,
+      "Prefer":        "resolution=merge-duplicates",
+    },
+    body: JSON.stringify(row),
+  });
 }
 
 // Verify Standard Webhooks signature (used by Dodo Payments).
@@ -491,36 +564,126 @@ async function verifyStandardWebhookSignature(rawBody, request, secret) {
 
 // ── Identity resolution ───────────────────────────────────────────────────────
 // Returns { id, isPro } — id is either supabase user_id or device_id fallback.
+// Plan resolution priority:
+//   1. user_metadata.plan from Supabase (persisted by markProForId, in every JWT)
+//   2. SUBSCRIPTIONS KV[user_id]
+//   3. SUBSCRIPTIONS KV[device_id]   (pre-login fallback)
 
 async function resolveIdentity(request, env) {
   const authHeader = request.headers.get("Authorization") || "";
 
-  if (authHeader.startsWith("Bearer ") && env.SUPABASE_URL && env.SUPABASE_ANON_KEY) {
+  if (authHeader.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
-    const userId = await validateSupabaseToken(token, env);
 
-    if (userId) {
-      const isPro = (await env.SUBSCRIPTIONS.get(userId)) === "pro";
-      return { id: userId, isPro };
+    // Full path: validate JWT via Supabase, then check all three sources.
+    if (env.SUPABASE_URL && env.SUPABASE_ANON_KEY) {
+      const user = await validateSupabaseToken(token, env);
+
+      if (user) {
+        // 1. JWT payload: user_metadata.plan set by markProForId via admin API.
+        //    Fastest — no extra network call. Present in every token issued after
+        //    the user was marked pro.
+        if (user.userMetadata?.plan === "pro") {
+          return { id: user.id, isPro: true };
+        }
+
+        // 2. KV cache: written by markProForId on every payment event.
+        if ((await env.SUBSCRIPTIONS.get(user.id)) === "pro") {
+          return { id: user.id, isPro: true };
+        }
+
+        // 3. Subscriptions table: authoritative DB record. Used as fallback when
+        //    user_metadata or KV is stale/missing (e.g. admin update failed).
+        if (await isProInSubscriptionsTable(user.id, env)) {
+          // Backfill KV so future checks skip this round-trip.
+          await env.SUBSCRIPTIONS.put(user.id, "pro");
+          return { id: user.id, isPro: true };
+        }
+
+        return { id: user.id, isPro: false };
+      }
+    }
+
+    // Fallback path: SUPABASE_ANON_KEY not configured, or Supabase validation
+    // failed. Decode the JWT locally to get the user_id, then check only our
+    // server-side sources (KV and subscriptions table) which are authoritative.
+    // We don't trust JWT payload claims (user_metadata) without full validation,
+    // but the user_id alone is enough to look up our own records.
+    const payload = decodeJwtPayload(token);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload?.sub && (!payload.exp || payload.exp >= nowSec)) {
+      const userId = payload.sub;
+      if ((await env.SUBSCRIPTIONS.get(userId)) === "pro") {
+        return { id: userId, isPro: true };
+      }
+      if (await isProInSubscriptionsTable(userId, env)) {
+        await env.SUBSCRIPTIONS.put(userId, "pro");
+        return { id: userId, isPro: true };
+      }
+      return { id: userId, isPro: false };
     }
   }
 
-  // Fallback: anonymous device-ID
+  // Fallback: anonymous device-ID (used before login, or if JWT is invalid).
   const deviceId = request.headers.get("X-Device-ID") || "unknown";
   const isPro = (await env.SUBSCRIPTIONS.get(deviceId)) === "pro";
   return { id: deviceId, isPro };
 }
 
 // ── Supabase token validation ─────────────────────────────────────────────────
-// Calls /auth/v1/user to validate the JWT. Result cached in KV for 5 minutes
-// so each unique token only triggers one Supabase round-trip per 5-min window.
+// Decodes the JWT payload directly (no network call needed for the claims) to get
+// user_id and user_metadata.plan.  Then verifies liveness via /auth/v1/user,
+// cached in USAGE KV for 5 minutes so each unique token only hits Supabase once.
+//
+// Decoding the payload locally is reliable because:
+//   - JWTs are signed by Supabase — we trust the claims if the token passes
+//     the liveness check (or is recently cached as valid).
+//   - user_metadata is embedded in the JWT at issuance time, so plan:"pro" set
+//     via the admin API will appear in the very next token the user receives.
+
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return null;
+    // Base64url → Base64 → JSON
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(b64);
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
 
 async function validateSupabaseToken(token, env) {
-  // Use a short prefix of the token as the cache key (tokens are long; first 40 chars are unique enough)
-  const cacheKey = `jwt:${token.slice(-40)}`;
-  const cached = await env.USAGE.get(cacheKey);
-  if (cached) return cached === "invalid" ? null : cached;
+  // ── Fast path: decode the JWT payload directly ──────────────────────────────
+  // user_metadata is embedded in the token at issuance time. If markProForId
+  // successfully updated the Supabase user, the next login JWT will have
+  // user_metadata.plan = "pro" in it — readable without any network call.
+  const payload = decodeJwtPayload(token);
+  if (!payload) return null;
 
+  // Reject locally if the token is already expired.
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.exp && payload.exp < nowSec) return null;
+
+  const userId       = payload.sub;
+  const userMetadata = payload.user_metadata || {};
+
+  if (!userId) return null;
+
+  // If plan is already in the JWT claims we can skip the Supabase round-trip
+  // for the liveness check (use KV cache to rate-limit full verification calls).
+  const cacheKey = `jwt:${token.slice(-40)}`;
+  const cached   = await env.USAGE.get(cacheKey);
+
+  if (cached && cached !== "invalid") {
+    // Token was verified recently — trust the JWT payload claims.
+    return { id: userId, userMetadata };
+  }
+
+  if (cached === "invalid") return null;
+
+  // ── Slow path: verify token with Supabase (once per 5 min per unique token) ─
   try {
     const res = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
       headers: {
@@ -534,10 +697,12 @@ async function validateSupabaseToken(token, env) {
       return null;
     }
 
-    const user = await res.json();
-    const userId = user.id;
-    await env.USAGE.put(cacheKey, userId, { expirationTtl: 300 }); // 5-min cache
-    return userId;
+    // Token is valid — cache a simple marker so we don't re-verify for 5 min.
+    await env.USAGE.put(cacheKey, "ok", { expirationTtl: 300 });
+
+    // Return id + userMetadata straight from the JWT payload (always up-to-date
+    // relative to when this token was issued, which is what we want).
+    return { id: userId, userMetadata };
   } catch {
     return null;
   }
@@ -602,11 +767,13 @@ async function handleProvision(request, env) {
   let customerEmail    = null;
   let isValid          = false;
   let billingInterval  = null;
+  let dodoSubscriptionId = null;
 
   const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
   const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
 
   if (subscriptionId) {
+    dodoSubscriptionId = subscriptionId;
     const r = await fetch(`${base}/subscriptions/${subscriptionId}`, {
       headers: { "Authorization": `Bearer ${env.DODO_PAYMENTS_API_KEY}` },
     });
@@ -627,8 +794,9 @@ async function handleProvision(request, env) {
     if (r.ok) {
       const data = await r.json();
       if (data.status === "succeeded" || data.status === "paid" || data.status === "captured") {
-        isValid       = true;
-        customerEmail = (data.customer && data.customer.email) || data.customer_email || null;
+        isValid          = true;
+        customerEmail    = (data.customer && data.customer.email) || data.customer_email || null;
+        dodoSubscriptionId = data.subscription_id || null;
       }
     }
   }
@@ -639,10 +807,10 @@ async function handleProvision(request, env) {
   if (!customerEmail)
     return corsResp({ error: "Customer email not found in payment" }, 400);
 
-  // Create / find the Supabase user.
+  // Create / find the Supabase user and mark as pro.
   const userId = await findOrCreateSupabaseUser(customerEmail, env);
   if (userId) {
-    await markProForId(userId, billingInterval, env);
+    await markProForId(userId, billingInterval, dodoSubscriptionId, env);
   }
 
   // Generate a one-time setup URL that logs the user in and redirects to the
@@ -650,23 +818,6 @@ async function handleProvision(request, env) {
   const setupUrl = await generateSetupLink(customerEmail, env);
 
   return corsResp({ success: true, email: customerEmail, setup_url: setupUrl });
-}
-
-// Send a magic-link email via Supabase's public OTP endpoint.
-async function sendMagicLinkEmail(email, env) {
-  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return;
-  try {
-    await fetch(`${env.SUPABASE_URL}/auth/v1/otp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": env.SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({ email, create_user: false }),
-    });
-  } catch (_) {
-    // Non-fatal — don't fail the provision if email send fails.
-  }
 }
 
 // ── Supabase user find-or-create ──────────────────────────────────────────────
@@ -707,7 +858,6 @@ async function findOrCreateSupabaseUser(email, env) {
 
 // ── Magic link generation ─────────────────────────────────────────────────────
 // Generates a setup link that redirects to the website account-setup page.
-// The user clicks this to authenticate and then set a password or connect Google.
 
 async function generateSetupLink(email, env) {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return null;
