@@ -787,7 +787,8 @@ class OmniWindow(QWidget):
         if hasattr(self, 'anim_close_group'): self.anim_close_group.stop()
         
         self._is_closing = False # Reset closing flag in case we interrupted a close animation
-        
+        self.is_entry_animating = False  # Reset so adjust_window_height is not blocked
+
         self.is_history_mode = False
         self.follow_up_widget.set_mode("hidden")
         self.frame.set_minimal_mode(True)
@@ -978,26 +979,41 @@ class OmniWindow(QWidget):
 
     def handle_ipc_query(self, query):
         logging.info(f"IPC Query Received: {query}")
-        
-        # Ensure window is visible
-        if not self.isVisible():
-            self.reset_to_search_mode(animate=False)
-            self.chat_history = []
-            self.show()
-            self.center()
-            self.animate_entry()
-        
-        self.raise_()
-        self.activateWindow()
-        
+
         # Clean up query if it has VOICE: prefix
         is_voice = query.startswith("VOICE:")
         if is_voice:
             query = query[6:]
 
+        logging.info(f"[IPC] isVisible={self.isVisible()}, is_history_mode={self.is_history_mode}, "
+                     f"is_entry_animating={getattr(self, 'is_entry_animating', 'N/A')}, "
+                     f"list_count={self.list_widget.count()}")
+
+        if not self.isVisible():
+            # Fresh query from wake word — reset state and show window
+            self.reset_to_search_mode(animate=False)
+            self.chat_history = []
+            self.show()
+            self.center()
+            # Skip animate_entry() — show at full opacity so ThinkingWidget
+            # is visible immediately (entry animation conflicts with height resize)
+            self.setWindowOpacity(1.0)
+            self.is_entry_animating = False
+            self.frame.boost_speed()
+        # else: window already visible — keep current chat state for follow-ups
+
+        # Always clear entry animation flag so adjust_window_height is never blocked
+        self.is_entry_animating = False
+
+        self.raise_()
+        self.activateWindow()
+
         # Set text and submit
         self.input_field.setText(query)
         self.perform_ai_query(query)
+        logging.info(f"[IPC] After perform_ai_query: list_count={self.list_widget.count()}, "
+                     f"list_visible={self.list_widget.isVisible()}, divider_visible={self.divider.isVisible()}, "
+                     f"window_height={self.height()}")
         if is_voice:
             self.voice_triggered_query = True
 
@@ -2822,8 +2838,9 @@ class OmniWindow(QWidget):
         # Reset voice flag — will be re-set after this call if query came from voice
         self.voice_triggered_query = False
 
-        # Stop debounce timer to prevent new fast searches from starting
+        # Stop debounce timers to prevent new fast/local searches from starting
         self.debounce_timer.stop()
+        self.local_search_timer.stop()
 
         # Remember the query text now — input_field may be cleared before on_ai_response fires
         self._current_query = query
@@ -2896,7 +2913,7 @@ class OmniWindow(QWidget):
             self.add_list_item(self.thinking_widget, "thinking")
 
         self.adjust_window_height()
-        
+
         # Screenshot?
         screenshot_b64 = None
         # Logic to decide if we need screenshot is now in AIWorker or Brain
