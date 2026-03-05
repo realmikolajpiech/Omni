@@ -3816,6 +3816,7 @@ class OGPreviewWidget(QWidget):
 
         self.card = QWidget()
         self.card.setObjectName("OGCard")
+        self.card.setCursor(Qt.CursorShape.PointingHandCursor)
         outer.addWidget(self.card)
 
         card_v = QVBoxLayout(self.card)
@@ -3826,80 +3827,92 @@ class OGPreviewWidget(QWidget):
         self.og_banner = QLabel()
         self.og_banner.setObjectName("OGBanner")
         self.og_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.og_banner.setFixedHeight(160)
+        self.og_banner.setFixedHeight(180)
         self.og_banner.setScaledContents(False)
         self.og_banner.hide()
         card_v.addWidget(self.og_banner)
 
-        # --- Header row: favicon + title + domain ---
-        header = QWidget()
-        header.setObjectName("OGHeader")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(16, 14, 16, 10)
-        h_layout.setSpacing(10)
+        # --- Content area ---
+        content = QWidget()
+        content.setObjectName("OGContent")
+        content_v = QVBoxLayout(content)
+        content_v.setContentsMargins(18, 16, 18, 16)
+        content_v.setSpacing(8)
 
-        self.favicon_lbl = QLabel()
-        self.favicon_lbl.setFixedSize(20, 20)
+        # Site name / domain row with favicon
+        site_row = QHBoxLayout()
+        site_row.setSpacing(8)
+
+        # Favicon container
+        fav_wrap = QWidget()
+        fav_wrap.setFixedSize(28, 28)
+        fav_wrap.setObjectName("OGFavWrap")
+        fav_layout = QHBoxLayout(fav_wrap)
+        fav_layout.setContentsMargins(0, 0, 0, 0)
+        self.favicon_lbl = QLabel(fav_wrap)
+        self.favicon_lbl.setFixedSize(16, 16)
         self.favicon_lbl.setScaledContents(True)
+        self.favicon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_placeholder_favicon()
-        h_layout.addWidget(self.favicon_lbl)
+        fav_layout.addWidget(self.favicon_lbl, 0, Qt.AlignmentFlag.AlignCenter)
+        site_row.addWidget(fav_wrap)
 
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
+        self.domain_lbl = QLabel(self._site_name + "  ·  " + self._domain)
+        self.domain_lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        site_row.addWidget(self.domain_lbl)
+        site_row.addStretch()
 
-        title_str = (self._og_data.get("og_title") or self._site_name or self._domain)[:80]
+        # Arrow indicator
+        self.arrow_lbl = QLabel("↗")
+        self.arrow_lbl.setFont(QFont("Manrope", 14))
+        site_row.addWidget(self.arrow_lbl)
+
+        content_v.addLayout(site_row)
+
+        # Title
+        title_str = (self._og_data.get("og_title") or self._site_name or self._domain)[:90]
         self.title_lbl = QLabel(title_str)
         self.title_lbl.setFont(QFont("Manrope", 14, QFont.Weight.DemiBold))
-        self.title_lbl.setWordWrap(False)
-        self.title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        text_col.addWidget(self.title_lbl)
+        self.title_lbl.setWordWrap(True)
+        self.title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        content_v.addWidget(self.title_lbl)
 
-        self.domain_lbl = QLabel(self._domain)
-        self.domain_lbl.setFont(QFont("Manrope", 10))
-        text_col.addWidget(self.domain_lbl)
-
-        h_layout.addLayout(text_col)
-        h_layout.addStretch()
-
-        # Small "Open ↗" button
-        self.open_btn = QLabel(f"Open {self._domain}  ↗")
-        self.open_btn.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
-        self.open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.open_btn.mousePressEvent = lambda _: QDesktopServices.openUrl(QUrl(self._url))
-        h_layout.addWidget(self.open_btn)
-
-        card_v.addWidget(header)
-
-        # --- Description ---
+        # Description
         desc = (self._og_data.get("og_description") or "").strip()
         if desc:
-            self.desc_lbl = QLabel(desc[:200] + ("…" if len(desc) > 200 else ""))
+            self.desc_lbl = QLabel(desc[:180] + ("…" if len(desc) > 180 else ""))
             self.desc_lbl.setFont(QFont("Manrope", 11))
             self.desc_lbl.setWordWrap(True)
-            self.desc_lbl.setContentsMargins(16, 0, 16, 14)
-            card_v.addWidget(self.desc_lbl)
+            content_v.addWidget(self.desc_lbl)
         else:
             self.desc_lbl = None
+
+        card_v.addWidget(content)
+
+        # Remove old open_btn reference
+        self.open_btn = None
 
     # ------------------------------------------------------------------
     def _apply_theme(self):
         dark = self.current_theme == "dark"
         if dark:
-            card_bg    = "rgba(255,255,255,0.05)"
-            card_bdr   = "rgba(255,255,255,0.10)"
+            card_bg    = "rgba(255,255,255,0.06)"
+            card_bdr   = "rgba(255,255,255,0.12)"
+            fav_bg     = "rgba(255,255,255,0.10)"
             title_col  = "#FFFFFF"
             domain_col = "rgba(255,255,255,0.45)"
-            desc_col   = "rgba(255,255,255,0.70)"
-            open_col   = "rgba(255,255,255,0.55)"
-            open_hov   = "#FFFFFF"
+            desc_col   = "rgba(255,255,255,0.60)"
+            arrow_col  = "rgba(255,255,255,0.30)"
+            banner_bg  = "rgba(255,255,255,0.04)"
         else:
             card_bg    = "rgba(0,0,0,0.04)"
             card_bdr   = "rgba(0,0,0,0.10)"
+            fav_bg     = "rgba(0,0,0,0.07)"
             title_col  = "#111111"
-            domain_col = "rgba(0,0,0,0.40)"
-            desc_col   = "rgba(0,0,0,0.65)"
-            open_col   = "rgba(0,0,0,0.45)"
-            open_hov   = "#000000"
+            domain_col = "rgba(0,0,0,0.42)"
+            desc_col   = "rgba(0,0,0,0.58)"
+            arrow_col  = "rgba(0,0,0,0.28)"
+            banner_bg  = "rgba(0,0,0,0.03)"
 
         self.card.setStyleSheet(f"""
             QWidget#OGCard {{
@@ -3907,20 +3920,25 @@ class OGPreviewWidget(QWidget):
                 border: 1px solid {card_bdr};
                 border-radius: 16px;
             }}
-            QWidget#OGHeader {{
+            QWidget#OGContent {{
                 background: transparent;
             }}
+            QWidget#OGFavWrap {{
+                background: {fav_bg};
+                border-radius: 8px;
+                border: none;
+            }}
             QLabel#OGBanner {{
-                background: {card_bg};
-                border-radius: 16px 16px 0px 0px;
+                background: {banner_bg};
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         """)
         self.title_lbl.setStyleSheet(f"color: {title_col}; background: transparent;")
         self.domain_lbl.setStyleSheet(f"color: {domain_col}; background: transparent;")
-        self.open_btn.setStyleSheet(
-            f"color: {open_col}; background: transparent; padding: 4px 8px;"
-            f" border: 1px solid {card_bdr}; border-radius: 10px;"
-        )
+        self.arrow_lbl.setStyleSheet(f"color: {arrow_col}; background: transparent;")
         if self.desc_lbl:
             self.desc_lbl.setStyleSheet(f"color: {desc_col}; background: transparent;")
 
@@ -3930,11 +3948,7 @@ class OGPreviewWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _set_placeholder_favicon(self):
-        dark = self.current_theme == "dark"
-        col = "rgba(255,255,255,0.25)" if dark else "rgba(0,0,0,0.18)"
-        self.favicon_lbl.setStyleSheet(
-            f"background: {col}; border-radius: 4px; border: none;"
-        )
+        self.favicon_lbl.setStyleSheet("background: transparent; border: none;")
 
     def _dl_image(self, url: str, role: str):
         try:
@@ -3951,7 +3965,7 @@ class OGPreviewWidget(QWidget):
             return
         if role == "favicon":
             scaled = px.scaled(
-                20, 20,
+                16, 16,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
@@ -3960,8 +3974,8 @@ class OGPreviewWidget(QWidget):
         elif role == "og":
             w = self.og_banner.width() or 600
             scaled = px.scaledToWidth(w, Qt.TransformationMode.SmoothTransformation)
-            if scaled.height() > 160:
-                scaled = scaled.copy(0, 0, w, 160)
+            if scaled.height() > 180:
+                scaled = scaled.copy(0, 0, w, 180)
             self.og_banner.setPixmap(scaled)
             self.og_banner.show()
             self._update_list_item_size()
@@ -3984,11 +3998,11 @@ class OGPreviewWidget(QWidget):
             p = p.parent()
 
     def sizeHint(self):
-        h = 86
+        h = 90  # base: site row + title + padding
         if self.desc_lbl:
-            h += 20 + self.desc_lbl.sizeHint().height()
+            h += 8 + self.desc_lbl.sizeHint().height()
         if not self.og_banner.isHidden():
-            h += 160
+            h += 180
         return QSize(660, h)
 
 

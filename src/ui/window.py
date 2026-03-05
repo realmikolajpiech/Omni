@@ -1805,9 +1805,19 @@ class OmniWindow(QWidget):
                 new_items_data.append((_ic_key, _ic_data, _create_ic_widget))
 
         # 1. External Actions (from LLM/Fast Search) — always before Wikipedia
+        # Collect URLs already shown via OG preview or QuickURL to avoid duplicates
+        _shown_urls = set()
+        if self.instant_url:
+            _shown_urls.add(self.instant_url[0])
+        if self.og_data:
+            _shown_urls.add(self.og_data.get("source_url", ""))
+
         for act in self.external_actions:
             key = self.get_item_key(act)
             if not key: continue
+            # Skip link actions that duplicate the OG/QuickURL widget
+            if act.get('type') == 'link' and act.get('url') in _shown_urls:
+                continue
 
             def create_act_widget(a=act):
                 if a.get('type') == 'link':

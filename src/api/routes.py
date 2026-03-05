@@ -44,6 +44,47 @@ def _pending_actions_get(pending_id: str) -> Optional[dict]:
         return _PENDING_ACTIONS.get(pending_id)
 
 
+def _llm_person_description(name: str, context: str, safe_fast_completion) -> Optional[str]:
+    """Ask the fast model to write a person description from search context.
+    Returns the description string, or None on failure."""
+    try:
+        out = safe_fast_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Based on the search results, write a concise biography for a person card.\n\n"
+                        "Output exactly two lines:\n"
+                        "NAME: [person's full name only]\n"
+                        "DESCRIPTION: [A third-person summary in 1-2 sentences with specific context "
+                        "(role + organization/school/company/location if available). "
+                        "No handles, follower counts, phone numbers, or raw snippet fragments.]"
+                    ),
+                },
+                {"role": "user", "content": f"Search results about: {name}\n\n{context}\n\nWrite the person card:"},
+            ],
+            max_tokens=150,
+            temperature=0.5,
+            step_name="Person card description",
+        )
+        if out:
+            card_text = out['choices'][0]['message']['content'].strip()
+            logging.info(f"[DEBUG] LLM person description output:\n{card_text}")
+            for part in card_text.split("\n"):
+                part = part.strip()
+                if part.upper().startswith("DESCRIPTION:"):
+                    desc = part.split(":", 1)[1].strip()
+                    if desc:
+                        return desc
+            # Fallback: take non-NAME lines
+            lines = [l.strip() for l in card_text.split("\n") if l.strip() and "NAME:" not in l.upper()]
+            if lines:
+                return " ".join(lines)
+    except Exception as e:
+        logging.error(f"[DEBUG] LLM person description failed: {e}")
+    return None
+
+
 def _parse_fast_action_output(
     *,
     result_text: str,
@@ -216,6 +257,7 @@ def _parse_fast_action_output(
                 logging.info(f"Fast model SEARCH query sanitized: '{raw_q[:80]}' -> '{q}'")
 
             results = []
+            context = ""
             if q.lower() == query.lower() and search_results:
                 logging.info(f"Reusing {len(search_results)} existing search results for SEARCH action")
                 results = search_results
@@ -224,6 +266,19 @@ def _parse_fast_action_output(
                 from src.services.search.web_search import search_api
                 results = search_api(q, categories='general', fast=True)
                 logging.warning(f"[ACTION/SEARCH] search_api({q!r}, fast=True) → {len(results)} results")
+                # Retry with original query or partial words if no results
+                if not results and q.lower() != query.lower():
+                    results = search_api(query, categories='general', fast=True)
+                    logging.warning(f"[ACTION/SEARCH] retry search_api({query!r}, fast=True) → {len(results)} results")
+                if not results:
+                    words = query.strip().split()
+                    if len(words) >= 2:
+                        for word in words:
+                            if len(word) >= 3:
+                                results = search_api(word, categories='general', fast=True)
+                                if results:
+                                    logging.warning(f"[ACTION/SEARCH] partial search_api({word!r}, fast=True) → {len(results)} results")
+                                    break
 
             if results:
                 # Build rich context from top results
@@ -327,6 +382,10 @@ Instructions:
                                 if person_res_fallback:
                                     if person_desc:
                                         person_res_fallback['description'] = person_desc
+                                    else:
+                                        llm_desc = _llm_person_description(person_name, context, safe_fast_completion)
+                                        if llm_desc:
+                                            person_res_fallback['description'] = llm_desc
                                     actions.append(person_res_fallback)
                                 else:
                                     actions.append({
@@ -355,6 +414,10 @@ Instructions:
                 person_result = get_person_result(person_candidate, existing_results=results if results else None)
                 if person_result:
                     logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
+                    if context:
+                        llm_desc = _llm_person_description(person_candidate, context, safe_fast_completion)
+                        if llm_desc:
+                            person_result['description'] = llm_desc
                     actions.append(person_result)
                     continue
 
@@ -442,14 +505,12 @@ Instructions:
 
                 res = get_person_result(target_name, existing_results=search_results)
                 if res:
-                    # If the LLM provided a description, use it (unless it's empty/garbage)
                     if person_desc and len(person_desc) > 10:
                         res['description'] = person_desc
-                    # If LLM description is missing or too short, get_person_result already provided a snippet.
-                    # But we want to ensure we don't overwrite a good snippet with a bad LLM one.
-                    
-                    # Ensure the name in the card matches the best available info
-                    # get_person_result does a good job cleaning the name from the result title.
+                    elif search_context:
+                        llm_desc = _llm_person_description(target_name, search_context, safe_fast_completion)
+                        if llm_desc:
+                            res['description'] = llm_desc
                     actions.append(res)
             
         elif "SEARCH:" in line:
@@ -464,6 +525,10 @@ Instructions:
                 person_res = get_person_result(q_val, existing_results=search_results)
                 if person_res:
                      logging.info(f"Converted SEARCH action to PERSON card for '{q_val}'")
+                     if search_context:
+                         llm_desc = _llm_person_description(q_val, search_context, safe_fast_completion)
+                         if llm_desc:
+                             person_res['description'] = llm_desc
                      actions.append(person_res)
                      continue # Skip adding the search action if we found a person card
 
@@ -559,10 +624,15 @@ Instructions:
                 a['name'] = query
                 # Also try to re-fetch description if it's empty
                 if not a.get('description'):
-                     res = get_person_result(query, existing_results=search_results)
-                     if res:
-                         a['description'] = res.get('description')
-                         a['image'] = res.get('image')
+                     if search_context:
+                         llm_desc = _llm_person_description(query, search_context, safe_fast_completion)
+                         if llm_desc:
+                             a['description'] = llm_desc
+                     if not a.get('description'):
+                         res = get_person_result(query, existing_results=search_results)
+                         if res:
+                             a['description'] = res.get('description')
+                             a['image'] = res.get('image')
 
     for a in actions:
         if a.get('type') == 'link':
@@ -1424,6 +1494,25 @@ def action_pending_endpoint():
         from src.services.search.web_search import search_api
         tool_results = search_api(tool_q, categories='general', fast=True)
         logging.warning(f"[ACTION/PENDING] search_api({tool_q!r}, fast=True) → {len(tool_results)} results")
+
+        # If no results, retry with the original user query (may differ from tool_q)
+        if not tool_results and tool_q != query:
+            logging.info(f"[ACTION/PENDING] Retrying search with original query: {query!r}")
+            tool_results = search_api(query, categories='general', fast=True)
+            logging.warning(f"[ACTION/PENDING] search_api({query!r}, fast=True) → {len(tool_results)} results")
+
+        # If still no results and query has multiple words, try individual words
+        if not tool_results:
+            words = query.strip().split()
+            if len(words) >= 2:
+                for word in words:
+                    if len(word) >= 3:
+                        logging.info(f"[ACTION/PENDING] Retrying with partial query: {word!r}")
+                        tool_results = search_api(word, categories='general', fast=True)
+                        if tool_results:
+                            logging.warning(f"[ACTION/PENDING] search_api({word!r}, fast=True) → {len(tool_results)} results")
+                            break
+
         if tool_results:
             search_results.extend(tool_results)
 
