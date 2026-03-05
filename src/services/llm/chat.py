@@ -33,7 +33,9 @@ _TOOL_META = {
     "uninstall_app": {"icon": "🗑️", "label": "Uninstall"},
     "find_file":     {"icon": "🔍", "label": "Find file"},
     "create_file":   {"icon": "📝", "label": "Create file"},
+    "edit_file":     {"icon": "✏️", "label": "Edit file"},
     "organize_folder": {"icon": "📁", "label": "Organize"},
+    "compress":      {"icon": "🗜️", "label": "Compress"},
 }
 
 
@@ -686,6 +688,8 @@ Location: {user_loc} | Date: {current_date}
 - **memory_delete** — forget/remove a memory when user asks you to or when info is outdated
 - **find_file** — locate a file or folder by name on the user's Mac; returns exact paths; use BEFORE deleting, moving, or opening a file to get its precise path
 - **create_file** — create a new text file with content; use for any "create/write/save a file" request; defaults to ~/Desktop; ALWAYS prefer this over run_terminal for file creation
+- **edit_file** — edit an existing file by replacing a specific text snippet with new text; use for any "edit/update/modify/change/fix" file request; first find the file and read its content, then call this with the exact old_text and new_text; ALWAYS prefer this over run_terminal for file edits
+- **compress** — compress files or folders into a ZIP archive; use for any "compress/zip/archive/bundle" request; accepts multiple paths; ALWAYS prefer this over run_terminal for compression
 - **run_terminal** — execute any shell command on macOS (defaults write, osascript, pmset, diskutil, etc.); NEVER tell user to open Terminal manually
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request

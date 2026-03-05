@@ -387,6 +387,63 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Edit an existing file by replacing a specific snippet of text with new text. "
+                "Use when the user asks to 'edit', 'update', 'modify', 'change', or 'fix' content in a file. "
+                "First use find_file to locate the file, then run_terminal with 'cat' to read its content, "
+                "then call this tool with the exact old text and the new replacement text. "
+                "Always prefer this over run_terminal for file edits."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to edit, e.g. '/Users/oskar/Desktop/notes.txt'.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "The exact text snippet in the file to find and replace. Must match the file content exactly.",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "The replacement text to insert in place of old_text.",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compress",
+            "description": (
+                "Compress files or folders into a ZIP archive. "
+                "Use when the user asks to 'compress', 'zip', 'archive', or 'bundle' files or folders. "
+                "Can compress a single file, multiple files, or an entire folder."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of absolute file or folder paths to compress, e.g. ['/Users/oskar/Desktop/report.pdf', '/Users/oskar/Desktop/photos'].",
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "Optional output ZIP path. If omitted, creates the archive next to the first input path with a .zip extension.",
+                    },
+                },
+                "required": ["paths"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_file",
             "description": (
                 "Find files or folders on the user's Mac by name or partial name. "
@@ -467,6 +524,17 @@ def execute_tool(name: str, arguments: dict) -> str:
                 arguments.get("filename", ""),
                 arguments.get("content", ""),
                 arguments.get("folder", ""),
+            )
+        elif name == "compress":
+            return _tool_compress(
+                arguments.get("paths", []),
+                arguments.get("output", ""),
+            )
+        elif name == "edit_file":
+            return _tool_edit_file(
+                arguments.get("path", ""),
+                arguments.get("old_text", ""),
+                arguments.get("new_text", ""),
             )
         elif name == "find_file":
             return _tool_find_file(
@@ -812,6 +880,114 @@ def _tool_create_file(filename: str, content: str, folder: str = "") -> str:
         return f"Created: {file_path}"
     except Exception as e:
         return f"Error creating file: {e}"
+
+
+def _tool_compress(paths: list, output: str = "") -> str:
+    """Compress files/folders into a ZIP archive. Requires trust level 2."""
+    import os
+    import zipfile
+
+    if not paths:
+        return "Error: no paths provided."
+
+    current = get_effective_trust()
+    if current < 2:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 2,
+            "command":        f"compress {len(paths)} item(s)",
+            "description":    f"Compress {len(paths)} item(s) into a ZIP archive",
+        })
+        return "[Permission required] 'Automation' trust is needed to compress files."
+
+    # Resolve paths
+    resolved = []
+    for p in paths:
+        p = os.path.expanduser(p.strip())
+        if not os.path.exists(p):
+            return f"Error: path not found: {p}"
+        resolved.append(p)
+
+    # Determine output path
+    if output:
+        zip_path = os.path.expanduser(output.strip())
+    else:
+        first = resolved[0]
+        base = first.rstrip("/")
+        zip_path = base + ".zip"
+
+    # Ensure parent dir exists
+    os.makedirs(os.path.dirname(zip_path) or ".", exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for item in resolved:
+                if os.path.isfile(item):
+                    zf.write(item, os.path.basename(item))
+                elif os.path.isdir(item):
+                    base_dir = os.path.dirname(item)
+                    for root, dirs, files in os.walk(item):
+                        for f in files:
+                            full = os.path.join(root, f)
+                            arcname = os.path.relpath(full, base_dir)
+                            zf.write(full, arcname)
+
+        size = os.path.getsize(zip_path)
+        if size < 1024:
+            size_str = f"{size} bytes"
+        elif size < 1024 * 1024:
+            size_str = f"{size / 1024:.1f} KB"
+        else:
+            size_str = f"{size / (1024 * 1024):.1f} MB"
+
+        logging.info(f"[tool:compress] Created {zip_path} ({size_str})")
+        return f"Created: {zip_path} ({size_str})"
+    except Exception as e:
+        return f"Error compressing: {e}"
+
+
+def _tool_edit_file(path: str, old_text: str, new_text: str) -> str:
+    """Edit a file by replacing old_text with new_text. Requires trust level 2."""
+    import os
+
+    path = path.strip()
+    if not path:
+        return "Error: empty path."
+    if not old_text:
+        return "Error: old_text is required."
+
+    current = get_effective_trust()
+    if current < 2:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 2,
+            "command":        f"edit file {path}",
+            "description":    f"Edit file '{os.path.basename(path)}'",
+        })
+        return "[Permission required] 'Automation' trust is needed to edit files."
+
+    path = os.path.expanduser(path)
+    if not os.path.isfile(path):
+        return f"Error: file not found: {path}"
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+    if old_text not in content:
+        return f"Error: old_text not found in {path}. Make sure it matches the file content exactly."
+
+    new_content = content.replace(old_text, new_text, 1)
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        logging.info(f"[tool:edit_file] Edited {path}")
+        return f"Edited: {path}"
+    except Exception as e:
+        return f"Error writing file: {e}"
 
 
 def _tool_find_file(name: str, folder: str = "", include_dirs: bool = True) -> str:
