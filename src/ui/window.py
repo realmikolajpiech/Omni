@@ -2372,7 +2372,11 @@ class OmniWindow(QWidget):
                 fp = self._pending_open_file
                 self._pending_open_file = None
                 if platform.system() == 'Darwin':
-                    subprocess.Popen(['open', fp])
+                    # Reveal archives in Finder instead of opening (extracting) them
+                    if fp.lower().endswith(('.zip', '.tar', '.gz', '.bz2', '.7z', '.rar', '.xz')):
+                        subprocess.Popen(['open', '-R', fp])
+                    else:
+                        subprocess.Popen(['open', fp])
                 elif platform.system() == 'Windows':
                     os.startfile(fp)
                 else:

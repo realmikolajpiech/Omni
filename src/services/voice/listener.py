@@ -2,7 +2,9 @@ import sys
 import os
 import re
 import io
+import json
 import queue
+import subprocess
 import tempfile
 
 # ── Ensure venv site-packages are importable when launched via Python.app ─────
@@ -30,53 +32,9 @@ except ImportError:
     scipy = None
 from typing import Optional
 
-
-def _check_speech_entitlement() -> bool:
-    """Return True only when native macOS SFSpeechRecognizer is safe to use.
-
-    macOS TCC enforces privacy entitlements against the *responsible process*
-    (the app that spawned this process's coalition), NOT the running binary.
-    When launched from Electron, Terminal, or any non-Python-signed app, the
-    responsible process is that parent — which lacks
-    NSSpeechRecognitionUsageDescription — causing an unrecoverable SIGABRT.
-
-    Because reliably detecting the responsible process is fragile, we default
-    to DISABLED native ASR and use the Groq Whisper API instead (works
-    perfectly, no TCC required).  Set OMNI_NATIVE_ASR=1 to explicitly opt-in
-    if you have a properly signed/entitled app bundle.
-    """
-    if os.environ.get("OMNI_NATIVE_ASR", "0") != "1":
-        return False
-    try:
-        import plistlib
-        from Foundation import NSBundle
-        bundle_path = str(NSBundle.mainBundle().bundlePath())
-        plist_path = os.path.join(bundle_path, "Contents", "Info.plist")
-        if not os.path.exists(plist_path):
-            return False
-        with open(plist_path, "rb") as fh:
-            data = plistlib.load(fh)
-        return "NSSpeechRecognitionUsageDescription" in data
-    except Exception:
-        return False
-
-
-# Native macOS Speech Recognition — disabled by default to avoid TCC SIGABRT crash.
-# Falls back to Groq Whisper API for transcription (reliable, no permissions needed).
-# Set OMNI_NATIVE_ASR=1 to explicitly enable native ASR.
-NATIVE_ASR_AVAILABLE = False
-SFSpeechRecognizer = None
-SFSpeechURLRecognitionRequest = None
-NSURL = None
-NSLocale = None
-
-if _check_speech_entitlement():
-    try:
-        from Speech import SFSpeechRecognizer, SFSpeechURLRecognitionRequest
-        from Foundation import NSURL, NSLocale
-        NATIVE_ASR_AVAILABLE = True
-    except ImportError:
-        pass
+# Path to the compiled Swift streaming ASR binary
+_SWIFT_ASR_BINARY = os.path.join(os.path.dirname(__file__), "streaming_asr")
+NATIVE_ASR_AVAILABLE = os.path.isfile(_SWIFT_ASR_BINARY) and os.access(_SWIFT_ASR_BINARY, os.X_OK)
 
 # Short language code → macOS locale identifier
 _LANG_TO_LOCALE = {
@@ -158,12 +116,11 @@ class VoiceService:
         self.setup_udp()
 
     def setup_models(self):
-        """Initialize openWakeWord, request speech recognition authorization, and set up Groq fallback."""
-        # 0. Request macOS speech recognition authorization early
+        """Initialize openWakeWord and set up Groq fallback."""
         if NATIVE_ASR_AVAILABLE:
-            self._request_speech_auth()
+            logger.info(f"Native streaming ASR available: {_SWIFT_ASR_BINARY}")
         else:
-            logger.warning("Native ASR disabled — no NSSpeechRecognitionUsageDescription entitlement.")
+            logger.warning(f"Native ASR binary not found at {_SWIFT_ASR_BINARY} — will use Groq fallback.")
 
         # 1. openWakeWord
         try:
@@ -205,84 +162,86 @@ class VoiceService:
         except ImportError:
             logger.info("groq package not installed — Groq transcription fallback disabled.")
 
-    def _request_speech_auth(self):
-        """Ask macOS for SFSpeechRecognizer permission (shows system dialog on first run)."""
+    def _get_locale_id(self) -> str:
+        """Read language preference from settings and return macOS locale ID."""
         try:
-            auth_event = threading.Event()
-            def _handler(status):
-                # 3 = SFSpeechRecognizerAuthorizationStatusAuthorized
-                if status == 3:
-                    logger.info("Speech recognition: authorized.")
-                else:
-                    logger.warning(f"Speech recognition authorization status: {status}")
-                auth_event.set()
-            SFSpeechRecognizer.requestAuthorization_(_handler)
-            auth_event.wait(timeout=30.0)
-        except Exception as e:
-            logger.error(f"Speech auth request error: {e}")
+            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+            import src.core.settings_store as settings_store
+            lang_code = settings_store.get("transcription_language", "auto")
+        except Exception:
+            lang_code = "auto"
+        if lang_code == "auto" or lang_code not in _LANG_TO_LOCALE:
+            import locale as _locale
+            system_locale = _locale.getdefaultlocale()[0] or "en_US"
+            return system_locale.replace("_", "-")
+        return _LANG_TO_LOCALE[lang_code]
 
     def transcribe_audio_native(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
-        """Transcribe audio array using native macOS SFSpeechRecognizer."""
+        """Transcribe audio using the Swift streaming_asr binary with real-time partial results.
+
+        Pipes raw 16-bit PCM audio to the Swift process via stdin. Reads JSON lines
+        from stdout for partial/final results. Sends PARTIAL: IPC messages so the UI
+        updates the input field in real-time.
+        """
         if not NATIVE_ASR_AVAILABLE:
             return None
+
+        locale_id = self._get_locale_id()
         try:
-            # Read language preference
+            proc = subprocess.Popen(
+                [_SWIFT_ASR_BINARY, "--lang", locale_id],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception as e:
+            logger.error(f"Failed to launch streaming_asr: {e}")
+            return None
+
+        final_text = None
+        try:
+            # Convert float32 audio to int16 PCM bytes
+            pcm_int16 = (audio_data * 32767.0).clip(-32768, 32767).astype(np.int16)
+            audio_bytes = pcm_int16.tobytes()
+
+            # Write all audio then close stdin to signal EOF
+            proc.stdin.write(audio_bytes)
+            proc.stdin.close()
+
+            # Read JSON lines from stdout
+            for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(f"streaming_asr non-JSON: {line}")
+                    continue
+
+                msg_type = msg.get("type", "")
+                text = msg.get("text", "")
+
+                if msg_type == "partial" and text:
+                    logger.info(f"[ASR partial] {text}")
+                    self.send_ipc(f"PARTIAL:{text}".encode("utf-8"))
+                elif msg_type == "final":
+                    final_text = text
+                    logger.info(f"[ASR final] {text}")
+                elif msg_type == "error":
+                    logger.warning(f"[ASR error] {text}")
+                elif msg_type == "end":
+                    break
+
+            proc.wait(timeout=5.0)
+        except Exception as e:
+            logger.error(f"streaming_asr error: {e}")
             try:
-                sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
-                import src.core.settings_store as settings_store
-                lang_code = settings_store.get("transcription_language", "auto")
-            except Exception:
-                lang_code = "auto"
-
-            if lang_code == "auto" or lang_code not in _LANG_TO_LOCALE:
-                # Use system locale as best proxy
-                locale = NSLocale.currentLocale()
-            else:
-                locale_id = _LANG_TO_LOCALE[lang_code]
-                locale = NSLocale.localeWithLocaleIdentifier_(locale_id)
-
-            recognizer = SFSpeechRecognizer.alloc().initWithLocale_(locale)
-            if not recognizer or not recognizer.isAvailable():
-                # Fallback to English
-                logger.warning("SFSpeechRecognizer not available for selected locale, falling back to en-US")
-                en_locale = NSLocale.localeWithLocaleIdentifier_("en-US")
-                recognizer = SFSpeechRecognizer.alloc().initWithLocale_(en_locale)
-                if not recognizer or not recognizer.isAvailable():
-                    logger.error("SFSpeechRecognizer not available at all.")
-                    return None
-
-            # Write audio to a temp WAV file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                temp_path = f.name
-            sf.write(temp_path, audio_data, sample_rate)
-
-            result_container = [None]
-            done_event = threading.Event()
-
-            url = NSURL.fileURLWithPath_(temp_path)
-            request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
-            request.setShouldReportPartialResults_(False)
-
-            def _result_handler(result, error):
-                if error:
-                    logger.error(f"SFSpeechRecognizer error: {error}")
-                if result and result.isFinal():
-                    result_container[0] = result.bestTranscription().formattedString()
-                done_event.set()
-
-            recognizer.recognitionTaskWithRequest_resultHandler_(request, _result_handler)
-            done_event.wait(timeout=15.0)
-
-            try:
-                os.unlink(temp_path)
+                proc.kill()
             except Exception:
                 pass
 
-            return result_container[0]
-
-        except Exception as e:
-            logger.error(f"Native macOS transcription error: {e}")
-            return None
+        return final_text
 
     def transcribe_audio_groq(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
         """Transcribe audio using Groq Whisper API (fallback when native ASR unavailable)."""

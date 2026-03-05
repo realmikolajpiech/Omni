@@ -1,3 +1,6 @@
+# Compiled binaries
+src/services/voice/streaming_asr
+
 # Core Python
 __pycache__/
 *.py[cod]

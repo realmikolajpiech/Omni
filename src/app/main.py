@@ -449,9 +449,8 @@ def main():
         except: pass
 
     # Start Voice Listener
-    # Native macOS SFSpeechRecognizer is disabled by default (listener.py uses
-    # Groq Whisper API instead), so no TCC entitlement is needed and we can
-    # launch the listener as a plain subprocess.
+    # Native macOS ASR uses a compiled Swift binary (streaming_asr) that handles
+    # TCC permissions natively. Falls back to Groq Whisper API if binary missing.
     voice_process = None
     try:
         _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -1013,8 +1013,11 @@ Available settings and values:
                             tool_records.append({"header": header, "summary": summary, "detail": detail})
 
                             # Track file paths from tool results for "Enter to open" hint
-                            if tool_name == "create_file" and result.startswith("Created:"):
-                                _tool_file_paths.append(result[len("Created:"):].strip())
+                            if tool_name in ("create_file", "compress") and result.startswith("Created:"):
+                                # Strip size suffix like " (1.2 MB)" from compress results
+                                _raw = result[len("Created:"):].strip()
+                                _size_m = re.search(r'\s+\([^)]+\)\s*$', _raw)
+                                _tool_file_paths.append(_raw[:_size_m.start()] if _size_m else _raw)
                             elif tool_name == "find_file" and not result.startswith(("No files", "Error")):
                                 for _line in result.splitlines()[:1]:
                                     _m = re.match(r'\[(?:file|dir)\]\s+(.+?)(?:\s+\(|$)', _line)
