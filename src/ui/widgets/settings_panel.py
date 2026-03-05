@@ -1370,6 +1370,9 @@ class SettingsPanel(QWidget):
             self.account_email_lbl.setText(user.get("email", ""))
             self.refresh_btn.setEnabled(False)
             self.refresh_btn.setText("…")
+            providers = (user.get("app_metadata") or {}).get("providers") or []
+            if hasattr(self, "link_google_btn"):
+                self.link_google_btn.setVisible("google" not in providers)
 
         # Always refresh subscription status — even when not logged in, so the device
         # subscription (keyed by device_id) is reflected in the UI.
