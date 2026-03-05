@@ -342,6 +342,19 @@ Instructions:
                         first_word = "SEARCH"
                     logging.info(f"[DEBUG] Fast model classification: '{classification_text[:60]}' -> normalized '{normalized[:20]}' -> '{first_word}'")
 
+                    # If classification is empty, try heuristic detection from results
+                    if not first_word and results:
+                        _combined_text = ' '.join(
+                            (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
+                            for r in results[:3]
+                        ).lower()
+                        _place_keywords = ['city', 'capital', 'stolica', 'miasto', 'town', 'country',
+                                          'province', 'województw', 'located', 'population', 'region',
+                                          'district', 'county', 'gmina', 'powiat', 'strona główna']
+                        if any(kw in _combined_text for kw in _place_keywords):
+                            first_word = "PLACE"
+                            logging.info(f"[DEBUG] Empty classification → heuristic detected PLACE from keywords")
+
                     if first_word == "PERSON":
                         logging.info(f"[DEBUG] Model chose PERSON - fast model will write the card from search results")
                         write_messages = [
@@ -408,6 +421,21 @@ Instructions:
 
                 except Exception as e:
                     logging.error(f"[DEBUG] Classification failed: {e}")
+
+            # Fallback: if search results seem irrelevant (don't mention the query),
+            # try a direct map search — the query might be a place name.
+            _q_lower_fb = q.lower().strip()
+            _results_relevant = any(
+                _q_lower_fb in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
+                for r in results[:3]
+            ) if results else False
+            if not _results_relevant and len(_q_lower_fb.split()) <= 2 and len(_q_lower_fb) >= 3:
+                logging.info(f"[DEBUG] Search results irrelevant for '{q}', trying direct map search as place fallback")
+                _place_fb = get_place_result(q, existing_results=None)
+                if _place_fb and (_place_fb.get('latitude') or _place_fb.get('longitude')):
+                    logging.info(f"[DEBUG] Direct map search found place: {_place_fb.get('name')}")
+                    actions.append(_place_fb)
+                    continue
 
             person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
             if person_candidate:
@@ -1513,6 +1541,26 @@ def action_pending_endpoint():
                             logging.warning(f"[ACTION/PENDING] search_api({word!r}, fast=True) → {len(tool_results)} results")
                             break
 
+        # Validate that search results are actually relevant to the query.
+        # If none of the top results mention the query, they're likely stale/wrong.
+        if tool_results and tool_q:
+            _q_lower = tool_q.lower().strip()
+            _any_relevant = any(
+                _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
+                for r in tool_results[:3]
+            )
+            if not _any_relevant and len(_q_lower) >= 3:
+                logging.warning(f"[ACTION/PENDING] Search results don't mention '{tool_q}' — results may be stale. Retrying...")
+                retry_results = search_api(tool_q, categories='general', fast=False)
+                if retry_results:
+                    _any_relevant2 = any(
+                        _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
+                        for r in retry_results[:3]
+                    )
+                    if _any_relevant2:
+                        tool_results = retry_results
+                        logging.warning(f"[ACTION/PENDING] Retry got {len(retry_results)} relevant results")
+
         if tool_results:
             search_results.extend(tool_results)
 
@@ -1524,6 +1572,25 @@ def action_pending_endpoint():
 
         search_context = f"Tool Search Results for '{tool_q}':\n{tool_content}".strip()
         logging.warning(f"[ACTION/PENDING] search_context len={len(search_context)}: {search_context[:120]!r}")
+
+        # Fast heuristic: if search results strongly suggest a place, skip LLM entirely.
+        # This saves 2 LLM calls (phase 2 + classification) and ~4s of latency.
+        if tool_results and len(query.split()) <= 3:
+            _combined = ' '.join(
+                (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
+                for r in tool_results[:3]
+            ).lower()
+            _place_signals = ['capital', 'stolica', 'miasto', 'city', 'town', 'country',
+                              'province', 'województw', 'located in', 'population',
+                              'gmina', 'powiat', 'region', 'district', 'county',
+                              'municipality', 'village', 'commune', 'landmark',
+                              'monument', 'continent', 'island', 'river']
+            _place_score = sum(1 for kw in _place_signals if kw in _combined)
+            if _place_score >= 2:
+                logging.info(f"[ACTION/PENDING] Heuristic: place detected (score={_place_score}) for '{query}', skipping LLM")
+                place_act = {"type": "place_pending", "name": query.strip()}
+                _pending_actions_pop(pending_id)
+                return jsonify({"actions": [place_act], "action": place_act, "chips": []})
 
         phase2_system = (
             "You are an intelligent action classifier. You ONLY output commands.\n"

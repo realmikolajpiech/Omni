@@ -143,6 +143,25 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
         r.raise_for_status()
         data = r.json()
         logging.warning(f"[SEARCH] JSON keys={list(data.keys())}  organic_count={len(data.get('organic', []))}")
+
+        # Validate that Serper actually searched for the right query.
+        # Sometimes the response contains results for a truncated/different query.
+        returned_q = (data.get('searchParameters', {}).get('q') or '').strip().lower()
+        sent_q = query.strip().lower()
+        if returned_q and sent_q and returned_q != sent_q and not sent_q.startswith(returned_q[:3]):
+            # Mismatch but the returned query is a prefix of what we sent — Serper truncated it.
+            # Only retry if the returned query is significantly shorter (not just a minor normalization).
+            pass  # fall through, check below
+        if returned_q and sent_q and len(returned_q) < len(sent_q) * 0.6 and returned_q != sent_q:
+            logging.warning(f"[SEARCH] Query mismatch! Sent q={sent_q!r} but got results for q={returned_q!r}. Retrying...")
+            # Retry once with a fresh request
+            r2 = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
+            r2.raise_for_status()
+            data2 = r2.json()
+            returned_q2 = (data2.get('searchParameters', {}).get('q') or '').strip().lower()
+            logging.warning(f"[SEARCH] Retry got q={returned_q2!r}")
+            if returned_q2 and len(returned_q2) >= len(returned_q):
+                data = data2  # Use retry result if it's at least as good
     except Exception as e:
         logging.warning(f"[SEARCH] !!! FAILED ({type(e).__name__}): {e}")
         return []
