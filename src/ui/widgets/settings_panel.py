@@ -631,7 +631,6 @@ class SettingsPanel(QWidget):
         self._add_page("Trust", self._build_trust())
         self._add_page("Privacy", self._build_privacy())
         self._add_page("Account", self._build_account())
-        self._add_page("Developer", self._build_developer())
 
         root.addWidget(self.sidebar)
         root.addWidget(self.content_stack)
@@ -841,62 +840,6 @@ class SettingsPanel(QWidget):
         return page
 
     # ── Developer page ────────────────────────────────────────────────
-
-    def _build_developer(self) -> QWidget:
-        page = SettingsPage("Developer")
-
-        page.add_widget(self._desc(
-            "Development tools — for local testing only. "
-            "These settings are not synced and have no effect in production builds."
-        ))
-        page.add_spacing(12)
-
-        # Pro override toggle row
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
-
-        lbl = QLabel("Pro override")
-        lbl.setObjectName("FieldLbl")
-        lbl.setFont(_font("Manrope", 11, bold=True))
-        row.addWidget(lbl)
-        row.addStretch()
-
-        self._dev_pro_btn = QPushButton()
-        self._dev_pro_btn.setCheckable(True)
-        self._dev_pro_btn.setChecked(settings_store.get("dev_pro_override", False))
-        self._dev_pro_btn.setFixedSize(52, 28)
-        self._dev_pro_btn.setObjectName("ToggleBtn")
-        self._dev_pro_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dev_pro_btn.toggled.connect(self._on_dev_pro_toggled)
-        self._dev_update_toggle_text()
-        row.addWidget(self._dev_pro_btn)
-
-        page.add_layout(row)
-
-        desc = QLabel(
-            "When on, all subscription checks return Pro and daily limits are skipped. "
-            "Restart is not required — takes effect on the next status refresh."
-        )
-        desc.setObjectName("DescLbl")
-        desc.setFont(_font("Manrope", 10))
-        desc.setWordWrap(True)
-        page.add_widget(desc)
-
-        page.add_stretch()
-        return page
-
-    def _dev_update_toggle_text(self):
-        on = self._dev_pro_btn.isChecked()
-        self._dev_pro_btn.setText("ON" if on else "OFF")
-
-    def _on_dev_pro_toggled(self, checked: bool):
-        settings_store.set("dev_pro_override", checked)
-        self._dev_update_toggle_text()
-        # Immediately re-fetch subscription so the Account tab reflects the change.
-        subscription.refresh_status(
-            callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
-        )
 
     # ── Logged-out: sign-in / sign-up form ───────────────────────────
 

@@ -79,10 +79,6 @@ def remove_listener(fn):
 # ── Internal ──────────────────────────────────────────────────────────────────
 
 def _fetch_status() -> dict:
-    from src.core import settings_store as _ss
-    if _ss.get("dev_pro_override", False):
-        return {"plan": "pro", "daily_usage": 0, "daily_limit": 999}
-
     from src.core import auth as _auth
     from src.core.config import SUPABASE_URL, SUPABASE_ANON_KEY
     token = _auth.get_access_token()

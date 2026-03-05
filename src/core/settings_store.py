@@ -15,7 +15,6 @@ _DEFAULTS: dict = {
     "custom_model": "",
     "personality_mode": "professional",
     "trust_level": 1,  # 1=Assistant, 2=Automation, 3=Full Control
-    "dev_pro_override": False,  # DEV ONLY: bypass all subscription limits
 }
 
 _lock = threading.Lock()
