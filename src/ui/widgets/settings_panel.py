@@ -4,7 +4,7 @@ SettingsPanel — Redesigned settings UI with sidebar navigation.
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
-    QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget
+    QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget, QTextEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
@@ -15,61 +15,6 @@ import src.core.subscription as subscription
 import src.core.auth as auth
 import src.core.billing as billing
 from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET
-
-LANGUAGES = [
-    ("auto", "Auto — detect language"),
-    ("en",   "English"),
-    ("pl",   "Polish"),
-    ("de",   "German"),
-    ("fr",   "French"),
-    ("es",   "Spanish"),
-    ("it",   "Italian"),
-    ("pt",   "Portuguese"),
-    ("ja",   "Japanese"),
-    ("zh",   "Chinese"),
-    ("uk",   "Ukrainian"),
-    ("ru",   "Russian"),
-    ("ar",   "Arabic"),
-    ("nl",   "Dutch"),
-]
-
-_PRIVACY_ITEMS = [
-    (
-        "Voice transcription",
-        "Audio is sent to the transcription service solely to convert speech to text. "
-        "Your audio data is not stored — processing is ephemeral "
-        "and never feeds into any model training pipeline.",
-    ),
-    (
-        "AI queries",
-        "Query content is transmitted to xAI (Grok) or Groq over encrypted HTTPS. "
-        "Neither company builds user profiles from API queries "
-        "or shares your data with third parties.",
-    ),
-    (
-        "Memory & history",
-        "All conversational memory and history are stored exclusively on your local machine "
-        "(~/.local/share/ai-memory-db). Nothing is synced to any cloud service.",
-    ),
-    (
-        "Web search",
-        "Search runs through a local SearXNG instance — queries never reach "
-        "Google or any external search engine directly.",
-    ),
-    (
-        "API keys",
-        "Keys are stored locally in your .env file and ~/.config/omni/settings.json. "
-        "They are only sent as authorization headers to their respective services "
-        "— nowhere else.",
-    ),
-    (
-        "No telemetry",
-        "Omni collects zero usage data, sends no diagnostic reports, "
-        "and contains no tracking code. "
-        "The app is open-source — you can verify this yourself.",
-    ),
-]
-
 
 # ── Trust level data ─────────────────────────────────────────────────────────
 
@@ -506,6 +451,39 @@ class _UpgradeBox(QWidget):
         p.drawPath(path)
 
 
+class _FeedbackFormCard(QWidget):
+    """Neutral card container for the feedback form — theme-aware painted background."""
+
+    def __init__(self, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._dark = dark
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(0)
+        self._inner = lay
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 14, 14)
+        if self._dark:
+            bg     = QColor(255, 255, 255, 12)
+            border = QColor(255, 255, 255, 30)
+        else:
+            bg     = QColor(0, 0, 0, 10)
+            border = QColor(0, 0, 0, 40)
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(border, 1))
+        p.drawPath(path)
+
+
 # Button stylesheet constants — applied inline so parent cascade can't override
 _PLAN_BTN_SS = (
     "QPushButton { background: #6366f1; border: none; border-radius: 8px; "
@@ -604,6 +582,11 @@ class SettingsPanel(QWidget):
         self._checkout_error_sig.connect(self._on_checkout_error_occurred)
         self._payment_detected.connect(self._handle_payment_complete)
         self._dispatch.connect(lambda fn: fn())
+        # Keep account UI in sync with background subscription refreshes
+        # (e.g. the startup fetch that runs after load_saved_session).
+        subscription.add_listener(
+            lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
+        )
 
     # ── Build ────────────────────────────────────────────────────────
 
@@ -626,11 +609,10 @@ class SettingsPanel(QWidget):
         self.content_stack.setObjectName("SettingsContent")
 
         # ── Build Pages ──────────────────────────────────────────────
-        self._add_page("Language", self._build_transcription())
         self._add_page("AI Model", self._build_model())
         self._add_page("Trust", self._build_trust())
-        self._add_page("Privacy", self._build_privacy())
         self._add_page("Account", self._build_account())
+        self._add_page("Feedback", self._build_feedback())
 
         root.addWidget(self.sidebar)
         root.addWidget(self.content_stack)
@@ -650,63 +632,47 @@ class SettingsPanel(QWidget):
 
     # ── Section builders ─────────────────────────────────────────────
 
-    def _build_transcription(self) -> QWidget:
-        page = SettingsPage("Language")
-
-        page.add_widget(self._desc(
-            "Default language for speech recognition. "
-            "Picking a specific language makes transcription faster and more accurate."
-        ))
-
-        self.lang_combo = QComboBox()
-        self.lang_combo.setObjectName("SettingsCombo")
-        self.lang_combo.setFixedHeight(40)
-        self.lang_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        saved = settings_store.get("transcription_language", "auto")
-        for i, (code, name) in enumerate(LANGUAGES):
-            self.lang_combo.addItem(name, code)
-            if code == saved:
-                self.lang_combo.setCurrentIndex(i)
-
-        self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        page.add_widget(self.lang_combo)
-        
-        page.add_stretch()
-        return page
-
     def _build_model(self) -> QWidget:
         page = SettingsPage("AI Model")
 
-        page.add_widget(self._desc(
-            "Override the default model (xAI Grok) with any OpenAI-compatible API. "
-            "Works with OpenAI, Ollama, LM Studio, Anthropic proxies, and more. "
-            "Leave all fields empty to keep the default."
-        ))
+        page.add_spacing(4)
 
-        page.add_widget(self._lbl("Personality mode"))
-        page.add_widget(self._desc(
-            "Professional is polished and focused. Unfiltered is uncensored, based, casual."
-        ))
+        # ── Personality card ─────────────────────────────────────────
+        self._model_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        mc = self._model_card._inner
+        mc.setSpacing(0)
 
-        # Container for the toggle (acting as the track)
+        mc_title = QLabel("Personality")
+        mc_title.setFont(_font("Manrope", 15, bold=True))
+        mc.addWidget(mc_title)
+
+        mc.addSpacing(4)
+
+        mc_sub = QLabel("Choose how Omni communicates with you.")
+        mc_sub.setObjectName("DescLbl")
+        mc_sub.setFont(_font("Manrope", 11))
+        mc.addWidget(mc_sub)
+
+        mc.addSpacing(18)
+
+        # Toggle pill
         self.mode_container = QFrame()
         self.mode_container.setObjectName("ModeContainer")
         self.mode_container.setFixedHeight(44)
-        
         mode_layout = QHBoxLayout(self.mode_container)
         mode_layout.setContentsMargins(4, 4, 4, 4)
         mode_layout.setSpacing(0)
 
         self.personality_group = QButtonGroup(self)
         self.personality_prof_btn = QPushButton("Professional")
-        self.personality_unf_btn = QPushButton("Unfiltered")
+        self.personality_unf_btn  = QPushButton("Unfiltered")
 
         for btn in (self.personality_prof_btn, self.personality_unf_btn):
             btn.setObjectName("ModeBtn")
             btn.setCheckable(True)
             btn.setFixedHeight(36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             mode_layout.addWidget(btn)
 
         self.personality_prof_btn.setProperty("mode", "professional")
@@ -723,79 +689,64 @@ class SettingsPanel(QWidget):
             self.personality_prof_btn.setChecked(True)
 
         self.personality_group.buttonClicked.connect(self._on_personality_changed)
+        mc.addWidget(self.mode_container)
+        self._apply_personality_toggle_theme(self.current_theme == "dark")
 
-        page.add_widget(self.mode_container)
-        
-        page.add_spacing(10)
+        mc.addSpacing(16)
 
-        page.add_widget(self._lbl("API Base URL"))
-        self.url_edit = self._edit("e.g. https://api.openai.com/v1")
-        self.url_edit.setText(settings_store.get("custom_api_url", ""))
-        page.add_widget(self.url_edit)
+        # Mode descriptions
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setObjectName("SepLine")
+        mc.addWidget(sep)
+        mc.addSpacing(14)
 
-        page.add_widget(self._lbl("API Key"))
-        self.key_edit = self._edit("sk-...", password=True)
-        self.key_edit.setText(settings_store.get("custom_api_key", ""))
-        page.add_widget(self.key_edit)
+        prof_row = QHBoxLayout()
+        prof_row.setContentsMargins(0, 0, 0, 0)
+        prof_row.setSpacing(10)
+        prof_dot = QLabel("●")
+        prof_dot.setFont(_font("Manrope", 8))
+        prof_dot.setStyleSheet("color: #6366f1;")
+        prof_dot.setFixedWidth(12)
+        prof_body = QVBoxLayout()
+        prof_body.setSpacing(1)
+        prof_name = QLabel("Professional")
+        prof_name.setFont(_font("Manrope", 11, bold=True))
+        prof_desc = QLabel("Polished, focused, and precise. Best for work and productivity.")
+        prof_desc.setObjectName("DescLbl")
+        prof_desc.setFont(_font("Manrope", 10))
+        prof_desc.setWordWrap(True)
+        prof_body.addWidget(prof_name)
+        prof_body.addWidget(prof_desc)
+        prof_row.addWidget(prof_dot, 0, Qt.AlignmentFlag.AlignTop)
+        prof_row.addLayout(prof_body)
+        mc.addLayout(prof_row)
 
-        page.add_widget(self._lbl("Model name"))
-        self.model_edit = self._edit("e.g. gpt-4o, claude-3-5-sonnet")
-        self.model_edit.setText(settings_store.get("custom_model", ""))
-        page.add_widget(self.model_edit)
+        mc.addSpacing(12)
 
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 10, 0, 0)
-        btn_row.setSpacing(10)
+        unf_row = QHBoxLayout()
+        unf_row.setContentsMargins(0, 0, 0, 0)
+        unf_row.setSpacing(10)
+        unf_dot = QLabel("●")
+        unf_dot.setFont(_font("Manrope", 8))
+        unf_dot.setStyleSheet("color: rgba(255,255,255,0.3);")
+        unf_dot.setFixedWidth(12)
+        unf_body = QVBoxLayout()
+        unf_body.setSpacing(1)
+        unf_name = QLabel("Unfiltered")
+        unf_name.setFont(_font("Manrope", 11, bold=True))
+        unf_desc = QLabel("Direct, unfiltered, and uncensored. No guardrails, no sugarcoating.")
+        unf_desc.setObjectName("DescLbl")
+        unf_desc.setFont(_font("Manrope", 10))
+        unf_desc.setWordWrap(True)
+        unf_body.addWidget(unf_name)
+        unf_body.addWidget(unf_desc)
+        unf_row.addWidget(unf_dot, 0, Qt.AlignmentFlag.AlignTop)
+        unf_row.addLayout(unf_body)
+        mc.addLayout(unf_row)
 
-        self.save_btn = QPushButton("Save")
-        self.save_btn.setObjectName("SaveBtn")
-        self.save_btn.setFixedHeight(38)
-        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.save_btn.clicked.connect(self._save_model)
-
-        self.reset_btn = QPushButton("Reset to default")
-        self.reset_btn.setObjectName("ResetBtn")
-        self.reset_btn.setFixedHeight(38)
-        self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.reset_btn.clicked.connect(self._reset_model)
-
-        btn_row.addWidget(self.save_btn)
-        btn_row.addWidget(self.reset_btn)
-        btn_row.addStretch()
-        page.add_layout(btn_row)
-
-        self.status_lbl = QLabel("")
-        self.status_lbl.setObjectName("StatusLbl")
-        self.status_lbl.setFont(_font("Manrope", 10))
-        self.status_lbl.setWordWrap(True)
-        page.add_widget(self.status_lbl)
-        
+        page.add_widget(self._model_card)
         page.add_stretch()
         return page
 
-    def _build_privacy(self) -> QWidget:
-        page = SettingsPage("Privacy")
-        
-        page.add_widget(self._desc(
-            "Omni is built with privacy as a first principle. "
-            "Here's the full picture of what happens with your data."
-        ))
-
-        for heading, body_text in _PRIVACY_ITEMS:
-            h = QLabel(heading)
-            h.setObjectName("PrivacyHeading")
-            h.setFont(_font("Manrope", 11, bold=True))
-            h.setWordWrap(True)
-            page.add_widget(h)
-
-            b = QLabel(body_text)
-            b.setObjectName("PrivacyBody")
-            b.setFont(_font("Manrope", 10))
-            b.setWordWrap(True)
-            page.add_widget(b)
-            
-        page.add_stretch()
-        return page
     def _build_trust(self) -> QWidget:
         page = SettingsPage("Trust")
 
@@ -841,112 +792,340 @@ class SettingsPanel(QWidget):
 
     # ── Developer page ────────────────────────────────────────────────
 
+    def _build_feedback(self) -> QWidget:
+        page = SettingsPage("Feedback")
+
+        page.add_widget(self._desc(
+            "Your input shapes what Omni becomes. "
+            "We read every submission personally."
+        ))
+        page.add_spacing(20)
+
+        # ── Main form card ─────────────────────────────────────────
+        dark = self.current_theme == "dark"
+        self._fb_card = _FeedbackFormCard(dark=dark)
+        lay = self._fb_card._inner
+
+        # Card header row
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(10)
+
+        icon_lbl = QLabel("✉️")
+        icon_lbl.setFont(_font("Manrope", 20))
+        icon_lbl.setFixedWidth(30)
+
+        heading = QLabel("Send us feedback")
+        heading.setFont(_font("Manrope", 15, bold=True))
+
+        header_row.addWidget(icon_lbl)
+        header_row.addWidget(heading)
+        header_row.addStretch()
+        lay.addLayout(header_row)
+
+        lay.addSpacing(4)
+
+        subhead = QLabel("Your ideas and bug reports are invaluable — thank you.")
+        subhead.setObjectName("DescLbl")
+        subhead.setFont(_font("Manrope", 11))
+        lay.addWidget(subhead)
+
+        lay.addSpacing(18)
+
+        # ── Type selector pill ─────────────────────────────────────
+        self._feedback_type = "feature_request"
+
+        self._fb_pill = QFrame()
+        self._fb_pill.setFixedHeight(40)
+        pill_lay = QHBoxLayout(self._fb_pill)
+        pill_lay.setContentsMargins(3, 3, 3, 3)
+        pill_lay.setSpacing(0)
+
+        self._fb_feature_btn = QPushButton("💡  Feature idea")
+        self._fb_feature_btn.setCheckable(True)
+        self._fb_feature_btn.setChecked(True)
+        self._fb_feature_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fb_feature_btn.setFont(_font("Manrope", 11))
+        self._fb_feature_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._fb_bug_btn = QPushButton("🐛  Bug report")
+        self._fb_bug_btn.setCheckable(True)
+        self._fb_bug_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fb_bug_btn.setFont(_font("Manrope", 11))
+        self._fb_bug_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._fb_type_group = QButtonGroup()
+        self._fb_type_group.setExclusive(True)
+        self._fb_type_group.addButton(self._fb_feature_btn, 0)
+        self._fb_type_group.addButton(self._fb_bug_btn, 1)
+        self._fb_type_group.idToggled.connect(self._on_feedback_type_changed)
+
+        pill_lay.addWidget(self._fb_feature_btn)
+        pill_lay.addWidget(self._fb_bug_btn)
+        lay.addWidget(self._fb_pill)
+        self._apply_fb_pill_theme(dark)
+
+        lay.addSpacing(16)
+
+        # ── Title ──────────────────────────────────────────────────
+        title_field_lbl = QLabel("Title")
+        title_field_lbl.setObjectName("FieldLbl")
+        title_field_lbl.setFont(_font("Manrope", 10, bold=True))
+        lay.addWidget(title_field_lbl)
+        lay.addSpacing(5)
+
+        self._fb_title = self._edit("Brief summary of your idea or issue…")
+        lay.addWidget(self._fb_title)
+
+        lay.addSpacing(14)
+
+        # ── Description ────────────────────────────────────────────
+        body_field_lbl = QLabel("Description")
+        body_field_lbl.setObjectName("FieldLbl")
+        body_field_lbl.setFont(_font("Manrope", 10, bold=True))
+        lay.addWidget(body_field_lbl)
+        lay.addSpacing(5)
+
+        self._fb_body = QTextEdit()
+        self._fb_body.setPlaceholderText("Describe in as much detail as you like…")
+        self._fb_body.setFont(_font("Manrope", 11))
+        self._fb_body.setFixedHeight(120)
+        self._fb_body.setObjectName("FeedbackBody")
+        lay.addWidget(self._fb_body)
+
+        lay.addSpacing(16)
+
+        # ── Bottom row: status + submit ────────────────────────────
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(12)
+
+        self._fb_status_lbl = QLabel("")
+        self._fb_status_lbl.setObjectName("AccountStatusLbl")
+        self._fb_status_lbl.setFont(_font("Manrope", 10))
+        self._fb_status_lbl.setWordWrap(True)
+        bottom_row.addWidget(self._fb_status_lbl, 1)
+
+        self._fb_submit_btn = QPushButton("Send feedback  →")
+        self._fb_submit_btn.setFixedHeight(38)
+        self._fb_submit_btn.setStyleSheet(_PRIMARY_BTN_SS)
+        self._fb_submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fb_submit_btn.setFont(_font("Manrope", 11, bold=True))
+        self._fb_submit_btn.clicked.connect(self._submit_feedback)
+        bottom_row.addWidget(self._fb_submit_btn)
+
+        lay.addLayout(bottom_row)
+
+        page.add_widget(self._fb_card)
+        page.add_stretch()
+        return page
+
+    def _apply_personality_toggle_theme(self, dark: bool):
+        """Apply inline stylesheets to the personality pill toggle."""
+        if not hasattr(self, "mode_container"):
+            return
+        if dark:
+            track_bg     = "rgba(0,0,0,0.35)"
+            track_border = "rgba(255,255,255,0.10)"
+            sel_bg       = "rgba(255,255,255,0.14)"
+            sel_border   = "rgba(255,255,255,0.22)"
+            text_on      = "#ffffff"
+            text_off     = "rgba(255,255,255,0.45)"
+        else:
+            track_bg     = "rgba(0,0,0,0.07)"
+            track_border = "rgba(0,0,0,0.12)"
+            sel_bg       = "#ffffff"
+            sel_border   = "rgba(0,0,0,0.14)"
+            text_on      = "#18181b"
+            text_off     = "rgba(0,0,0,0.40)"
+
+        self.mode_container.setStyleSheet(f"""
+            QFrame {{
+                background: {track_bg};
+                border-radius: 11px;
+                border: 1px solid {track_border};
+            }}
+        """)
+        btn_ss = f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 9px;
+                color: {text_off};
+                font-family: "Manrope";
+                font-size: 12px;
+                padding: 0px 10px;
+            }}
+            QPushButton:hover {{ color: {text_on}; }}
+            QPushButton:checked {{
+                background: {sel_bg};
+                border: 1px solid {sel_border};
+                color: {text_on};
+                font-weight: 600;
+            }}
+        """
+        self.personality_prof_btn.setStyleSheet(btn_ss)
+        self.personality_unf_btn.setStyleSheet(btn_ss)
+
+    def _apply_fb_pill_theme(self, dark: bool):
+        """Apply inline stylesheets to the feedback type toggle so they render correctly
+        inside the painted card regardless of the parent stylesheet cascade."""
+        if not hasattr(self, "_fb_pill"):
+            return
+        if dark:
+            track_bg     = "rgba(0,0,0,0.35)"
+            track_border = "rgba(255,255,255,0.10)"
+            sel_bg       = "rgba(255,255,255,0.14)"
+            sel_border   = "rgba(255,255,255,0.22)"
+            text_on      = "#ffffff"
+            text_off     = "rgba(255,255,255,0.45)"
+        else:
+            track_bg     = "rgba(0,0,0,0.07)"
+            track_border = "rgba(0,0,0,0.12)"
+            sel_bg       = "#ffffff"
+            sel_border   = "rgba(0,0,0,0.14)"
+            text_on      = "#18181b"
+            text_off     = "rgba(0,0,0,0.40)"
+
+        self._fb_pill.setStyleSheet(f"""
+            QFrame {{
+                background: {track_bg};
+                border-radius: 11px;
+                border: 1px solid {track_border};
+            }}
+        """)
+        btn_ss = f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 9px;
+                color: {text_off};
+                font-family: "Manrope";
+                font-size: 11px;
+                padding: 0px 10px;
+            }}
+            QPushButton:hover {{
+                color: {text_on};
+            }}
+            QPushButton:checked {{
+                background: {sel_bg};
+                border: 1px solid {sel_border};
+                color: {text_on};
+                font-weight: 600;
+            }}
+        """
+        self._fb_feature_btn.setStyleSheet(btn_ss)
+        self._fb_bug_btn.setStyleSheet(btn_ss)
+
+    def _on_feedback_type_changed(self, btn_id: int, checked: bool):
+        if checked:
+            self._feedback_type = "feature_request" if btn_id == 0 else "bug_report"
+
+    def _submit_feedback(self):
+        title = self._fb_title.text().strip()
+        body  = self._fb_body.toPlainText().strip()
+
+        if not title:
+            self._set_feedback_status("Please enter a title.", error=True)
+            return
+        if not body:
+            self._set_feedback_status("Please enter a description.", error=True)
+            return
+
+        self._fb_submit_btn.setEnabled(False)
+        self._fb_submit_btn.setText("Sending…")
+        self._set_feedback_status("")
+
+        import threading, urllib.request, json as _json
+        from src.core.config import SUPABASE_URL, SUPABASE_ANON_KEY
+
+        token       = auth.get_access_token()
+        user        = auth.get_user() or {}
+        fb_type     = self._feedback_type
+        payload     = {"type": fb_type, "title": title, "body": body}
+        if user.get("id"):
+            payload["user_id"] = user["id"]
+
+        def _run():
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "apikey":       SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {token}" if token else f"Bearer {SUPABASE_ANON_KEY}",
+                }
+                req = urllib.request.Request(
+                    f"{SUPABASE_URL}/rest/v1/feedback",
+                    data=_json.dumps(payload).encode(),
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    r.read()
+                self._dispatch.emit(lambda: self._on_feedback_sent())
+            except Exception as e:
+                self._dispatch.emit(lambda err=e: self._set_feedback_status(f"Failed to send: {err}", error=True))
+                self._dispatch.emit(lambda: self._reset_feedback_btn())
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_feedback_sent(self):
+        self._fb_title.clear()
+        self._fb_body.clear()
+        self._reset_feedback_btn()
+        self._set_feedback_status("✓  Sent! Thanks for your feedback.", error=False)
+
+    def _reset_feedback_btn(self):
+        self._fb_submit_btn.setEnabled(True)
+        self._fb_submit_btn.setText("Send feedback  →")
+
+    def _set_feedback_status(self, msg: str, error: bool = False):
+        self._fb_status_lbl.setText(msg)
+        self._fb_status_lbl.setProperty("error", "true" if error else "false")
+        self._fb_status_lbl.style().unpolish(self._fb_status_lbl)
+        self._fb_status_lbl.style().polish(self._fb_status_lbl)
+        if msg:
+            QTimer.singleShot(8000, lambda: self._fb_status_lbl.setText(""))
+
     # ── Logged-out: sign-in / sign-up form ───────────────────────────
 
     def _build_auth_form(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(14)
 
-        # ── Upgrade CTA (primary — shown first so it's the hero action) ──
-        self.upgrade_box_login = _UpgradeBox()
-        ub = self.upgrade_box_login._inner
+        # ── Sign-in card ─────────────────────────────────────────────
+        self._auth_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        ac = self._auth_card._inner
+        ac.setSpacing(0)
 
-        title = QLabel("Upgrade to Pro")
-        title.setFont(_font("Manrope", 15, bold=True))
-        ub.addWidget(title)
+        ac_title = QLabel("Sign in to Omni")
+        ac_title.setFont(_font("Manrope", 15, bold=True))
+        ac.addWidget(ac_title)
 
-        tagline = QLabel("Unlimited AI queries, no daily limits.")
-        tagline.setObjectName("DescLbl")
-        tagline.setFont(_font("Manrope", 11))
-        ub.addWidget(tagline)
+        ac.addSpacing(4)
 
-        ub.addSpacing(2)
+        ac_sub = QLabel("Already paid? Sign in with your checkout email to activate Pro.")
+        ac_sub.setObjectName("DescLbl")
+        ac_sub.setFont(_font("Manrope", 10))
+        ac_sub.setWordWrap(True)
+        ac.addWidget(ac_sub)
 
-        # Monthly plan card
-        monthly_card = _PlanCard(featured=False)
-        mc = monthly_card._inner
-        mc_info = QVBoxLayout()
-        mc_info.setSpacing(2)
-        mc_name = QLabel("Monthly")
-        mc_name.setFont(_font("Manrope", 12, bold=True))
-        mc_desc = QLabel("Billed month to month")
-        mc_desc.setObjectName("PlanCardDesc")
-        mc_info.addWidget(mc_name)
-        mc_info.addWidget(mc_desc)
-        mc.addLayout(mc_info)
-        mc.addStretch()
-        self.upgrade_monthly_btn_login = QPushButton("Choose  →")
-        self.upgrade_monthly_btn_login.setFixedHeight(34)
-        self.upgrade_monthly_btn_login.setFixedWidth(110)
-        self.upgrade_monthly_btn_login.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
-        mc.addWidget(self.upgrade_monthly_btn_login)
-        ub.addWidget(monthly_card)
-
-        # Yearly plan card (featured)
-        yearly_card = _PlanCard(featured=True)
-        yc = yearly_card._inner
-        yc_info = QVBoxLayout()
-        yc_info.setSpacing(2)
-        yc_name_row = QHBoxLayout()
-        yc_name_row.setSpacing(6)
-        yc_name_row.setContentsMargins(0, 0, 0, 0)
-        yc_name = QLabel("Yearly")
-        yc_name.setFont(_font("Manrope", 12, bold=True))
-        yc_badge = QLabel("Best value")
-        yc_badge.setObjectName("BestValueBadge")
-        yc_badge.setFont(_font("Manrope", 9, bold=True))
-        yc_name_row.addWidget(yc_name)
-        yc_name_row.addWidget(yc_badge)
-        yc_name_row.addStretch()
-        yc_desc = QLabel("Billed annually")
-        yc_desc.setObjectName("PlanCardDesc")
-        yc_info.addLayout(yc_name_row)
-        yc_info.addWidget(yc_desc)
-        yc.addLayout(yc_info)
-        yc.addStretch()
-        self.upgrade_yearly_btn_login = QPushButton("Choose  →")
-        self.upgrade_yearly_btn_login.setFixedHeight(34)
-        self.upgrade_yearly_btn_login.setFixedWidth(110)
-        self.upgrade_yearly_btn_login.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
-        yc.addWidget(self.upgrade_yearly_btn_login)
-        ub.addWidget(yearly_card)
-
-        self.upgrade_status_lbl_login = QLabel("")
-        self.upgrade_status_lbl_login.setObjectName("DescLbl")
-        self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
-        self.upgrade_status_lbl_login.setWordWrap(True)
-        ub.addWidget(self.upgrade_status_lbl_login)
-
-        lay.addWidget(self.upgrade_box_login)
-
-        # ── Divider ───────────────────────────────────────────────────────
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setObjectName("SepLine")
-        lay.addWidget(div)
-
-        # ── Sign-in / Sign-up form ────────────────────────────────────────
-        lay.addWidget(self._desc(
-            "Already paid? Sign in with your checkout email to activate Pro."
-        ))
+        ac.addSpacing(14)
 
         self.auth_email_edit = self._edit("Email")
-        self.auth_email_edit.setObjectName("SettingsEdit")
-        lay.addWidget(self.auth_email_edit)
+        ac.addWidget(self.auth_email_edit)
+
+        ac.addSpacing(8)
 
         self.auth_pass_edit = self._edit("Password", password=True)
-        self.auth_pass_edit.setObjectName("SettingsEdit")
         self.auth_pass_edit.returnPressed.connect(self._do_sign_in)
-        lay.addWidget(self.auth_pass_edit)
+        ac.addWidget(self.auth_pass_edit)
+
+        ac.addSpacing(10)
 
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(8)
 
         self.sign_in_btn = QPushButton("Sign In")
@@ -964,14 +1143,14 @@ class SettingsPanel(QWidget):
         btn_row.addWidget(self.sign_in_btn)
         btn_row.addWidget(self.sign_up_btn)
         btn_row.addStretch()
-        lay.addLayout(btn_row)
+        ac.addLayout(btn_row)
+
+        ac.addSpacing(12)
 
         sep_row = QHBoxLayout()
-        sep_row.setContentsMargins(0, 8, 0, 8)
-        sep_l = QFrame(); sep_l.setFrameShape(QFrame.Shape.HLine)
-        sep_l.setObjectName("SepLine")
-        sep_r = QFrame(); sep_r.setFrameShape(QFrame.Shape.HLine)
-        sep_r.setObjectName("SepLine")
+        sep_row.setContentsMargins(0, 0, 0, 0)
+        sep_l = QFrame(); sep_l.setFrameShape(QFrame.Shape.HLine); sep_l.setObjectName("SepLine")
+        sep_r = QFrame(); sep_r.setFrameShape(QFrame.Shape.HLine); sep_r.setObjectName("SepLine")
         sep_lbl = QLabel("or")
         sep_lbl.setObjectName("DescLbl")
         sep_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -979,47 +1158,119 @@ class SettingsPanel(QWidget):
         sep_row.addWidget(sep_l)
         sep_row.addWidget(sep_lbl)
         sep_row.addWidget(sep_r)
-        lay.addLayout(sep_row)
+        ac.addLayout(sep_row)
+
+        ac.addSpacing(10)
 
         self.google_btn = QPushButton("Continue with Google")
         self.google_btn.setObjectName("OAuthBtn")
         self.google_btn.setFixedHeight(38)
         self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.google_btn.clicked.connect(lambda: self._do_oauth("google"))
-        lay.addWidget(self.google_btn)
+        ac.addWidget(self.google_btn)
+
+        ac.addSpacing(6)
 
         self.github_btn = QPushButton("Continue with GitHub")
         self.github_btn.setObjectName("OAuthBtn")
         self.github_btn.setFixedHeight(38)
         self.github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
-        lay.addWidget(self.github_btn)
+        ac.addWidget(self.github_btn)
+
+        lay.addWidget(self._auth_card)
+
+        # ── Upgrade CTA ──────────────────────────────────────────────
+        self.upgrade_box_login = _UpgradeBox()
+        ub = self.upgrade_box_login._inner
+
+        ub_title = QLabel("Upgrade to Pro")
+        ub_title.setFont(_font("Manrope", 15, bold=True))
+        ub.addWidget(ub_title)
+
+        tagline = QLabel("Unlimited AI queries, no daily limits.")
+        tagline.setObjectName("DescLbl")
+        tagline.setFont(_font("Manrope", 11))
+        ub.addWidget(tagline)
+
+        ub.addSpacing(4)
+
+        monthly_card = _PlanCard(featured=False)
+        mc = monthly_card._inner
+        mc_info = QVBoxLayout(); mc_info.setSpacing(2)
+        mc_name = QLabel("Monthly"); mc_name.setFont(_font("Manrope", 12, bold=True))
+        mc_desc = QLabel("$9 / mo — billed monthly"); mc_desc.setObjectName("PlanCardDesc")
+        mc_info.addWidget(mc_name); mc_info.addWidget(mc_desc)
+        mc.addLayout(mc_info); mc.addStretch()
+        self.upgrade_monthly_btn_login = QPushButton("Choose  →")
+        self.upgrade_monthly_btn_login.setFixedHeight(34)
+        self.upgrade_monthly_btn_login.setFixedWidth(110)
+        self.upgrade_monthly_btn_login.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
+        mc.addWidget(self.upgrade_monthly_btn_login)
+        ub.addWidget(monthly_card)
+
+        yearly_card = _PlanCard(featured=True)
+        yc = yearly_card._inner
+        yc_info = QVBoxLayout(); yc_info.setSpacing(2)
+        yc_name_row = QHBoxLayout(); yc_name_row.setSpacing(6); yc_name_row.setContentsMargins(0,0,0,0)
+        yc_name = QLabel("Yearly"); yc_name.setFont(_font("Manrope", 12, bold=True))
+        yc_badge = QLabel("Best value"); yc_badge.setObjectName("BestValueBadge"); yc_badge.setFont(_font("Manrope", 9, bold=True))
+        yc_name_row.addWidget(yc_name); yc_name_row.addWidget(yc_badge); yc_name_row.addStretch()
+        yc_desc = QLabel("$6 / mo — billed $72 / year"); yc_desc.setObjectName("PlanCardDesc")
+        yc_info.addLayout(yc_name_row); yc_info.addWidget(yc_desc)
+        yc.addLayout(yc_info); yc.addStretch()
+        self.upgrade_yearly_btn_login = QPushButton("Choose  →")
+        self.upgrade_yearly_btn_login.setFixedHeight(34)
+        self.upgrade_yearly_btn_login.setFixedWidth(110)
+        self.upgrade_yearly_btn_login.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
+        yc.addWidget(self.upgrade_yearly_btn_login)
+        ub.addWidget(yearly_card)
+
+        self.upgrade_status_lbl_login = QLabel("")
+        self.upgrade_status_lbl_login.setObjectName("DescLbl")
+        self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
+        self.upgrade_status_lbl_login.setWordWrap(True)
+        ub.addWidget(self.upgrade_status_lbl_login)
+
+        lay.addWidget(self.upgrade_box_login)
 
         return w
 
     # ── Logged-in: account info ───────────────────────────────────────
 
+    def _sep(self) -> QFrame:
+        f = QFrame(); f.setFrameShape(QFrame.Shape.HLine); f.setObjectName("SepLine")
+        return f
+
     def _build_account_info(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(14)
 
-        # Email + plan badge row
-        info_row = QHBoxLayout()
-        info_row.setContentsMargins(0, 0, 0, 0)
-        info_row.setSpacing(10)
+        # ── Profile card ─────────────────────────────────────────────
+        self._profile_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        pc = self._profile_card._inner
+        pc.setSpacing(0)
+
+        # Row: email + plan badge + refresh
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
 
         self.account_email_lbl = QLabel("")
-        self.account_email_lbl.setObjectName("FieldLbl")
-        self.account_email_lbl.setFont(_font("Manrope", 11))
+        self.account_email_lbl.setFont(_font("Manrope", 12, bold=True))
 
         self.plan_badge = QLabel("FREE")
         self.plan_badge.setObjectName("PlanBadgeFree")
         self.plan_badge.setFont(_font("Manrope", 10, bold=True))
         self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.plan_badge.setFixedHeight(28)
-        self.plan_badge.setFixedWidth(60)
+        self.plan_badge.setFixedHeight(24)
+        self.plan_badge.setFixedWidth(52)
 
         self.refresh_btn = QPushButton("↻")
         self.refresh_btn.setObjectName("RefreshBtn")
@@ -1028,100 +1279,40 @@ class SettingsPanel(QWidget):
         self.refresh_btn.setToolTip("Refresh plan status")
         self.refresh_btn.clicked.connect(self.refresh_account)
 
-        info_row.addWidget(self.account_email_lbl)
-        info_row.addStretch()
-        info_row.addWidget(self.plan_badge)
-        info_row.addWidget(self.refresh_btn)
-        lay.addLayout(info_row)
+        top_row.addWidget(self.account_email_lbl)
+        top_row.addStretch()
+        top_row.addWidget(self.plan_badge)
+        top_row.addWidget(self.refresh_btn)
+        pc.addLayout(top_row)
 
-        # Usage bar + count (hidden for pro)
+        # ── Usage section (hidden for Pro) ───────────────────────────
+        self._usage_section = QWidget()
+        us = QVBoxLayout(self._usage_section)
+        us.setContentsMargins(0, 14, 0, 0)
+        us.setSpacing(0)
+
+        us.addWidget(self._sep())
+        us.addSpacing(12)
+
         self.usage_bar = _UsageBar()
-        lay.addWidget(self.usage_bar)
+        us.addWidget(self.usage_bar)
+
+        us.addSpacing(5)
 
         self.usage_lbl = QLabel("0 / 10 requests today")
         self.usage_lbl.setObjectName("UsageLbl")
         self.usage_lbl.setFont(_font("Manrope", 10))
-        lay.addWidget(self.usage_lbl)
+        us.addWidget(self.usage_lbl)
 
-        # Upgrade CTA (hidden for pro)
-        self.upgrade_box = _UpgradeBox()
-        ub = self.upgrade_box._inner
+        pc.addWidget(self._usage_section)
 
-        title = QLabel("Upgrade to Pro")
-        title.setFont(_font("Manrope", 15, bold=True))
-        ub.addWidget(title)
+        # ── Sync row ──────────────────────────────────────────────────
+        pc.addSpacing(14)
+        pc.addWidget(self._sep())
+        pc.addSpacing(12)
 
-        tagline = QLabel("Unlimited AI queries, no daily limits.")
-        tagline.setObjectName("DescLbl")
-        tagline.setFont(_font("Manrope", 11))
-        ub.addWidget(tagline)
-
-        ub.addSpacing(2)
-
-        # Monthly plan card
-        monthly_card = _PlanCard(featured=False)
-        mc = monthly_card._inner
-        mc_info = QVBoxLayout()
-        mc_info.setSpacing(2)
-        mc_name = QLabel("Monthly")
-        mc_name.setFont(_font("Manrope", 12, bold=True))
-        mc_desc = QLabel("Billed month to month")
-        mc_desc.setObjectName("PlanCardDesc")
-        mc_info.addWidget(mc_name)
-        mc_info.addWidget(mc_desc)
-        mc.addLayout(mc_info)
-        mc.addStretch()
-        self.upgrade_monthly_btn = QPushButton("Choose  →")
-        self.upgrade_monthly_btn.setFixedHeight(34)
-        self.upgrade_monthly_btn.setFixedWidth(110)
-        self.upgrade_monthly_btn.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_monthly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
-        mc.addWidget(self.upgrade_monthly_btn)
-        ub.addWidget(monthly_card)
-
-        # Yearly plan card (featured)
-        yearly_card = _PlanCard(featured=True)
-        yc = yearly_card._inner
-        yc_info = QVBoxLayout()
-        yc_info.setSpacing(2)
-        yc_name_row = QHBoxLayout()
-        yc_name_row.setSpacing(6)
-        yc_name_row.setContentsMargins(0, 0, 0, 0)
-        yc_name = QLabel("Yearly")
-        yc_name.setFont(_font("Manrope", 12, bold=True))
-        yc_badge = QLabel("Best value")
-        yc_badge.setObjectName("BestValueBadge")
-        yc_badge.setFont(_font("Manrope", 9, bold=True))
-        yc_name_row.addWidget(yc_name)
-        yc_name_row.addWidget(yc_badge)
-        yc_name_row.addStretch()
-        yc_desc = QLabel("Billed annually")
-        yc_desc.setObjectName("PlanCardDesc")
-        yc_info.addLayout(yc_name_row)
-        yc_info.addWidget(yc_desc)
-        yc.addLayout(yc_info)
-        yc.addStretch()
-        self.upgrade_yearly_btn = QPushButton("Choose  →")
-        self.upgrade_yearly_btn.setFixedHeight(34)
-        self.upgrade_yearly_btn.setFixedWidth(110)
-        self.upgrade_yearly_btn.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_yearly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_yearly_btn.clicked.connect(lambda: self._start_checkout("yearly"))
-        yc.addWidget(self.upgrade_yearly_btn)
-        ub.addWidget(yearly_card)
-
-        self.upgrade_status_lbl = QLabel("")
-        self.upgrade_status_lbl.setObjectName("DescLbl")
-        self.upgrade_status_lbl.setFont(_font("Manrope", 10))
-        self.upgrade_status_lbl.setWordWrap(True)
-        ub.addWidget(self.upgrade_status_lbl)
-
-        lay.addWidget(self.upgrade_box)
-
-        # Sync status row
         sync_row = QHBoxLayout()
-        sync_row.setContentsMargins(0, 4, 0, 4)
+        sync_row.setContentsMargins(0, 0, 0, 0)
         sync_row.setSpacing(8)
 
         self.sync_status_lbl = QLabel("Memory sync: —")
@@ -1137,28 +1328,54 @@ class SettingsPanel(QWidget):
         sync_row.addWidget(self.sync_status_lbl)
         sync_row.addStretch()
         sync_row.addWidget(self.sync_btn)
-        lay.addLayout(sync_row)
+        pc.addLayout(sync_row)
 
-        # Account Security — collapsible, hidden by default
-        self._security_toggle_btn = QPushButton("Account Security  ▾")
-        self._security_toggle_btn.setObjectName("ResetBtn")
-        self._security_toggle_btn.setFixedHeight(32)
-        self._security_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._security_toggle_btn.clicked.connect(self._toggle_security)
-        lay.addWidget(self._security_toggle_btn)
+        # ── Sign out row ──────────────────────────────────────────────
+        pc.addSpacing(14)
+        pc.addWidget(self._sep())
+        pc.addSpacing(12)
 
-        self.secure_box = QFrame()
-        self.secure_box.setObjectName("UpgradeBox")
-        self.secure_box.setVisible(False)
-        sb = QVBoxLayout(self.secure_box)
-        sb.setContentsMargins(12, 12, 12, 12)
-        sb.setSpacing(8)
+        sign_out_row = QHBoxLayout()
+        sign_out_row.setContentsMargins(0, 0, 0, 0)
+        sign_out_row.addStretch()
+        self.sign_out_btn = QPushButton("Sign Out")
+        self.sign_out_btn.setObjectName("ResetBtn")
+        self.sign_out_btn.setFixedHeight(34)
+        self.sign_out_btn.setFixedWidth(100)
+        self.sign_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_out_btn.clicked.connect(self._do_sign_out)
+        sign_out_row.addWidget(self.sign_out_btn)
+        pc.addLayout(sign_out_row)
+
+        lay.addWidget(self._profile_card)
+
+        # ── Security card ─────────────────────────────────────────────
+        self._security_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        sc = self._security_card._inner
+        sc.setSpacing(0)
+
+        sec_title_row = QHBoxLayout()
+        sec_title_row.setContentsMargins(0, 0, 0, 0)
+        sec_title_row.setSpacing(8)
+        sec_icon = QLabel("🔒")
+        sec_icon.setFont(_font("Manrope", 14))
+        sec_icon.setFixedWidth(22)
+        sec_heading = QLabel("Account Security")
+        sec_heading.setFont(_font("Manrope", 14, bold=True))
+        sec_title_row.addWidget(sec_icon)
+        sec_title_row.addWidget(sec_heading)
+        sec_title_row.addStretch()
+        sc.addLayout(sec_title_row)
+
+        sc.addSpacing(6)
 
         secure_desc = QLabel("Set a password or connect Google so you can sign in without a magic link.")
         secure_desc.setObjectName("DescLbl")
         secure_desc.setFont(_font("Manrope", 10))
         secure_desc.setWordWrap(True)
-        sb.addWidget(secure_desc)
+        sc.addWidget(secure_desc)
+
+        sc.addSpacing(16)
 
         self.new_password_edit = QLineEdit()
         self.new_password_edit.setObjectName("SettingsEdit")
@@ -1166,10 +1383,12 @@ class SettingsPanel(QWidget):
         self.new_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.new_password_edit.setFixedHeight(38)
         self.new_password_edit.returnPressed.connect(self._do_set_password)
-        sb.addWidget(self.new_password_edit)
+        sc.addWidget(self.new_password_edit)
+
+        sc.addSpacing(10)
 
         secure_btns = QHBoxLayout()
-        secure_btns.setContentsMargins(0, 2, 0, 0)
+        secure_btns.setContentsMargins(0, 0, 0, 0)
         secure_btns.setSpacing(8)
 
         self.set_password_btn = QPushButton("Set Password")
@@ -1187,18 +1406,70 @@ class SettingsPanel(QWidget):
         secure_btns.addWidget(self.set_password_btn)
         secure_btns.addWidget(self.link_google_btn)
         secure_btns.addStretch()
-        sb.addLayout(secure_btns)
+        sc.addLayout(secure_btns)
 
-        lay.addWidget(self.secure_box)
+        # keep secure_box ref pointing to the card for legacy callers
+        self.secure_box = self._security_card
 
-        # Sign out
-        self.sign_out_btn = QPushButton("Sign Out")
-        self.sign_out_btn.setObjectName("ResetBtn")
-        self.sign_out_btn.setFixedHeight(38)
-        self.sign_out_btn.setFixedWidth(100)
-        self.sign_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sign_out_btn.clicked.connect(self._do_sign_out)
-        lay.addWidget(self.sign_out_btn)
+        lay.addWidget(self._security_card)
+
+        # ── Upgrade CTA (hidden for Pro) ──────────────────────────────
+        self.upgrade_box = _UpgradeBox()
+        ub = self.upgrade_box._inner
+
+        ub_title = QLabel("Upgrade to Pro")
+        ub_title.setFont(_font("Manrope", 15, bold=True))
+        ub.addWidget(ub_title)
+
+        tagline = QLabel("Unlimited AI queries, no daily limits.")
+        tagline.setObjectName("DescLbl")
+        tagline.setFont(_font("Manrope", 11))
+        ub.addWidget(tagline)
+
+        ub.addSpacing(4)
+
+        monthly_card = _PlanCard(featured=False)
+        mc = monthly_card._inner
+        mc_info = QVBoxLayout(); mc_info.setSpacing(2)
+        mc_name = QLabel("Monthly"); mc_name.setFont(_font("Manrope", 12, bold=True))
+        mc_desc = QLabel("$9 / mo — billed monthly"); mc_desc.setObjectName("PlanCardDesc")
+        mc_info.addWidget(mc_name); mc_info.addWidget(mc_desc)
+        mc.addLayout(mc_info); mc.addStretch()
+        self.upgrade_monthly_btn = QPushButton("Choose  →")
+        self.upgrade_monthly_btn.setFixedHeight(34)
+        self.upgrade_monthly_btn.setFixedWidth(110)
+        self.upgrade_monthly_btn.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_monthly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
+        mc.addWidget(self.upgrade_monthly_btn)
+        ub.addWidget(monthly_card)
+
+        yearly_card = _PlanCard(featured=True)
+        yc = yearly_card._inner
+        yc_info = QVBoxLayout(); yc_info.setSpacing(2)
+        yc_name_row = QHBoxLayout(); yc_name_row.setSpacing(6); yc_name_row.setContentsMargins(0,0,0,0)
+        yc_name = QLabel("Yearly"); yc_name.setFont(_font("Manrope", 12, bold=True))
+        yc_badge = QLabel("Best value"); yc_badge.setObjectName("BestValueBadge"); yc_badge.setFont(_font("Manrope", 9, bold=True))
+        yc_name_row.addWidget(yc_name); yc_name_row.addWidget(yc_badge); yc_name_row.addStretch()
+        yc_desc = QLabel("$6 / mo — billed $72 / year"); yc_desc.setObjectName("PlanCardDesc")
+        yc_info.addLayout(yc_name_row); yc_info.addWidget(yc_desc)
+        yc.addLayout(yc_info); yc.addStretch()
+        self.upgrade_yearly_btn = QPushButton("Choose  →")
+        self.upgrade_yearly_btn.setFixedHeight(34)
+        self.upgrade_yearly_btn.setFixedWidth(110)
+        self.upgrade_yearly_btn.setStyleSheet(_PLAN_BTN_SS)
+        self.upgrade_yearly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upgrade_yearly_btn.clicked.connect(lambda: self._start_checkout("yearly"))
+        yc.addWidget(self.upgrade_yearly_btn)
+        ub.addWidget(yearly_card)
+
+        self.upgrade_status_lbl = QLabel("")
+        self.upgrade_status_lbl.setObjectName("DescLbl")
+        self.upgrade_status_lbl.setFont(_font("Manrope", 10))
+        self.upgrade_status_lbl.setWordWrap(True)
+        ub.addWidget(self.upgrade_status_lbl)
+
+        lay.addWidget(self.upgrade_box)
 
         return w
     # ── Widget factories ─────────────────────────────────────────────
@@ -1235,9 +1506,6 @@ class SettingsPanel(QWidget):
             if item and item.text() == "Account":
                 self.refresh_account()
 
-    def _on_lang_changed(self, index: int):
-        settings_store.set("transcription_language", self.lang_combo.itemData(index))
-
     def _on_trust_changed(self, level: int):
         settings_store.set("trust_level", level)
         if hasattr(self, "_trust_slider"):
@@ -1251,35 +1519,6 @@ class SettingsPanel(QWidget):
             return
         mode = btn.property("mode") or "professional"
         settings_store.set("personality_mode", mode)
-
-    def _save_model(self):
-        url   = self.url_edit.text().strip()
-        key   = self.key_edit.text().strip()
-        model = self.model_edit.text().strip()
-
-        if (url or key or model) and not (url and key and model):
-            self._status("Fill in all three fields (URL, key, model) or leave them all empty.", error=True)
-            return
-
-        settings_store.save_settings({"custom_api_url": url, "custom_api_key": key, "custom_model": model})
-        self._status(
-            "Saved — changes take effect after restarting Omni." if url
-            else "Reset to default model (xAI Grok) — restart required."
-        )
-
-    def _reset_model(self):
-        self.url_edit.clear()
-        self.key_edit.clear()
-        self.model_edit.clear()
-        settings_store.save_settings({"custom_api_url": "", "custom_api_key": "", "custom_model": ""})
-        self._status("Default model restored — restart required.")
-
-    def _status(self, msg: str, error: bool = False):
-        self.status_lbl.setText(msg)
-        self.status_lbl.setProperty("error", "true" if error else "false")
-        self.status_lbl.style().unpolish(self.status_lbl)
-        self.status_lbl.style().polish(self.status_lbl)
-        QTimer.singleShot(6000, lambda: self.status_lbl.setText(""))
 
     # ── Account tab ──────────────────────────────────────────────────
 
@@ -1317,8 +1556,13 @@ class SettingsPanel(QWidget):
             if hasattr(self, "link_google_btn"):
                 self.link_google_btn.setVisible("google" not in providers)
 
-        # Always refresh subscription status — even when not logged in, so the device
-        # subscription (keyed by device_id) is reflected in the UI.
+        # If status was already fetched (e.g. by the startup refresh), show it
+        # immediately so the UI isn't blank while the background call is in flight.
+        cached = subscription.get_status()
+        if cached.get("loaded"):
+            self._update_account_ui(cached)
+
+        # Always refresh in background to get the latest status.
         subscription.refresh_status(callback=_on_done)
 
         # Hook sync status updates
@@ -1327,7 +1571,6 @@ class SettingsPanel(QWidget):
         self._update_sync_ui(memory_sync.get_state())
 
     def _update_account_ui(self, status: dict):
-        print(f"[ui] _update_account_ui called: plan={status.get('plan')}")
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("↻")
 
@@ -1346,8 +1589,11 @@ class SettingsPanel(QWidget):
         self.plan_badge.style().unpolish(self.plan_badge)
         self.plan_badge.style().polish(self.plan_badge)
 
-        self.usage_bar.setVisible(not is_pro)
-        self.usage_lbl.setVisible(not is_pro)
+        if hasattr(self, "_usage_section"):
+            self._usage_section.setVisible(not is_pro)
+        else:
+            self.usage_bar.setVisible(not is_pro)
+            self.usage_lbl.setVisible(not is_pro)
         if hasattr(self, "upgrade_box"):
             self.upgrade_box.setVisible(not is_pro)
         # Also update the not-logged-in upgrade box (device may be pro without account).
@@ -1565,20 +1811,10 @@ class SettingsPanel(QWidget):
                 break
 
     def _toggle_security(self):
-        """Expand / collapse the Account Security box."""
-        visible = self.secure_box.isVisible()
-        self.secure_box.setVisible(not visible)
-        self._security_toggle_btn.setText(
-            "Account Security  ▴" if not visible else "Account Security  ▾"
-        )
+        pass  # security card is always visible
 
     def _show_secure_account_prompt(self):
-        """Reveal the 'Account Security' box after auto-login from checkout."""
-        if hasattr(self, "secure_box"):
-            self.secure_box.setVisible(True)
-        if hasattr(self, "_security_toggle_btn"):
-            self._security_toggle_btn.setText("Account Security  ▴")
-        # Switch to the logged-in Account view if not already there.
+        """Ensure the Account view is visible after auto-login from checkout."""
         if auth.is_logged_in() and self.account_stack.currentIndex() != 1:
             self.account_stack.setCurrentIndex(1)
 
@@ -1751,6 +1987,18 @@ class SettingsPanel(QWidget):
             self._trust_slider.set_theme(theme_name)
         if hasattr(self, "_trust_cap_panel"):
             self._trust_cap_panel.set_theme(theme_name)
+        if hasattr(self, "_model_card"):
+            self._model_card.set_dark(dark)
+        self._apply_personality_toggle_theme(dark)
+        if hasattr(self, "_fb_card"):
+            self._fb_card.set_dark(dark)
+        if hasattr(self, "_profile_card"):
+            self._profile_card.set_dark(dark)
+        if hasattr(self, "_security_card"):
+            self._security_card.set_dark(dark)
+        if hasattr(self, "_auth_card"):
+            self._auth_card.set_dark(dark)
+        self._apply_fb_pill_theme(dark)
 
         # Apply to pages
         for name, page in self._pages.items():
@@ -1914,6 +2162,21 @@ class SettingsPanel(QWidget):
                 border: 1px solid {border};
             }}
             
+            /* Feedback body text area */
+            QTextEdit#FeedbackBody {{
+                background: {field_bg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 8px 13px;
+                color: {primary};
+                font-family: "Manrope";
+                font-size: 12px;
+            }}
+            QTextEdit#FeedbackBody:focus {{
+                background: {field_bg_focus};
+                border: 1px solid {sel_border};
+            }}
+
             /* Scrollbars */
             QScrollBar:vertical {{
                 border: none; background: transparent; width: 5px; margin: 0;

@@ -87,6 +87,16 @@ IGNORE_DIRS = {
     "res", "flutter_assets", "xcassets", "lproj",
     # Gradle
     "gradle",
+    # Unity project / user settings (binary .asset.private.0 blobs + boilerplate JSON)
+    "ProjectSettings", "UserSettings",
+    # Maven repositories (Firebase/Android binary deps — .srcaar, metadata XML)
+    "m2repository",
+    # Unity generated / deleted asset caches
+    "GeneratedAssets_deleted",
+    # Font library internals (PHP font metrics, ICC profiles, hyphenation patterns)
+    "ttfontdata", "iccprofiles",
+    # Unity StreamingAssets (runtime binary data, not user documents)
+    "StreamingAssets",
 }
 
 # File extensions that are purely internal / developer noise
@@ -133,6 +143,20 @@ BLOCKED_EXTENSIONS = {
     "_bin.js", "_loader.js", ".worker.js",
     # [BINARY OUTPUT]
     ".out",
+    # [ICC COLOR PROFILES]
+    ".icc",
+    # [WINDOWS RESOURCES & SHORTCUTS]
+    ".rc", ".lnk",
+    # [PYINSTALLER SPEC]
+    ".spec",
+    # [AFFINITY DESIGNER]
+    ".afdesign",
+    # [UNITY SPECIFIC]
+    ".inputactions", ".asmdef",
+    # [ANDROID / MAVEN BINARY]
+    ".srcaar",
+    # [XCODE FILE LISTS]
+    ".xcfilelist",
 }
 
 # Files that are completely ignored (not indexed by name OR content)
@@ -155,6 +179,16 @@ BLOCKED_FILENAMES = {
     "braktlumaczn_mapping.csv", "firestore.indexes.json", "a.out",
     # [CONFIG]
     "tsconfig.tsbuildinfo",
+    # [FIREBASE CREDENTIALS]
+    "google-services.json", "google-services-desktop.json",
+    # [DART / FLUTTER BOILERPLATE]
+    "analysis_options.yaml",
+    # [WINDOWS FLUTTER RUNNER BOILERPLATE]
+    "Runner.rc", "resource.h",
+    "flutter_window.cpp", "flutter_window.h",
+    "win32_window.cpp", "win32_window.h",
+    # [LINUX FLUTTER RUNNER BOILERPLATE]
+    "my_application.cc", "my_application.h",
 }
 
 # Files indexed by name (Phase 1) but skipped for content embedding (Phase 2).
@@ -190,6 +224,7 @@ CONTENT_SKIP_FILENAMES = {
     # Credential / secrets files (sensitive + not useful for search)
     "credentials.json", "firebaseConfig.js",
     "service-account.json", "secrets.json",
+    "google-services.json", "google-services-desktop.json",
     # ML model metadata (generated, zero user value)
     "tokenizer_config.json", "special_tokens_map.json",
     "config_sentence_transformers.json", "sentence_bert_config.json",
@@ -228,6 +263,8 @@ CONTENT_SKIP_DIRS = {
     "assets", "static", "public", "res", "resources",
     # Flutter
     "flutter_assets", "fonts",
+    # Flutter platform runner directories (windows/runner, linux/runner — C++ glue code)
+    "runner",
 }
 
 # File extensions whose content is never worth semantic indexing.
@@ -250,7 +287,9 @@ CONTENT_SKIP_SUFFIXES = {
     ".min.js", ".min.css",  # minified (already in BLOCKED_EXTENSIONS but belt-and-suspenders)
     ".g.dart", ".freezed.dart", ".config.dart", # Dart generated files
     # [WASM & COMPILED BLOBS]
-    "_bin.js", "loader.js", "worker.js"
+    "_bin.js", "loader.js", "worker.js",
+    # [UNITY ENCRYPTED/PRIVATE ASSET VARIANTS]
+    ".private.0",
 }
 
 # Ensure directories exist

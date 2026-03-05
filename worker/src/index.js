@@ -41,7 +41,8 @@ const GROQ_BASE = "https://api.groq.com/openai/v1";
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    env.executionCtx = ctx;
     const url    = new URL(request.url);
     const path   = url.pathname;
     const method = request.method;
@@ -54,6 +55,12 @@ export default {
     if (path === "/v1/billing/provision") {
       if (method === "OPTIONS") return corsResp(null, 204);
       if (method === "POST")    return handleProvision(request, env);
+    }
+
+    // Public checkout — called from the website pricing page (no app secret required).
+    if (path === "/v1/billing/checkout") {
+      if (method === "OPTIONS") return corsResp(null, 204);
+      if (method === "POST")    return handlePublicCheckout(request, env);
     }
 
     // All other endpoints require the shared app secret.
@@ -101,29 +108,139 @@ async function handleChat(request, env) {
       await incrementUsage(id, env);
     }
 
-    return proxyChat(body, XAI_BASE, env.XAI_API_KEY);
+    const deviceId = request.headers.get("X-Device-ID") || null;
+    return proxyChat(body, XAI_BASE, env.XAI_API_KEY, {
+      env, eventType: "chat_main", userId: isUuid(id) ? id : null, deviceId, isPro,
+    });
   }
 
   // Fast model (Groq) — unlimited, used for internal action classification
-  return proxyChat(body, GROQ_BASE, env.GROQ_API_KEY);
+  const { id, isPro } = await resolveIdentity(request, env);
+  const deviceId = request.headers.get("X-Device-ID") || null;
+  return proxyChat(body, GROQ_BASE, env.GROQ_API_KEY, {
+    env, eventType: "chat_fast", userId: isUuid(id) ? id : null, deviceId, isPro,
+  });
 }
 
-async function proxyChat(body, baseUrl, apiKey) {
+function isUuid(str) {
+  return typeof str === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+async function proxyChat(body, baseUrl, apiKey, analytics) {
+  const isStream = !!body.stream;
+
+  // For streaming, request inline usage so we can capture token counts.
+  const upstreamBody = isStream
+    ? { ...body, stream_options: { ...(body.stream_options || {}), include_usage: true } }
+    : body;
+
   const upstream = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(upstreamBody),
   });
 
-  return new Response(upstream.body, {
+  if (!isStream) {
+    // Buffer the response so we can read token counts before logging.
+    const data = await upstream.json();
+    const usage = data.usage || {};
+    analytics.env.executionCtx?.waitUntil(
+      logAnalyticsEvent({ ...analytics, model: body.model, isStream: false, ...usage }, analytics.env)
+    );
+    return new Response(JSON.stringify(data), {
+      status: upstream.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Streaming: intercept SSE chunks to extract the final usage chunk, then
+  // pass everything through unmodified to the client.
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const decoder = new TextDecoder();
+  let usageData = {};
+
+  // Register with waitUntil BEFORE returning so the worker stays alive until
+  // the stream is fully consumed and analytics are flushed.
+  const streamDone = (async () => {
+    try {
+      const reader = upstream.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        // Scan for the usage object Groq/xAI emit in the final data chunk.
+        const text = decoder.decode(value, { stream: true });
+        for (const line of text.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data:") && !trimmed.includes("[DONE]")) {
+            try {
+              const parsed = JSON.parse(trimmed.slice(5).trim());
+              if (parsed.usage) usageData = parsed.usage;
+            } catch {}
+          }
+        }
+        await writer.write(value);
+      }
+    } finally {
+      await writer.close().catch(() => {});
+    }
+    await logAnalyticsEvent({
+      ...analytics,
+      model: body.model,
+      isStream: true,
+      prompt_tokens:     usageData.prompt_tokens,
+      completion_tokens: usageData.completion_tokens,
+      total_tokens:      usageData.total_tokens,
+    }, analytics.env);
+  })();
+
+  analytics.env.executionCtx?.waitUntil(streamDone);
+
+  return new Response(readable, {
     status: upstream.status,
-    headers: {
-      "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
-    },
+    headers: { "Content-Type": upstream.headers.get("Content-Type") ?? "text/event-stream" },
   });
+}
+
+async function logAnalyticsEvent(
+  { userId, deviceId, eventType, model, isPro, isStream, prompt_tokens, completion_tokens, total_tokens },
+  env
+) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) {
+    console.error("[analytics] missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+    return;
+  }
+  try {
+    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/analytics_events`, {
+      method: "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+        "apikey":        env.SUPABASE_SERVICE_KEY,
+      },
+      body: JSON.stringify({
+        user_id:           userId   || null,
+        device_id:         deviceId || null,
+        event_type:        eventType,
+        model:             model    || null,
+        prompt_tokens:     prompt_tokens     ?? null,
+        completion_tokens: completion_tokens ?? null,
+        total_tokens:      total_tokens      ?? null,
+        is_pro:            !!isPro,
+        is_stream:         !!isStream,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      console.error("[analytics] insert error", res.status, body);
+    }
+  } catch (e) {
+    console.error("[analytics] insert failed:", e?.message, JSON.stringify({ userId, deviceId, eventType }));
+  }
 }
 
 function limitReachedResponse(stream) {
@@ -156,6 +273,14 @@ async function handleSearch(request, env) {
   if (!apiKey) {
     return resp({ error: "Search API key not configured", code: "missing_api_key" }, 500);
   }
+
+  const { id, isPro } = await resolveIdentity(request, env);
+  const deviceId = request.headers.get("X-Device-ID") || null;
+  env.executionCtx?.waitUntil(
+    logAnalyticsEvent({
+      userId: isUuid(id) ? id : null, deviceId, eventType: "search", isPro, isStream: false,
+    }, env)
+  );
 
   let upstream;
   try {
@@ -810,6 +935,63 @@ async function handleProvision(request, env) {
   const setupUrl = await generateSetupLink(customerEmail, env);
 
   return corsResp({ success: true, email: customerEmail, setup_url: setupUrl });
+}
+
+// ── Public checkout (browser / pricing page) ─────────────────────────────────
+// Creates a Dodo Payments hosted checkout session and returns the checkout URL.
+// No OMNI_SECRET required — security is provided by CORS + Dodo's own payment UI.
+
+async function handlePublicCheckout(request, env) {
+  const apiKey = env.DODO_PAYMENTS_API_KEY;
+  if (!apiKey) return corsResp({ error: "Payments not configured" }, 500);
+
+  let body = {};
+  try { body = await request.json(); } catch { return corsResp({ error: "Bad JSON" }, 400); }
+
+  const interval = (body.interval || "").toLowerCase();
+  if (interval !== "monthly" && interval !== "yearly")
+    return corsResp({ error: "interval must be 'monthly' or 'yearly'" }, 400);
+
+  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+  const productId = interval === "monthly" ? MONTHLY_PRODUCT_ID : YEARLY_PRODUCT_ID;
+
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "test_mode").toLowerCase();
+  const base = mode.includes("test")
+    ? "https://test.dodopayments.com"
+    : "https://live.dodopayments.com";
+
+  const returnUrl = env.DODO_RETURN_URL || "https://heyomni.app/thanks";
+
+  // Optional customer prefill from the request body.
+  const customer = {};
+  if (body.email) customer.email = String(body.email);
+
+  const upstream = await fetch(`${base}/checkouts`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type":  "application/json",
+    },
+    body: JSON.stringify({
+      product_cart: [{ product_id: productId, quantity: 1 }],
+      ...(Object.keys(customer).length ? { customer } : {}),
+      return_url: returnUrl,
+      metadata: { source: "website_pricing", interval },
+    }),
+  });
+
+  const text = await upstream.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+
+  if (!upstream.ok)
+    return corsResp({ error: "Failed to create checkout", details: data || text }, upstream.status);
+
+  return corsResp({
+    checkout_url: data && data.checkout_url,
+    session_id:   data && (data.session_id || data.id),
+  });
 }
 
 // ── Supabase user find-or-create ──────────────────────────────────────────────

@@ -15,27 +15,36 @@ import logging
 import os
 import threading
 import urllib.request
+import urllib.error
 from typing import Optional
 
-from src.core.config import SUPABASE_URL, PERSONAL_MEM_PATH
+from src.core.config import SUPABASE_URL, SUPABASE_ANON_KEY, PERSONAL_MEM_PATH
 
 _BUCKET    = "memory"
 _SYNC_INTERVAL = 300   # seconds (5 minutes)
 
-_lock      = threading.Lock()
-_state     = {"state": "idle", "last_synced": None, "error": None}
+_lock           = threading.Lock()
+_state          = {"state": "idle", "last_synced": None, "error": None}
 _listeners: list = []
-_stop_evt  = threading.Event()
-_get_token = None   # callable → str | None
+_stop_evt       = threading.Event()
+_get_token      = None   # callable → str | None
+_startup_synced = False  # ensures the startup download runs only once
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def start(get_token_fn):
     """Start background periodic sync.  get_token_fn() must return a valid JWT or None."""
-    global _get_token
+    global _get_token, _startup_synced
     _get_token = get_token_fn
+    _startup_synced = False
     _stop_evt.clear()
+
+    # Trigger the startup download-or-upload as soon as a valid token is
+    # available, rather than racing against the token refresh on startup.
+    from src.core import auth as _auth_mod
+    _auth_mod.add_listener(_on_auth_changed)
+
     threading.Thread(target=_sync_loop, daemon=True).start()
 
 
@@ -82,9 +91,24 @@ def _notify(state: str, error=None):
             pass
 
 
+def _on_auth_changed(session):
+    """Called by auth.add_listener whenever the session changes."""
+    global _startup_synced
+    if not session.get("access_token"):
+        return
+    if not _startup_synced:
+        # First token available after app start: do the startup sync
+        # (download if cloud is newer, upload otherwise).
+        _startup_synced = True
+        threading.Thread(target=lambda: _do_sync(startup=True), daemon=True).start()
+    else:
+        # User signed in after being logged out — upload local state.
+        sync_now()
+
+
 def _sync_loop():
-    # On startup: download if cloud is newer
-    _do_sync(startup=True)
+    # Startup sync is handled by _on_auth_changed so we avoid the race where
+    # this loop fires before the saved token has been refreshed.
     while not _stop_evt.wait(_SYNC_INTERVAL):
         _do_sync()
 
@@ -140,22 +164,27 @@ def _maybe_download(token: str, user_id: str):
             _upload(token, user_id)
 
 
+def _storage_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "apikey":        SUPABASE_ANON_KEY,
+    }
+
+
 def _get_cloud_mtime(token: str, user_id: str) -> Optional[float]:
     """Return cloud file last-modified as a Unix timestamp, or None if not found."""
     import json, datetime
     url = f"{SUPABASE_URL}/storage/v1/object/list/{_BUCKET}"
-    payload = json.dumps({"prefix": f"{user_id}/", "limit": 1}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        items = json.loads(r.read())
+    payload = json.dumps({"prefix": f"{user_id}/", "limit": 10}).encode()
+    headers = _storage_headers(token)
+    headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            items = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"list failed {e.code}: {body}") from e
 
     if not items:
         return None
@@ -164,7 +193,6 @@ def _get_cloud_mtime(token: str, user_id: str) -> Optional[float]:
         if item.get("name") == "personal.mv2":
             updated = item.get("updated_at") or item.get("created_at") or ""
             if updated:
-                # ISO 8601 → timestamp
                 dt = datetime.datetime.fromisoformat(updated.replace("Z", "+00:00"))
                 return dt.timestamp()
     return None
@@ -176,29 +204,28 @@ def _upload(token: str, user_id: str):
     with open(PERSONAL_MEM_PATH, "rb") as f:
         data = f.read()
     url = f"{SUPABASE_URL}/storage/v1/object/{_BUCKET}/{user_id}/personal.mv2"
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type":  "application/octet-stream",
-            "Authorization": f"Bearer {token}",
-            "x-upsert":      "true",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        r.read()
+    headers = _storage_headers(token)
+    headers["Content-Type"] = "application/octet-stream"
+    headers["x-upsert"]     = "true"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"upload failed {e.code}: {body}") from e
     logging.debug("[sync] upload complete")
 
 
 def _download(token: str, user_id: str):
     url = f"{SUPABASE_URL}/storage/v1/object/{_BUCKET}/{user_id}/personal.mv2"
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = r.read()
+    req = urllib.request.Request(url, headers=_storage_headers(token))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"download failed {e.code}: {body}") from e
     os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
     with open(PERSONAL_MEM_PATH, "wb") as f:
         f.write(data)

@@ -86,7 +86,6 @@ def _fetch_status() -> dict:
     # Primary check: query the subscriptions table directly with the user's JWT.
     # RLS ensures they can only read their own row. This is the most reliable
     # source of truth and doesn't depend on the worker or KV being correct.
-    print(f"[subscription] token={'YES' if token else 'NO'}")
     if token:
         try:
             req = urllib.request.Request(
@@ -99,7 +98,6 @@ def _fetch_status() -> dict:
             )
             with urllib.request.urlopen(req, timeout=6) as r:
                 rows = json.loads(r.read())
-            print(f"[subscription] supabase rows: {rows}")
             if rows and rows[0].get("plan") == "pro" and rows[0].get("status") == "active":
                 return {"plan": "pro", "daily_usage": 0, "daily_limit": 999, "error": None}
         except Exception as e:
