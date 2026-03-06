@@ -41,20 +41,31 @@ def get_ip_location():
 
 def get_search_locale():
     """Locale for search (e.g. pl-PL, en-US). Prefer user's location: system locale, then IP-based."""
-    # 1. Try system locale (user's OS language)
     loc = get_system_location()
+    sys_lang = loc.split('-')[0] if loc else "en"
+
     if loc and loc != "en-US":
         return loc
-    # 2. If system is en-US, use IP country so e.g. user in Poland gets pl-PL
+
+    # If system is generic en-US, use IP country to get local results, but KEEP the English language
     global _ip_country_code_cache
     if _ip_country_code_cache is None:
         get_ip_location()  # populate cache
+        
     if _ip_country_code_cache:
-        lang = _COUNTRY_TO_LANG.get(_ip_country_code_cache.upper(), 'en')
-        return f"{lang}-{_ip_country_code_cache.upper()}"
+        return f"{sys_lang}-{_ip_country_code_cache.upper()}"
+        
     return loc or "en-US"
 
 def get_system_location():
+    try:
+        from PyQt6.QtCore import QLocale
+        loc_name = QLocale.system().name()
+        if loc_name and '_' in loc_name:
+            return loc_name.replace('_', '-')
+    except ImportError:
+        pass
+
     if os.name == 'nt':
         try:
             import locale

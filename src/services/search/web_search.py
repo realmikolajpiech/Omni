@@ -121,8 +121,8 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
         "_fast":     fast,       # tells the Worker which API key to use
         "q":   query,
         "num": count,
-        "gl":  loc[:2] if loc else "us",
-        "hl":  loc[:2] if loc else "en",
+        "gl":  loc.split('-')[-1].lower() if loc and '-' in loc else "us",
+        "hl":  loc.split('-')[0].lower() if loc and '-' in loc else (loc[:2] if loc else "en"),
     }
 
     try:
