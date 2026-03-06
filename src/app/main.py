@@ -388,16 +388,40 @@ def main():
                 try:
                     # If any key is pressed, disarm the modifier-only trigger
                     hotkey_state['armed'] = False
-                    
+
+                    flags = event.modifierFlags()
+
+                    # Cmd+Option+V → toggle clipboard (global — works from anywhere)
+                    if event.keyCode() == 9:  # V key
+                        cmd = (flags & AppKit.NSEventModifierFlagCommand)
+                        opt = (flags & AppKit.NSEventModifierFlagOption)
+                        ctrl = (flags & AppKit.NSEventModifierFlagControl)
+                        shift = (flags & AppKit.NSEventModifierFlagShift)
+                        if cmd and opt and not ctrl and not shift:
+                            logging.info("Global Hotkey Cmd+Option+V Triggered (Clipboard)")
+                            window.toggle_clipboard_requested.emit()
+                            return None  # Swallow event
+
+                    # Cmd+4 → enter/exit clipboard mode (only when Omni is visible)
+                    if event.keyCode() == 21:  # 4 key
+                        cmd = (flags & AppKit.NSEventModifierFlagCommand)
+                        opt = (flags & AppKit.NSEventModifierFlagOption)
+                        ctrl = (flags & AppKit.NSEventModifierFlagControl)
+                        shift = (flags & AppKit.NSEventModifierFlagShift)
+                        if cmd and not opt and not ctrl and not shift:
+                            if window.isVisible() and not window._is_closing:
+                                logging.info("Hotkey Cmd+4 Triggered (Clipboard mode toggle)")
+                                window.clipboard_mode_shortcut_requested.emit()
+                                return None  # Swallow event
+
                     # Optional: Handle Option+Space
                     if event.keyCode() == 49: # Space
-                        flags = event.modifierFlags()
                         if (flags & AppKit.NSEventModifierFlagOption) and not (flags & AppKit.NSEventModifierFlagCommand):
                              # Pure Option+Space (to avoid conflict with Cmd+Opt+Space if that's a thing)
                              logging.info("Global Hotkey Option+Space Triggered (Native)")
                              toggle_omni()
                              return None # Attempt to swallow (only works for Local)
-                             
+
                 except Exception as e:
                     logging.error(f"Error in on_keydown: {e}")
                 return event

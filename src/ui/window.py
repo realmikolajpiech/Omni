@@ -35,6 +35,8 @@ from src.ui.workers.tts_worker import TTSWorker
 from src.ui.workers.og_worker import OGWorker
 from src.ui.workers.computer_control_worker import ComputerControlWorker
 from src.ui.widgets.trust_permission_popup import TrustPermissionPopup
+from src.ui.widgets.clipboard_widget import ClipboardItemWidget
+from src.ui.clipboard_manager import ClipboardManager
 import src.core.settings_store as settings_store
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,8 @@ DEFAULT_WIDTH = 720
 class OmniWindow(QWidget):
     # Signal for external triggers (e.g. global hotkey)
     toggle_requested = pyqtSignal(str) # Accepts source
+    toggle_clipboard_requested = pyqtSignal()
+    clipboard_mode_shortcut_requested = pyqtSignal()  # Cmd+4 while window visible
 
     def setup_uinput(self):
         # Linux only
@@ -174,6 +178,8 @@ class OmniWindow(QWidget):
         self.old_workers = []  # Keep references to running workers to prevent QThread destruction crash
         
         self.toggle_requested.connect(self.toggle_visibility_safe)
+        self.toggle_clipboard_requested.connect(self.toggle_clipboard)
+        self.clipboard_mode_shortcut_requested.connect(self._on_clipboard_shortcut)
         
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -291,8 +297,23 @@ class OmniWindow(QWidget):
         self.settings_close_btn.clicked.connect(self.exit_settings_mode)
         self.settings_close_btn.hide()
 
+        # Clipboard mode title (hidden in normal mode)
+        self.clipboard_title = QLabel("Clipboard")
+        self.clipboard_title.setFont(QFont("Instrument Serif", 34))
+        self.clipboard_title.setStyleSheet("font-style: italic; color: rgba(255,255,255,0.6);")
+        self.clipboard_title.hide()
+
+        self.clipboard_close_btn = QPushButton("×")
+        self.clipboard_close_btn.setFixedSize(36, 36)
+        self.clipboard_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clipboard_close_btn.setObjectName("ClipboardCloseBtn")
+        self.clipboard_close_btn.clicked.connect(self.exit_clipboard_mode)
+        self.clipboard_close_btn.hide()
+
         input_layout.addWidget(self.settings_title, 1)
         input_layout.addWidget(self.settings_close_btn)
+        input_layout.addWidget(self.clipboard_title, 1)
+        input_layout.addWidget(self.clipboard_close_btn)
 
         # Mic at the end (Right edge)
         input_layout.addWidget(self.mic_widget)
@@ -305,6 +326,7 @@ class OmniWindow(QWidget):
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.itemClicked.connect(self.on_entered)
+        self.list_widget.itemDoubleClicked.connect(self._on_clipboard_double_click)
         self.list_widget.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Only take focus on click, never programmatically
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setMouseTracking(True)  # Enable mouse tracking for smooth hover
@@ -344,7 +366,12 @@ class OmniWindow(QWidget):
         self._continuation_pending = False  # True while waiting for user to approve request_permission
         self._pending_open_file = None  # file path shown as "Enter to open" hint after AI response
         self.is_settings_mode = False
+        self.is_clipboard_mode = False
         self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
+
+        # Start clipboard history monitoring
+        self._clipboard_manager = ClipboardManager.instance()
+        self._clipboard_manager.new_entry.connect(self._on_clipboard_new_entry)
 
         self.apps = self.load_apps()
         self.is_entry_animating = False
@@ -494,6 +521,10 @@ class OmniWindow(QWidget):
         if hasattr(self, 'settings_panel'):
             self.settings_panel.set_theme(theme_name)
             self._apply_settings_close_btn_style()
+
+        # 5b. Update Clipboard button style
+        if hasattr(self, 'clipboard_close_btn'):
+            self._apply_clipboard_close_btn_style()
 
         # 6. Update Glass Effect
         self.update_glass_color()
@@ -884,8 +915,17 @@ class OmniWindow(QWidget):
                 self.center()
                 
                 # Expand the window to fit whatever is in the list (collapsed to 84px on close).
-                # For history mode, _restore_history_ui also rebuilds the list from chat_history.
-                if self.is_history_mode:
+                if self.is_clipboard_mode:
+                    # Restore clipboard UI — widgets were hidden when window was hidden
+                    self.input_field.hide()
+                    self.follow_up_widget.hide()
+                    self.mic_widget.hide()
+                    self.cc_container.hide()
+                    self.clipboard_title.show()
+                    self.clipboard_close_btn.show()
+                    self._apply_clipboard_close_btn_style()
+                    self._populate_clipboard_list()
+                elif self.is_history_mode:
                     self._restore_history_ui()
                 else:
                     # Restore active border if AI is still running (e.g. thinking on first query)
@@ -895,7 +935,7 @@ class OmniWindow(QWidget):
                         self.logo_label.boost_speed()
                     self.adjust_window_height(animate=False, force=True)
                 self.animate_entry()
-                
+
                 # Force focus and styling again in the SHOW path to catch the "Blue Border"
                 self.input_field.setFocus()
                 self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
@@ -1229,7 +1269,7 @@ class OmniWindow(QWidget):
             cmd_opt = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier
             # Mask out keypads/etc just in case, but strictly require Cmd+Opt and no other main mods
             mask = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-            
+
             if (event.modifiers() & mask) == cmd_opt:
                 # Ensure no other key is pressed (e.g. Cmd+Opt+C should not hide window)
                 if event.key() in (Qt.Key.Key_Meta, Qt.Key.Key_Alt, Qt.Key.Key_Option):
@@ -1273,6 +1313,13 @@ class OmniWindow(QWidget):
                 logging.debug("No file selected for preview")
                 return False
             elif event.key() == Qt.Key.Key_Return:
+                # Clipboard mode: Enter copies + pastes
+                if self.is_clipboard_mode:
+                    current_item = self.list_widget.currentItem()
+                    if current_item:
+                        self._handle_clipboard_item_selected(current_item, paste=True)
+                    return True
+
                 # ENTER on input field - trigger selected item or AI query
                 current_item = self.list_widget.currentItem()
                 if current_item:
@@ -1285,6 +1332,10 @@ class OmniWindow(QWidget):
                         return True
             elif event.key() == Qt.Key.Key_Escape:
                 logging.info("Escape key pressed (Input Field)")
+
+                if self.is_clipboard_mode:
+                    self.exit_clipboard_mode()
+                    return True
 
                 if self.is_settings_mode:
                     self.exit_settings_mode()
@@ -1466,6 +1517,7 @@ class OmniWindow(QWidget):
              self._is_closing = False
              self.is_entry_animating = False
              self.setWindowOpacity(1.0)
+             # Keep is_clipboard_mode flag so reopen restores clipboard view
              # Reset to clean default geometry so the next show always starts from
              # the correct width and a minimal height. center() will re-position it.
              self.resize(DEFAULT_WIDTH, 84)
@@ -1610,6 +1662,229 @@ class OmniWindow(QWidget):
             }}
         """)
 
+    # ------------------------------------------------------------------
+    # Clipboard mode
+    # ------------------------------------------------------------------
+
+    def _on_clipboard_new_entry(self, entry):
+        """Called whenever a new item is copied — refresh list if clipboard mode is open."""
+        logging.info(f"Clipboard new_entry signal: visible={self.isVisible()}, clipboard_mode={self.is_clipboard_mode}, preview={entry.preview[:40]!r}")
+        if self.is_clipboard_mode and self.isVisible():
+            self._populate_clipboard_list()
+
+    def _on_clipboard_shortcut(self):
+        """Cmd+4 pressed — only acts when Omni window is already visible."""
+        if self.isVisible() and not self._is_closing:
+            if self.is_clipboard_mode:
+                self.exit_clipboard_mode()
+            else:
+                self.enter_clipboard_mode()
+
+    def toggle_clipboard(self):
+        """Called by global hotkey (Cmd+Option+V) or in-window Cmd+4."""
+        if self.isVisible() and not self._is_closing:
+            if self.is_clipboard_mode:
+                self.animate_close()
+            else:
+                self.enter_clipboard_mode()
+        else:
+            # Window hidden → show and enter clipboard mode
+            # Reuse the normal show path then switch mode
+            if self._is_closing:
+                if hasattr(self, 'anim_close_group'):
+                    self.anim_close_group.stop()
+                self._is_closing = False
+                self.setWindowOpacity(0.0)
+                self.resize(DEFAULT_WIDTH, 84)
+
+            self.is_entry_animating = True
+            self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+            self.setWindowOpacity(0.0)
+            self.show()
+            self.center()
+            
+            # Reset flag and cleanly enter clipboard mode so geometry targets are fully correct
+            self.is_clipboard_mode = False
+            self.enter_clipboard_mode()
+            
+            self.animate_entry()
+            self.input_field.setFocus()
+            self.send_udp_command("SET_MODE:PAUSED")
+            self.mic_widget.set_active(False)
+
+    def enter_clipboard_mode(self):
+        if self.is_clipboard_mode:
+            return
+        # Exit other modes first
+        if self.is_settings_mode:
+            self.exit_settings_mode()
+        if self.is_history_mode:
+            self.reset_to_search_mode(animate=False, clear=True)
+
+        self.is_clipboard_mode = True
+
+        # Swap input bar to clipboard title
+        self.input_field.hide()
+        self.follow_up_widget.hide()
+        self.mic_widget.hide()
+        self.cc_container.hide()
+        self.clipboard_title.show()
+        self.clipboard_close_btn.show()
+
+        self._apply_clipboard_close_btn_style()
+
+        # Show list with clipboard items
+        self.divider.show()
+        self.list_widget.show()
+        self._populate_clipboard_list()
+
+    def exit_clipboard_mode(self):
+        if not self.is_clipboard_mode:
+            return
+        self.is_clipboard_mode = False
+        self.is_entry_animating = False  # ensure adjust_window_height isn't blocked
+
+        if hasattr(self, 'anim_group') and self.anim_group.state() == QPropertyAnimation.State.Running:
+            self.anim_group.stop()
+
+        self.clipboard_title.hide()
+        self.clipboard_close_btn.hide()
+
+        # Restore normal input bar
+        self.input_field.show()
+        self.follow_up_widget.show()
+        self.mic_widget.show()
+        # Don't pre-show divider/list — refresh_list will hide them since query is empty
+        self.input_field.blockSignals(True)
+        self.input_field.clear()
+        self.input_field.setPlaceholderText("Search or ask...")
+        self.input_field.blockSignals(False)
+        self.frame.set_minimal_mode(True)
+        self.refresh_list("", animate=True)
+        self.input_field.setFocus()
+
+    def _populate_clipboard_list(self, filter_text=""):
+        """Fill the list widget with clipboard history entries."""
+        # Force a poll so we get the latest clipboard content before showing
+        self._clipboard_manager._poll()
+        self.list_widget.clear()
+        entries = self._clipboard_manager.search(filter_text)
+        logging.info(f"_populate_clipboard_list: {len(entries)} entries, filter={filter_text!r}")
+
+        if not entries:
+            # Show empty state
+            empty = StandardItemWidget("No clipboard history yet")
+            empty.set_theme(self.current_theme)
+            item = QListWidgetItem(self.list_widget)
+            item.setSizeHint(QSize(0, 52))
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, empty)
+            if self.is_entry_animating:
+                self.adjust_window_height(animate=False, force=True)
+            else:
+                self.adjust_window_height(animate=True)
+            return
+
+        for entry in entries:
+            widget = ClipboardItemWidget(entry)
+            widget.set_theme(self.current_theme)
+
+            item = QListWidgetItem(self.list_widget)
+            item.setSizeHint(QSize(0, 60))
+            item.setData(Qt.ItemDataRole.UserRole, {'type': 'clipboard', 'text': entry.text})
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, widget)
+
+        if self.is_entry_animating:
+            self.adjust_window_height(animate=False, force=True)
+        else:
+            self.adjust_window_height(animate=True)
+
+    def _apply_clipboard_close_btn_style(self):
+        t = THEMES.get(self.current_theme, THEMES["dark"])
+        primary = t["text_primary"]
+        placeholder = t["placeholder"]
+        border = t["border_color"]
+        is_dark = self.current_theme == "dark"
+        btn_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.05)"
+        btn_hover = "rgba(255,255,255,0.15)" if is_dark else "rgba(0,0,0,0.09)"
+
+        self.clipboard_title.setStyleSheet(
+            f"font-style: italic; color: {placeholder};"
+        )
+
+        self.clipboard_close_btn.setStyleSheet(f"""
+            QPushButton#ClipboardCloseBtn {{
+                background: {btn_bg};
+                border: 1px solid {border};
+                border-radius: 18px;
+                color: {primary};
+                font-size: 20px;
+                font-family: "Manrope";
+            }}
+            QPushButton#ClipboardCloseBtn:hover {{
+                background: {btn_hover};
+            }}
+        """)
+
+    def _handle_clipboard_item_selected(self, item, paste=False):
+        """Handle clipboard item selection. Single click = copy only, double click / Enter = copy + paste."""
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict) or data.get('type') != 'clipboard':
+            return
+
+        text = data.get('text', '')
+        if not text:
+            return
+
+        # Set clipboard and update manager state so the poll doesn't re-add this entry
+        QGuiApplication.clipboard().setText(text)
+        self._clipboard_manager._last_text = text
+
+        if paste:
+            # Double click / Enter: copy + paste
+            self.animate_close()
+            QTimer.singleShot(400, self._simulate_paste)
+        else:
+            # Single click: just copy, stay open — flash the item to confirm
+            widget = self.list_widget.itemWidget(item)
+            if widget:
+                self._flash_clipboard_copied(widget)
+
+    @staticmethod
+    def _simulate_paste():
+        """Simulate Cmd+V keystroke on macOS."""
+        if sys.platform == "darwin":
+            try:
+                import subprocess
+                subprocess.Popen([
+                    'osascript', '-e',
+                    'tell application "System Events" to keystroke "v" using command down'
+                ])
+            except Exception as e:
+                logging.error(f"Failed to simulate paste: {e}")
+
+    def _flash_clipboard_copied(self, widget):
+        """Brief 'Copied!' flash on a clipboard item to confirm single-click copy."""
+        if not hasattr(widget, 'preview_label'):
+            return
+        original = widget.preview_label.text()
+        t = THEMES.get(self.current_theme, THEMES["dark"])
+        widget.preview_label.setText("Copied!")
+        widget.preview_label.setStyleSheet(f"color: #4CAF50;")
+        def restore():
+            try:
+                widget.preview_label.setText(original)
+                widget.preview_label.setStyleSheet(f"color: {t['text_primary']};")
+            except RuntimeError:
+                pass
+        QTimer.singleShot(600, restore)
+
+    def _on_clipboard_double_click(self, item):
+        """Double click on clipboard item → copy + paste."""
+        if self.is_clipboard_mode and item:
+            self._handle_clipboard_item_selected(item, paste=True)
+
     def keyPressEvent(self, event):
         # Cmd+Option (macOS) → hide window
         cmd_opt = Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier
@@ -1656,6 +1931,10 @@ class OmniWindow(QWidget):
         if event.key() == Qt.Key.Key_Escape:
             logging.info("Escape key pressed (Global)")
 
+            if self.is_clipboard_mode:
+                self.exit_clipboard_mode()
+                return
+
             if self.is_settings_mode:
                 self.exit_settings_mode()
                 return
@@ -1692,6 +1971,7 @@ class OmniWindow(QWidget):
     def closeEvent(self, event):
         self._is_closing = False
         self.setWindowOpacity(1.0) # Reset for next show
+        self._clipboard_manager._save()
         super().closeEvent(event)
 
     def on_text_changed(self, text):
@@ -2387,9 +2667,15 @@ class OmniWindow(QWidget):
         # Wait, handle_ipc_query calls perform_ai_query directly.
         # So on_entered is only for manual keyboard interaction.
         self.voice_triggered_query = False
-        
+
         if not item:
             item = self.list_widget.currentItem()
+
+        # Clipboard mode: single click copies to clipboard (no paste, no close)
+        # Double click is handled by _on_clipboard_double_click (copy + paste)
+        if self.is_clipboard_mode and item:
+            self._handle_clipboard_item_selected(item, paste=False)
+            return
         
         # "Enter to open" — if input is empty and a file hint is pending, open it
         if not self.input_field.text().strip() and self._pending_open_file:
