@@ -3,11 +3,26 @@ import os
 import logging
 import memvid_sdk
 import datetime
+import time
+import hashlib
 from src.core.config import PERSONAL_MEM_PATH
 from src.services.llm.model_manager import llm, main_lock
 from src.services.memory.embedding import embed_text
 
 personal_mem = None
+
+# Memory cache to avoid re-resolving identical facts every request
+_memory_cache = {"result": None, "timestamp": 0, "facts_hash": None}
+_MEMORY_CACHE_TTL = 60  # seconds
+
+
+def invalidate_memory_cache():
+    """Invalidate the memory cache (called after writes)."""
+    _memory_cache["result"] = None
+    _memory_cache["timestamp"] = 0
+    _memory_cache["facts_hash"] = None
+    logging.info("[MEMORY] Cache invalidated")
+
 
 def get_memvid_instance():
     """Lazily initializes and returns the Memvid instance."""
@@ -27,20 +42,37 @@ def get_memvid_instance():
             logging.info(f"Loading existing Memvid memory from {PERSONAL_MEM_PATH}")
             # Use existing memory with vector search enabled
             personal_mem = memvid_sdk.use('basic', PERSONAL_MEM_PATH, enable_vec=True)
-        
+
         return personal_mem
     except Exception as e:
         logging.error(f"Failed to initialize Memvid: {e}")
         return None
 
 def resolve_contradictions(facts):
-    """Uses Main Model to resolve conflicting facts."""
+    """Uses Fast Model to resolve conflicting facts (was Main Model — too slow)."""
     if len(facts) <= 1: return "\n".join(facts)
-    
+
     unique_facts = list(set(facts))
+
+    # If all facts are already unique and few, skip LLM entirely
+    if len(unique_facts) <= 3:
+        # Quick check: no "FACT DELETED" markers that need processing
+        has_deletions = any("FACT DELETED:" in f for f in unique_facts)
+        if not has_deletions:
+            logging.info(f"[MEMORY] Skipping LLM resolution — {len(unique_facts)} unique facts, no conflicts")
+            return "\n".join([f"- {f}" for f in unique_facts])
+
+    # Check cache
+    facts_hash = hashlib.md5("||".join(sorted(unique_facts)).encode()).hexdigest()
+    if (_memory_cache["facts_hash"] == facts_hash
+            and _memory_cache["result"]
+            and time.time() - _memory_cache["timestamp"] < _MEMORY_CACHE_TTL):
+        logging.info("[MEMORY] Cache hit for resolve_contradictions")
+        return _memory_cache["result"]
+
     facts_text = "\n".join([f"- {f}" for f in unique_facts])
     logging.info(f"Resolving Contradictions for:\n{facts_text}")
-    
+
     prompt = f"""You are a Fact Resolver. The following list contains facts about a user. duplicates or contradictions may exist.
 Task:
 1. Identify contradictions.
@@ -58,26 +90,42 @@ resolved facts:"""
 
     try:
         from src.services.llm import model_manager
+        from src.services.llm.model_manager import ensure_fast_model, fast_lock
 
-        # Non-blocking acquire: if the main model already holds the lock (e.g. we are
-        # inside a tool call), skip the LLM step to avoid deadlocking.
-        acquired = model_manager.main_lock.acquire(blocking=False)
-        if not acquired:
-            logging.info("Fact Resolution skipped (main_lock held — inside tool call)")
+        ensure_fast_model()
+        if not model_manager.fast_model:
             return "\n".join(unique_facts)
 
-        try:
-            if not model_manager.llm:
-                return "\n".join(unique_facts)
-            out = model_manager.llm.create_chat_completion(
-                messages=[{"role": "system", "content": "You are a logical consistency engine. Output ONLY the resolved facts list."}, {"role": "user", "content": prompt}],
-                max_tokens=256, temperature=0.0
+        with fast_lock:
+            if hasattr(model_manager.fast_model, 'reset'):
+                model_manager.fast_model.reset()
+            start_t = time.time()
+            out = model_manager.fast_model.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are a logical consistency engine. Output ONLY the resolved facts list."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=256,
+                temperature=0.0,
+                chat_template_kwargs={"enable_thinking": False},
             )
-            cleaned = out['choices'][0]['message']['content'].strip()
-            logging.info(f"Resolved Facts Output:\n{cleaned}")
-            return cleaned
-        finally:
-            model_manager.main_lock.release()
+            dur = time.time() - start_t
+            logging.info(f"[MEMORY] Fact resolution via fast model in {dur:.2f}s")
+
+        if out is None:
+            return "\n".join(unique_facts)
+
+        import re
+        cleaned = out['choices'][0]['message']['content'].strip()
+        cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
+        logging.info(f"Resolved Facts Output:\n{cleaned}")
+
+        # Update cache
+        _memory_cache["result"] = cleaned
+        _memory_cache["timestamp"] = time.time()
+        _memory_cache["facts_hash"] = facts_hash
+
+        return cleaned
     except Exception as e:
         logging.error(f"Fact Resolution Failed: {e}")
         return "\n".join(unique_facts)
@@ -107,17 +155,17 @@ def get_user_memory(query=None):
     try:
         # Search specifically for the query
         logging.info(f"Searching personal memory for: {query}")
-        
+
         # Disable embedding generation for real-time query to fix 3.5s delay
         # using lexical search instead.
         query_vec = None # embed_text(query)
-        
+
         # Use find with query_embedding if available
         if query_vec:
             raw_results = mem.find(query, k=5, query_embedding=query_vec)
         else:
             raw_results = mem.find(query, k=10) # increase k slightly to compensate for lexical search
-        
+
         # Results is a dict with 'hits' key
         hits = []
         if isinstance(raw_results, dict):
@@ -130,7 +178,7 @@ def get_user_memory(query=None):
             if isinstance(h, dict):
                 # 'snippet' contains the text context in Memvid hits
                 text = h.get('snippet') or h.get('text')
-                
+
                 # Extract Timestamp
                 date_str = ""
                 ts = h.get('created_at')
@@ -153,14 +201,14 @@ def get_user_memory(query=None):
                         clean_text = clean_text.replace(" title: Untitled", "").strip()
                     if clean_text.endswith(" title:"):
                         clean_text = clean_text[:-7].strip()
-                        
+
                     facts.append(f"{date_str}{clean_text}")
             elif isinstance(h, str):
                 facts.append(h)
-        
+
         if facts:
             return resolve_contradictions(facts)
-        
+
         # Fallback: if specific search failed, try general user search
         logging.info("Specific search yielded no results, falling back to general user search.")
         fallback_res = mem.find("user", k=5)
@@ -171,7 +219,7 @@ def get_user_memory(query=None):
                 if text:
                     clean_text = text.split('\ntitle:')[0].split('\ntext:')[0].strip()
                     if clean_text not in facts: facts.append(clean_text)
-        
+
         return resolve_contradictions(facts) if facts else "No specific personal details found for this query."
     except Exception as e:
         logging.error(f"Memvid Search Failed: {e}")
@@ -190,7 +238,7 @@ def remember_fact(fact):
         hits = []
         if isinstance(search_res, dict):
             hits = search_res.get('hits', [])
-        
+
         for h in hits:
             snippet = h.get('snippet', '')
             # Clean snippet for comparison
@@ -200,10 +248,10 @@ def remember_fact(fact):
                 return True # Treat as success
 
         logging.info(f"Fact is new. Remembering: {fact}")
-        
+
         # Generate embedding manually
         vec = embed_text(fact)
-        
+
         if vec:
             # Use put_many to inject manual embedding
             # mem.put_many takes a list of dicts and an optional list of embeddings
@@ -219,7 +267,8 @@ def remember_fact(fact):
         else:
             # Fallback to lexical only if embedding fails
             mem.put(text=fact, enable_embedding=False)
-            
+
+        invalidate_memory_cache()
         return True
     except Exception as e:
         logging.error(f"Failed to remember fact: {e}")
@@ -234,6 +283,7 @@ def remember_update(fact):
     try:
         logging.info(f"Correcting Fact: {fact}")
         mem.correct(statement=fact, boost=3.0)
+        invalidate_memory_cache()
         return True
     except Exception as e:
         logging.error(f"Failed to correct fact: {e}")
@@ -247,24 +297,24 @@ def delete_memory(query):
 
     try:
         logging.info(f"Attempting to delete memory matching: {query}")
-        # Search for the fact 
+        # Search for the fact
         search_res = mem.find(query, k=5)
         hits = []
         if isinstance(search_res, dict):
             hits = search_res.get('hits', [])
-        
+
         deleted_count = 0
         for h in hits:
             # We cannot physically delete in Memvid V2 apparently (append-only?).
             # So we use .correct() to overwrite it with a sentinel that we will filter out.
-            
+
             snippet = h.get('snippet', '')
             clean_text = snippet.split('\ntitle:')[0].split('\ntext:')[0].strip()
-            
+
             # Simple check: is this related?
             # If search score is good, likely yes.
             # Memvid's .correct() takes the OLD statement to link the correction.
-            
+
             if clean_text and "FACT DELETED:" not in clean_text:
                 logging.info(f"Marking as deleted: '{clean_text}'")
                 try:
@@ -274,8 +324,10 @@ def delete_memory(query):
                     mem.correct(f"FACT DELETED: {clean_text}", boost=5.0)
                     deleted_count += 1
                 except Exception as e:
-                    logging.error(f"Correction failed: {e}") 
-        
+                    logging.error(f"Correction failed: {e}")
+
+        if deleted_count > 0:
+            invalidate_memory_cache()
         return deleted_count > 0
     except Exception as e:
         logging.error(f"Failed to delete memory: {e}")

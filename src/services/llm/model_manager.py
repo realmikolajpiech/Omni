@@ -233,11 +233,14 @@ class XAIMainWrapper:
     def reset(self):
         pass
 
-    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, tools=None, **kwargs):
+    def create_chat_completion(self, messages, max_tokens=1024, temperature=0.7, stream=False, tools=None, model_override=None, **kwargs):
         messages = _convert_file_urls_to_base64(messages)
         messages = _messages_for_cache(messages)
 
         temperature = float(temperature)
+
+        # Use override model if provided (for smart routing), otherwise default
+        active_model = model_override or self.model
 
         # Filter unsupported kwargs for xAI / generic OpenAI-compatible APIs
         extra = {k: v for k, v in kwargs.items() if k not in ("chat_template_kwargs",)}
@@ -247,7 +250,7 @@ class XAIMainWrapper:
 
         # Limit reasoning effort for reasoning models to reduce thinking time
         # Note: xAI grok models don't support reasoning_effort parameter
-        if "reasoning" in self.model and "grok" not in self.model:
+        if "reasoning" in active_model and "grok" not in active_model:
             extra["reasoning_effort"] = "low"
 
         start_time = time.time()
@@ -255,7 +258,7 @@ class XAIMainWrapper:
         if stream:
             try:
                 stream_response = self.client.chat.completions.create(
-                    model=self.model,
+                    model=active_model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
@@ -270,7 +273,7 @@ class XAIMainWrapper:
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=active_model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,

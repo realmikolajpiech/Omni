@@ -409,6 +409,88 @@ def should_see_screen(query):
         logging.error(f"Screen Intent check failed: {e}")
         return False
 
+
+def _should_use_reasoning(query):
+    """Uses Fast Model to decide if the query needs reasoning (deep thinking) or can be answered directly.
+    Returns the model name to use."""
+    from src.core.config import MAIN_MODEL_XAI, MAIN_MODEL_XAI_NONREASONING
+
+    query_lower = query.lower()
+
+    # Quick patterns that never need reasoning
+    no_reasoning_patterns = [
+        "hello", "hi ", "hey", "good morning", "good night", "thanks", "thank you",
+        "cześć", "hej", "dzięki", "siema", "elo",
+        "translate", "przetłumacz", "tłumacz",
+        "what time", "what date", "która godzina",
+        "who are you", "what are you", "your name",
+        "open ", "launch ", "otwórz ", "uruchom ",
+        "click ", "type ", "scroll ", "press ", "swipe ",
+    ]
+    if any(pattern in query_lower for pattern in no_reasoning_patterns):
+        logging.info(f"[ROUTING] Non-reasoning (pattern match) for '{query[:60]}'")
+        return MAIN_MODEL_XAI_NONREASONING
+
+    # Quick patterns that always need reasoning
+    reasoning_patterns = [
+        "explain", "why ", "analyze", "compare", "debug", "fix ",
+        "write code", "implement", "algorithm", "step by step",
+        "how does", "how do", "what if", "prove", "solve",
+    ]
+    if any(pattern in query_lower for pattern in reasoning_patterns):
+        logging.info(f"[ROUTING] Reasoning (pattern match) for '{query[:60]}'")
+        return MAIN_MODEL_XAI
+
+    # Ask fast model for ambiguous queries
+    ensure_fast_model()
+    sys_prompt = (
+        "Decide if this query requires DEEP THINKING (reasoning, analysis, multi-step logic) or can be answered DIRECTLY.\n"
+        "Output ONLY 'THINK' or 'DIRECT'.\n"
+        "THINK: math problems, coding, debugging, analysis, comparisons, complex explanations, planning, logic puzzles, problem solving.\n"
+        "DIRECT: greetings, translations, simple facts, definitions, small talk, commands, simple questions, creative writing, summaries.\n"
+        "\n"
+        "Examples:\n"
+        "Query: write a python function to sort a list -> THINK\n"
+        "Query: what is the capital of France -> DIRECT\n"
+        "Query: explain how transformers work -> THINK\n"
+        "Query: translate hello to spanish -> DIRECT\n"
+        "Query: hi how are you -> DIRECT\n"
+        "Query: why is the sky blue -> THINK\n"
+        "Query: summarize this text -> DIRECT\n"
+        "Query: find the bug in this code -> THINK\n"
+        "\n"
+        "(If unsure, say THINK)."
+    )
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": f"Query: {query}"},
+    ]
+    try:
+        with fast_lock:
+            if hasattr(model_manager.fast_model, 'reset'):
+                model_manager.fast_model.reset()
+            start_t = time.time()
+            out = model_manager.fast_model.create_chat_completion(
+                messages=messages,
+                max_tokens=5,
+                temperature=0.0,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            dur = time.time() - start_t
+            logging.info(f"[ROUTING] Fast model decision in {dur:.2f}s")
+        if out is None:
+            return MAIN_MODEL_XAI  # default to reasoning
+        res = out['choices'][0]['message']['content'].strip()
+        res = re.sub(r'<think>.*?</think>', '', res, flags=re.DOTALL | re.IGNORECASE).strip().upper()
+        use_reasoning = "THINK" in res
+        chosen = MAIN_MODEL_XAI if use_reasoning else MAIN_MODEL_XAI_NONREASONING
+        logging.info(f"[ROUTING] {'Reasoning' if use_reasoning else 'Non-reasoning'} for '{query[:60]}' (model={chosen})")
+        return chosen
+    except Exception as e:
+        logging.error(f"[ROUTING] Classification failed: {e}, defaulting to reasoning")
+        return MAIN_MODEL_XAI
+
+
 def extract_actions(text):
     if not text: return "", [], ""
 
@@ -657,11 +739,13 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
         logging.info("[CHAT] Screenshot provided — skipping tool calls for this request.")
 
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _pool:
         _loc_fut = _pool.submit(get_ip_location)
         _mem_fut = _pool.submit(get_user_memory, None)
+        _routing_fut = _pool.submit(_should_use_reasoning, query)
         user_loc = _loc_fut.result()
         user_personal_context = _mem_fut.result()
+        routed_model = _routing_fut.result()
 
     # NOTE: user_personal_context will NOT have the "Just Learned" fact from this turn,
     # because it is being extracted in the background. This is a trade-off for speed.
@@ -867,10 +951,12 @@ Available settings and values:
 
     try:
         abort_fast_event.clear()
-        
+
+        # routed_model already resolved from parallel ThreadPoolExecutor above
+
         # Start total request timer
         request_start_time = time.time()
-        logging.info(f"[CHAT] Processing request at {request_start_time:.2f}")
+        logging.info(f"[CHAT] Processing request at {request_start_time:.2f} (model={routed_model})")
 
         with main_lock:
             logging.info("[CHAT] Main lock acquired. Starting generation...")
@@ -901,6 +987,7 @@ Available settings and values:
                         temperature=0.6,
                         stream=True,
                         tools=active_tools,
+                        model_override=routed_model,
                     )
 
                     accumulated_text = ""
@@ -1127,6 +1214,7 @@ Available settings and values:
                         max_tokens=1536,
                         temperature=0.6,
                         tools=active_tools,
+                        model_override=routed_model,
                     )
                     msg = output['choices'][0]['message']
                     full_text = (msg.get('content') or "").strip()

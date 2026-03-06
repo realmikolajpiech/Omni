@@ -320,6 +320,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # Main model: xAI Grok (via OpenAI-compatible API)
 MAIN_MODEL_XAI = "grok-4-1-fast-reasoning"
+MAIN_MODEL_XAI_NONREASONING = "grok-4-1-fast-non-reasoning"
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 # Embedding Model
