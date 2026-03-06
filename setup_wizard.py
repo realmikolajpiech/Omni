@@ -18,16 +18,22 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 SOURCE_DIR = os.path.join(PROJECT_ROOT, "dist", "Omni")
 LOGO_PATH = os.path.join(PROJECT_ROOT, "assets", "omni.png")
 
+INDEX_DONE_MARKER = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "ai-memory-db", ".indexed"
+)
+
+
 class InstallWorker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(bool, str)
-    
-    def __init__(self, target_dir, create_desktop, create_autostart):
+
+    def __init__(self, target_dir, create_desktop, create_autostart, enable_indexing):
         super().__init__()
         self.target_dir = target_dir
         self.create_desktop = create_desktop
         self.create_autostart = create_autostart
-        
+        self.enable_indexing = enable_indexing
+
     def run(self):
         try:
             if not os.path.exists(SOURCE_DIR):
@@ -43,24 +49,24 @@ class InstallWorker(QThread):
                     # Might fail if app is running
                     self.finished.emit(False, f"Could not clean target directory. Is Omni running?\nError: {e}")
                     return
-            
+
             self.progress.emit(20)
-            
+
             # 2. Copy Files
             # shutil.copytree is simple but doesn't give granular progress easily without custom loop
             # For simplicity in this v1, we just copy.
             shutil.copytree(SOURCE_DIR, self.target_dir)
             self.progress.emit(80)
-            
+
             exe_path = os.path.join(self.target_dir, EXE_NAME)
-            
+
             # 3. Create Desktop Shortcut (UI Only)
             if self.create_desktop:
                 desktop = os.path.join(os.path.expanduser("~"), "Desktop")
                 shortcut_path = os.path.join(desktop, f"{APP_NAME}.lnk")
                 # Launch UI mode
                 self.create_shortcut(exe_path, "ui", shortcut_path)
-                
+
             self.progress.emit(90)
 
             # 4. Create Autostart Shortcut (Brain Only)
@@ -69,6 +75,12 @@ class InstallWorker(QThread):
                 shortcut_path = os.path.join(startup, f"{APP_NAME} Background Service.lnk")
                 # Launch Brain mode
                 self.create_shortcut(exe_path, "brain", shortcut_path)
+
+            # 5. Skip indexing: write the done-marker so the app never starts indexing
+            if not self.enable_indexing:
+                os.makedirs(os.path.dirname(INDEX_DONE_MARKER), exist_ok=True)
+                with open(INDEX_DONE_MARKER, "w") as f:
+                    f.write("files=0 chunks=0 tokens=0 images=0 (skipped by installer)\n")
 
             self.progress.emit(100)
             self.finished.emit(True, "Installation Complete!")

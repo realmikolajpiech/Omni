@@ -24,6 +24,15 @@ def invalidate_memory_cache():
     logging.info("[MEMORY] Cache invalidated")
 
 
+def _trigger_sync():
+    """Trigger a background memory sync after a write."""
+    try:
+        from src.services.sync import memory_sync
+        memory_sync.sync_now()
+    except Exception:
+        pass
+
+
 def get_memvid_instance():
     """Lazily initializes and returns the Memvid instance."""
     global personal_mem
@@ -269,6 +278,7 @@ def remember_fact(fact):
             mem.put(text=fact, enable_embedding=False)
 
         invalidate_memory_cache()
+        _trigger_sync()
         return True
     except Exception as e:
         logging.error(f"Failed to remember fact: {e}")
@@ -284,6 +294,7 @@ def remember_update(fact):
         logging.info(f"Correcting Fact: {fact}")
         mem.correct(statement=fact, boost=3.0)
         invalidate_memory_cache()
+        _trigger_sync()
         return True
     except Exception as e:
         logging.error(f"Failed to correct fact: {e}")
@@ -328,6 +339,7 @@ def delete_memory(query):
 
         if deleted_count > 0:
             invalidate_memory_cache()
+            _trigger_sync()
         return deleted_count > 0
     except Exception as e:
         logging.error(f"Failed to delete memory: {e}")

@@ -433,7 +433,7 @@ class WelcomePage(QWidget):
         pills_layout.setContentsMargins(52, 0, 52, 0)
         pills_layout.setSpacing(8)
         pills_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        for label in ["Semantic file search", "AI that remembers you", "Control your Mac"]:
+        for label in ["Semantic file search", "AI that remembers you", "Control your computer"]:
             pill = QLabel(label)
             pill.setStyleSheet(f"""
                 QLabel {{
@@ -1667,7 +1667,7 @@ class OnboardingPage(QWidget):
         },
         {
             "label": "04 / 04",
-            "title": "Control your Mac",
+            "title": "Control your computer",
             "body": "Change settings, manage files, open apps, check your calendar — just type it. Omni turns natural language into real actions.",
             "example": "\"move screenshots to Desktop/Screenshots\"",
         },

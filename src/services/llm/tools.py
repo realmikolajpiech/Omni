@@ -4,6 +4,8 @@ import logging
 import re
 import threading
 
+from src.core.stats_store import increment_tool
+
 # ── Per-request trust-request collector ──────────────────────────────────────
 # Each Flask request runs in its own thread, so threading.local() keeps
 # the pending list isolated per request.
@@ -511,6 +513,7 @@ TOOL_SCHEMAS = [
 
 def execute_tool(name: str, arguments: dict) -> str:
     """Dispatch a tool call by name and return the result as a plain string."""
+    increment_tool(name)
     try:
         if name == "search_web":
             return _tool_search_web(arguments.get("query", ""))
@@ -591,9 +594,7 @@ def _tool_search_web(query: str) -> str:
     from src.services.search.web_search import perform_web_search
     if not query.strip():
         return "Error: empty query."
-    print(f"[TOOL:search_web] query={query!r}", flush=True)
     result = perform_web_search(query)
-    print(f"[TOOL:search_web] result len={len(result)} preview={result[:120]!r}", flush=True)
     return result or "No web results found."
 
 
@@ -601,7 +602,6 @@ def _tool_search_files(query: str) -> str:
     from src.services.search.local_search import perform_file_search
     if not query.strip():
         return "Error: empty query."
-    logging.info(f"[tool:search_files] query={query!r}")
     result = perform_file_search(query)
     return result or "No local files found matching that query."
 
@@ -610,7 +610,6 @@ def _tool_calculate(expression: str) -> str:
     from src.services.llm.chat import perform_calculation
     if not expression.strip():
         return "Error: empty expression."
-    logging.info(f"[tool:calculate] expression={expression!r}")
     return perform_calculation(expression)
 
 
@@ -618,7 +617,6 @@ def _tool_search_images(query: str) -> str:
     from src.services.search.image_search import perform_image_search_with_fallback
     if not query.strip():
         return "Error: empty query."
-    logging.info(f"[tool:search_images] query={query!r}")
     result = perform_image_search_with_fallback(query)
     return result or "No matching images found."
 
@@ -627,7 +625,6 @@ def _tool_memory_recall(query: str) -> str:
     from src.services.memory.memvid_store import get_user_memory
     if not query.strip():
         return "Error: empty query."
-    logging.info(f"[tool:memory_recall] query={query!r}")
     result = get_user_memory(query)
     return result or "No memories found for that query."
 
@@ -637,7 +634,6 @@ def _tool_memory_save(fact: str) -> str:
     fact = fact.strip()
     if not fact:
         return "Error: empty fact."
-    logging.info(f"[tool:memory_save] fact={fact!r}")
     ok = remember_fact(fact)
     return f"Saved: {fact}" if ok else "Failed to save memory."
 
@@ -646,7 +642,6 @@ def _tool_memory_delete(query: str) -> str:
     from src.services.memory.memvid_store import delete_memory
     if not query.strip():
         return "Error: empty query."
-    logging.info(f"[tool:memory_delete] query={query!r}")
     ok = delete_memory(query)
     return f"Deleted memories matching: {query}" if ok else "No matching memories found to delete."
 
@@ -738,7 +733,6 @@ def _tool_run_terminal(command: str, description: str = "") -> str:
             f"The user is being prompted for one-time permission."
         )
 
-    logging.info(f"[tool:run_terminal] {description or command!r}")
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True, timeout=15
@@ -759,7 +753,6 @@ def _tool_run_terminal(command: str, description: str = "") -> str:
 
 def _tool_get_calendar_events(days: int) -> str:
     from src.services.system.productivity import get_calendar_events
-    logging.info(f"[tool:get_calendar_events] days={days}")
     return get_calendar_events(days=int(days))
 
 
@@ -769,13 +762,11 @@ def _tool_create_calendar_event(title: str, start_iso: str, duration_minutes: in
     start_iso = start_iso.strip()
     if not title or not start_iso:
         return "Error: title and start_iso are required."
-    logging.info(f"[tool:create_calendar_event] title={title!r} start={start_iso}")
     return create_calendar_event(title, start_iso, int(duration_minutes), description)
 
 
 def _tool_get_unread_emails(limit: int) -> str:
     from src.services.system.productivity import get_unread_emails
-    logging.info(f"[tool:get_unread_emails] limit={limit}")
     return get_unread_emails(limit=int(limit))
 
 
@@ -786,7 +777,6 @@ def _tool_send_email(to: str, subject: str, body: str) -> str:
     body = body.strip()
     if not to or not subject:
         return "Error: to and subject are required."
-    logging.info(f"[tool:send_email] to={to!r} subject={subject!r}")
     return send_email(to, subject, body)
 
 
@@ -819,7 +809,6 @@ def _tool_install_app(name: str) -> str:
     brew = _find_brew()
     if not brew:
         return "Error: Homebrew not found. Install it from https://brew.sh"
-    logging.info(f"[tool:install_app] name={name!r}")
     env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
     try:
         result = subprocess.run(
@@ -854,7 +843,6 @@ def _tool_uninstall_app(name: str) -> str:
     brew = _find_brew()
     if not brew:
         return "Error: Homebrew not found."
-    logging.info(f"[tool:uninstall_app] name={name!r}")
     env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
     try:
         result = subprocess.run(
@@ -885,7 +873,6 @@ def _tool_organize_folder(path: str, strategy: str) -> str:
         })
         return "[Permission required] 'Automation' trust is needed to organize files."
 
-    logging.info(f"[tool:organize_folder] path={path!r} strategy={strategy!r}")
     return organize_folder(path, strategy)
 
 
@@ -914,7 +901,6 @@ def _tool_create_file(filename: str, content: str, folder: str = "") -> str:
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
-        logging.info(f"[tool:create_file] Created {file_path} ({len(content)} chars)")
         return f"Created: {file_path}"
     except Exception as e:
         return f"Error creating file: {e}"
@@ -978,7 +964,6 @@ def _tool_compress(paths: list, output: str = "") -> str:
         else:
             size_str = f"{size / (1024 * 1024):.1f} MB"
 
-        logging.info(f"[tool:compress] Created {zip_path} ({size_str})")
         return f"Created: {zip_path} ({size_str})"
     except Exception as e:
         return f"Error compressing: {e}"
@@ -1022,7 +1007,6 @@ def _tool_edit_file(path: str, old_text: str, new_text: str) -> str:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        logging.info(f"[tool:edit_file] Edited {path}")
         return f"Edited: {path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -1039,8 +1023,6 @@ def _tool_find_file(name: str, folder: str = "", include_dirs: bool = True) -> s
     folder = folder.strip()
     if folder:
         folder = os.path.expanduser(folder)
-
-    logging.info(f"[tool:find_file] name={name!r} folder={folder!r}")
 
     results: list[str] = []
 
