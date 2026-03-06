@@ -14,6 +14,84 @@ Usage:
 """
 
 import base64
+
+# ── Auth callback HTML pages ──────────────────────────────────────────────────
+
+_PAGE_STYLE = """
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Omni</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#09090f;color:#f4f4f5;font-family:'Manrope',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0}
+.logo{position:fixed;top:28px;left:50%;transform:translateX(-50%);
+font-size:13px;font-weight:700;letter-spacing:2px;color:rgba(244,244,245,0.25);text-transform:uppercase}
+.card{text-align:center;padding:0 32px;max-width:380px;width:100%}
+.icon{width:68px;height:68px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+margin:0 auto 28px;font-size:30px}
+.icon.success{background:rgba(52,199,89,0.10);border:1px solid rgba(52,199,89,0.22)}
+.icon.error{background:rgba(255,80,80,0.10);border:1px solid rgba(255,80,80,0.22)}
+h1{font-size:26px;font-weight:600;letter-spacing:-0.4px;margin-bottom:12px;line-height:1.2}
+p{color:rgba(244,244,245,0.42);font-size:14px;font-weight:300;line-height:1.7}
+.badge{display:inline-block;margin-top:32px;padding:8px 20px;border-radius:100px;
+background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+font-size:12px;color:rgba(244,244,245,0.30);letter-spacing:0.5px}
+</style></head><body>
+<div class="logo">Omni</div>
+"""
+
+_SUCCESS_HTML = (_PAGE_STYLE + """
+<div class="card">
+  <div class="icon success">✓</div>
+  <h1>You're signed in</h1>
+  <p>You can close this tab and return to Omni.</p>
+  <div class="badge">Authentication complete</div>
+</div>
+</body></html>
+""").encode("utf-8")
+
+_ERROR_HTML = (_PAGE_STYLE + """
+<div class="card">
+  <div class="icon error">✕</div>
+  <h1>Authentication failed</h1>
+  <p>Something went wrong. Close this tab and try again.</p>
+  <div class="badge">You can close this tab</div>
+</div>
+</body></html>
+""").encode("utf-8")
+
+_PENDING_HTML = (_PAGE_STYLE + """
+<div class="card">
+  <div class="icon" style="background:rgba(139,92,246,0.10);border:1px solid rgba(139,92,246,0.22);font-size:22px">⟳</div>
+  <h1>Signing you in…</h1>
+  <p>Just a moment.</p>
+</div>
+<script>
+var h=window.location.hash.substring(1);
+var params=new URLSearchParams(h);
+var at=params.get('access_token');
+var rt=params.get('refresh_token')||'';
+if(at){
+  fetch('/token',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({access_token:at,refresh_token:rt})})
+  .then(function(){
+    document.querySelector('h1').textContent='You\\'re signed in';
+    document.querySelector('p').textContent='You can close this tab and return to Omni.';
+    document.querySelector('.icon').className='icon success';
+    document.querySelector('.icon').textContent='✓';
+    document.querySelector('.badge').textContent='Authentication complete';
+  });
+}else{
+  fetch('/error');
+  document.querySelector('h1').textContent='Authentication failed';
+  document.querySelector('p').textContent='Something went wrong. Close this tab and try again.';
+  document.querySelector('.icon').className='icon error';
+  document.querySelector('.icon').textContent='✕';
+}
+</script>
+</body></html>
+""").encode("utf-8")
 import hashlib
 import json
 import logging
@@ -226,27 +304,7 @@ def exchange_magic_link(url: str, on_done) -> None:
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path in ("/magic-callback", "/magic_callback"):
-                html = (
-                    b"<!DOCTYPE html><html><body>"
-                    b"<p style='font-family:sans-serif;padding:20px'>Signing you in\u2026</p>"
-                    b"<script>"
-                    b"var h=window.location.hash.substring(1);"
-                    b"var p=new URLSearchParams(h);"
-                    b"var at=p.get('access_token');"
-                    b"var rt=p.get('refresh_token')||'';"
-                    b"if(at){"
-                    b"fetch('/token',{method:'POST',"
-                    b"headers:{'Content-Type':'application/json'},"
-                    b"body:JSON.stringify({access_token:at,refresh_token:rt})})"
-                    b".then(function(){"
-                    b"document.body.innerHTML='<p style=\"font-family:sans-serif;padding:20px\">"
-                    b"Signed in! You can close this tab.</p>';});"
-                    b"}else{"
-                    b"document.body.innerHTML='<p style=\"font-family:sans-serif;padding:20px;color:red\">"
-                    b"Authentication failed. Close this tab.</p>';"
-                    b"fetch('/error');}"
-                    b"</script></body></html>"
-                )
+                html = _PENDING_HTML
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
@@ -371,14 +429,14 @@ def start_oauth(provider: str, on_done) -> None:
             params = urllib.parse.parse_qs(parsed.query)
             if "code" in params:
                 result["code"] = params["code"][0]
-                self._respond(b"<html><body><h2>Signed in! You can close this tab.</h2></body></html>")
+                self._respond(_SUCCESS_HTML)
             else:
                 result["error"] = params.get("error", ["Unknown error"])[0]
-                self._respond(b"<html><body><h2>Authentication failed. Close this tab.</h2></body></html>")
+                self._respond(_ERROR_HTML)
 
         def _respond(self, body: bytes):
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(body)
 

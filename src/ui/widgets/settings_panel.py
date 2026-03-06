@@ -14,7 +14,7 @@ import src.core.settings_store as settings_store
 import src.core.subscription as subscription
 import src.core.auth as auth
 import src.core.billing as billing
-from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET
+from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH
 
 # ── Trust level data ─────────────────────────────────────────────────────────
 
@@ -611,6 +611,7 @@ class SettingsPanel(QWidget):
         # ── Build Pages ──────────────────────────────────────────────
         self._add_page("AI Model", self._build_model())
         self._add_page("Trust", self._build_trust())
+        self._add_page("Files", self._build_files())
         self._add_page("Account", self._build_account())
         self._add_page("Feedback", self._build_feedback())
 
@@ -770,6 +771,129 @@ class SettingsPanel(QWidget):
 
         page.add_stretch()
         return page
+
+    def _build_files(self) -> QWidget:
+        import json, subprocess, sys, os
+        page = SettingsPage("Files")
+
+        page.add_widget(self._desc(
+            "Omni indexes your files to enable semantic search. "
+            "Indexing runs once in the background and resumes automatically if interrupted."
+        ))
+        page.add_spacing(20)
+
+        # ── Status card ───────────────────────────────────────────────
+        dark = self.current_theme == "dark"
+        status_card = _FeedbackFormCard(dark=dark)
+        lay = status_card._inner
+        lay.setSpacing(12)
+
+        # Status row
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(10)
+
+        self._files_dot = QLabel("●")
+        self._files_dot.setFont(_font("Manrope", 14))
+        self._files_dot.setFixedWidth(18)
+
+        self._files_status_lbl = QLabel()
+        self._files_status_lbl.setFont(_font("Manrope", 13, bold=True))
+
+        status_row.addWidget(self._files_dot)
+        status_row.addWidget(self._files_status_lbl)
+        status_row.addStretch()
+        lay.addLayout(status_row)
+
+        self._files_detail_lbl = QLabel()
+        self._files_detail_lbl.setObjectName("DescLbl")
+        self._files_detail_lbl.setFont(_font("Manrope", 10))
+        self._files_detail_lbl.setWordWrap(True)
+        lay.addWidget(self._files_detail_lbl)
+
+        lay.addSpacing(8)
+
+        # Action button
+        self._files_btn = QPushButton()
+        self._files_btn.setFixedHeight(38)
+        self._files_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._files_btn.setFont(_font("Manrope", 11, bold=True))
+        self._files_btn.setObjectName("FilesActionBtn")
+        self._files_btn.clicked.connect(self._on_files_btn_clicked)
+        lay.addWidget(self._files_btn)
+
+        page.add_widget(status_card)
+        page.add_stretch()
+
+        # State
+        self._indexer_proc = None   # type: subprocess.Popen | None
+        self._files_poll_timer = QTimer(self)
+        self._files_poll_timer.setInterval(1500)
+        self._files_poll_timer.timeout.connect(self._refresh_files_status)
+
+        # Initial refresh
+        self._refresh_files_status()
+        return page
+
+    def _index_state(self):
+        """Return ('done'|'running'|'paused'|'not_started', detail_str)."""
+        import json, os
+        if os.path.exists(INDEX_DONE_MARKER):
+            return "done", ""
+        if self._indexer_proc is not None and self._indexer_proc.poll() is None:
+            return "running", ""
+        if os.path.exists(INDEX_PROGRESS_PATH):
+            try:
+                prog = json.loads(open(INDEX_PROGRESS_PATH).read())
+                phases = [prog.get("phase1_complete"), prog.get("phase2_complete"), prog.get("phase3_complete")]
+                done = sum(1 for p in phases if p)
+                return "paused", f"Phase {done + 1} of 3 — paused"
+            except Exception:
+                return "paused", "Paused"
+        return "not_started", ""
+
+    def _refresh_files_status(self):
+        state, detail = self._index_state()
+
+        dot_color = {"done": "#34c759", "running": "#007aff", "paused": "#ff9500", "not_started": "#8e8e93"}[state]
+        label_text = {"done": "Indexed", "running": "Indexing…", "paused": "Paused", "not_started": "Not indexed"}[state]
+        btn_text   = {"done": "Re-index", "running": "Running…", "paused": "Resume Indexing", "not_started": "Start Indexing"}[state]
+
+        self._files_dot.setStyleSheet(f"color: {dot_color};")
+        self._files_status_lbl.setText(label_text)
+        self._files_detail_lbl.setText(detail)
+        self._files_detail_lbl.setVisible(bool(detail))
+        self._files_btn.setText(btn_text)
+        self._files_btn.setEnabled(state != "running")
+
+        if state != "running":
+            self._files_poll_timer.stop()
+
+    def _on_files_btn_clicked(self):
+        import subprocess, sys, os
+        state, _ = self._index_state()
+        if state == "running":
+            return
+
+        # Remove done marker so indexer rebuilds (re-index case)
+        if state == "done":
+            try:
+                os.remove(INDEX_DONE_MARKER)
+            except FileNotFoundError:
+                pass
+
+        # Find indexer script relative to this file
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        indexer = os.path.join(this_dir, "..", "..", "services", "search", "indexer.py")
+        indexer = os.path.normpath(indexer)
+
+        self._indexer_proc = subprocess.Popen(
+            [sys.executable, indexer],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self._refresh_files_status()
+        self._files_poll_timer.start()
 
     def _build_account(self) -> QWidget:
         page = SettingsPage("Account")
@@ -1176,7 +1300,7 @@ class SettingsPanel(QWidget):
         self.github_btn.setFixedHeight(38)
         self.github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
-        ac.addWidget(self.github_btn)
+        self.github_btn.setVisible(False)
 
         lay.addWidget(self._auth_card)
 
@@ -1505,6 +1629,8 @@ class SettingsPanel(QWidget):
             item = self.sidebar.item(row)
             if item and item.text() == "Account":
                 self.refresh_account()
+            elif item and item.text() == "Files":
+                self._refresh_files_status()
 
     def _on_trust_changed(self, level: int):
         settings_store.set("trust_level", level)

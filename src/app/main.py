@@ -142,6 +142,22 @@ def main():
     window.show()
     window.center()
 
+    # ── Onboarding (shown once on first launch) ───────────────────────────────
+    from src.core import settings_store as _settings
+    import sys as _sys
+    _force_onboarding = "--onboarding" in _sys.argv
+    if _force_onboarding or not _settings.get("onboarding_shown"):
+        from src.ui.onboarding import OnboardingDialog
+
+        def _show_onboarding():
+            dlg = OnboardingDialog()
+            dlg.finished.connect(lambda _: _settings.set("onboarding_shown", True))
+            dlg.finished.connect(lambda _: setattr(window, '_onboarding_dlg', None))
+            window._onboarding_dlg = dlg  # keep alive
+            dlg.show()
+
+        QTimer.singleShot(400, _show_onboarding)
+
     # ── Background update check ───────────────────────────────────────────────
     from PyQt6.QtCore import QObject, pyqtSignal as _Signal
 

@@ -121,7 +121,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     if [ "$EUID" -ne 0 ]; then
         echo "Note: If global hotkeys don't work, grant Terminal accessibility permissions."
     fi
-    $PYTHON_CMD run.py
+    $PYTHON_CMD run.py "$@"
 else
-    $PYTHON_CMD run.py
+    $PYTHON_CMD run.py "$@"
 fi
