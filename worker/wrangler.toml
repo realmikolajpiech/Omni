@@ -34,5 +34,7 @@ id      = "a855aebfb1c84020b402e99cef0791e7"
 #   wrangler secret put SUPABASE_SERVICE_KEY    ← Settings → API → service_role key
 #
 # Optional vars (set in dashboard or wrangler.toml [vars]):
-#   DODO_ENVIRONMENT    "test_mode" or "live_mode" (default: live_mode)
 #   DODO_RETURN_URL     Where Dodo redirects after payment (default: https://heyomni.app/thanks)
+
+[vars]
+DODO_ENVIRONMENT = "live_mode"

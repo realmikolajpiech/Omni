@@ -334,8 +334,8 @@ async function handleCreateCheckoutSession(request, env) {
   }
 
   // Hard-coded product IDs (as provided by the desktop app configuration).
-  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
-  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+  const MONTHLY_PRODUCT_ID = "pdt_0NZueCrsSNHz8B17hYCrS";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZueSmOsplgtJQNWrHKN";
   const productId = interval === "monthly" ? MONTHLY_PRODUCT_ID : YEARLY_PRODUCT_ID;
 
   // Resolve identity for metadata
@@ -360,7 +360,7 @@ async function handleCreateCheckoutSession(request, env) {
   };
   if (userId) metadata.user_id = userId;
 
-  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "test_mode").toLowerCase();
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
   const base =
     mode.includes("test") ? "https://test.dodopayments.com" : "https://live.dodopayments.com";
 
@@ -471,8 +471,8 @@ async function handlePaymentWebhook(request, env) {
     null;
 
   // Map Dodo product IDs → Omni plans.
-  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
-  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+  const MONTHLY_PRODUCT_ID = "pdt_0NZueCrsSNHz8B17hYCrS";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZueSmOsplgtJQNWrHKN";
 
   // Also grab metadata — sent by the app when creating the checkout session.
   const meta = payment.metadata || payment.custom_data || body.metadata || {};
@@ -876,7 +876,7 @@ async function handleProvision(request, env) {
 
   // Default matches handleCreateCheckoutSession (test_mode) so IDs from the same
   // environment are verified against the correct Dodo API base.
-  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "test_mode").toLowerCase();
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
   const base = mode.includes("test")
     ? "https://test.dodopayments.com"
     : "https://live.dodopayments.com";
@@ -886,8 +886,8 @@ async function handleProvision(request, env) {
   let billingInterval  = null;
   let dodoSubscriptionId = null;
 
-  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
-  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+  const MONTHLY_PRODUCT_ID = "pdt_0NZueCrsSNHz8B17hYCrS";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZueSmOsplgtJQNWrHKN";
 
   if (subscriptionId) {
     dodoSubscriptionId = subscriptionId;
@@ -952,11 +952,11 @@ async function handlePublicCheckout(request, env) {
   if (interval !== "monthly" && interval !== "yearly")
     return corsResp({ error: "interval must be 'monthly' or 'yearly'" }, 400);
 
-  const MONTHLY_PRODUCT_ID = "pdt_0NZcz4InTRNEd5oEaxhJU";
-  const YEARLY_PRODUCT_ID  = "pdt_0NZd2eUr7lb0XydkZATkO";
+  const MONTHLY_PRODUCT_ID = "pdt_0NZueCrsSNHz8B17hYCrS";
+  const YEARLY_PRODUCT_ID  = "pdt_0NZueSmOsplgtJQNWrHKN";
   const productId = interval === "monthly" ? MONTHLY_PRODUCT_ID : YEARLY_PRODUCT_ID;
 
-  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "test_mode").toLowerCase();
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
   const base = mode.includes("test")
     ? "https://test.dodopayments.com"
     : "https://live.dodopayments.com";
