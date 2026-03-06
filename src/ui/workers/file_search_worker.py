@@ -40,23 +40,29 @@ class FileSearchWorker(QThread):
             
             # FALLBACK: If no results and query looks like a sentence, try content scan
             if not file_matches and len(self.query.split()) > 2:
-                # 1. Try Semantic Search first (LanceDB) - If available
+                # 1. Try Semantic Search ONLY if LanceDB + embed_model are already warm.
+                # Do NOT call ensure_main_model() here — it loads the heavy embedding model
+                # (~3-4s) and blocks the UI on every keystroke. Skip straight to content
+                # scan if the backend isn't already initialized.
                 try:
-                    from src.services.search.local_search import search_lancedb
-                    logging.info(f"FileSearchWorker: Trying semantic search for '{self.query}'")
-                    semantic_results = search_lancedb(self.query, limit=5)
-                    
-                    if semantic_results:
-                        for res in semantic_results:
-                            # Convert to format expected by UI
-                            file_matches.append({
-                                "path": res['path'],
-                                "name": os.path.basename(res['path']),
-                                "is_dir": os.path.isdir(res['path']),
-                                "score": res['score'] * 1000, # Scale up
-                                "type": "file",
-                                "content_preview": res['text'][:100]
-                            })
+                    import src.services.llm.model_manager as _mm
+                    if _mm.db_conn is not None and _mm.embed_model is not None:
+                        import os as _os
+                        from src.services.search.local_search import search_lancedb
+                        logging.info(f"FileSearchWorker: Trying semantic search for '{self.query}'")
+                        semantic_results = search_lancedb(self.query, limit=5)
+                        if semantic_results:
+                            for res in semantic_results:
+                                file_matches.append({
+                                    "path": res['path'],
+                                    "name": _os.path.basename(res['path']),
+                                    "is_dir": _os.path.isdir(res['path']),
+                                    "score": res['score'] * 1000,
+                                    "type": "file",
+                                    "content_preview": res['text'][:100]
+                                })
+                    else:
+                        logging.debug(f"FileSearchWorker: Skipping semantic search (backend not ready)")
                 except Exception as e:
                     logging.warning(f"FileSearchWorker: Semantic search failed/not ready: {e}")
 

@@ -3428,7 +3428,7 @@ class OmniWindow(QWidget):
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'status':
-                            w = StandardItemWidget(act['description'], icon_name="dialog-information")
+                            w = StandardItemWidget(act.get('description', ''), icon_name="dialog-information")
                             self.insert_list_item(insert_pos, w, act, animation="fade")
                             insert_pos += 1
                         elif act.get('type') == 'currency':

@@ -36,6 +36,7 @@ _TOOL_META = {
     "edit_file":     {"icon": "✏️", "label": "Edit file"},
     "organize_folder": {"icon": "📁", "label": "Organize"},
     "compress":      {"icon": "🗜️", "label": "Compress"},
+    "convert_file":  {"icon": "🔄", "label": "Convert file"},
 }
 
 
@@ -774,6 +775,7 @@ Location: {user_loc} | Date: {current_date}
 - **create_file** — create a new text file with content; use for any "create/write/save a file" request; defaults to ~/Desktop; ALWAYS prefer this over run_terminal for file creation
 - **edit_file** — edit an existing file by replacing a specific text snippet with new text; use for any "edit/update/modify/change/fix" file request; first find the file and read its content, then call this with the exact old_text and new_text; ALWAYS prefer this over run_terminal for file edits
 - **compress** — compress files or folders into a ZIP archive; use for any "compress/zip/archive/bundle" request; accepts multiple paths; ALWAYS prefer this over run_terminal for compression
+- **convert_file** — convert a file to a different format (images, documents, audio, video); use for any "convert/export/change format" request; supports PNG, JPG, PDF, DOCX, MP3, MP4, and many more; ALWAYS prefer this over run_terminal for file conversions
 - **run_terminal** — execute any shell command on macOS (defaults write, pmset, diskutil, etc.); NEVER tell user to open Terminal manually; NEVER use run_terminal for tasks that have a dedicated tool (send_email, get_unread_emails, get_calendar_events, create_calendar_event, install_app, uninstall_app, create_file, edit_file, compress, find_file, organize_folder)
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request

@@ -1011,6 +1011,24 @@ def action_endpoint():
         logging.info("Computer Control keyword detected. Skipping Fast Model.")
         return jsonify({"actions": [], "chips": []})
 
+    # 1.6b File Conversion Hard Override — let main model's convert_file tool handle it
+    convert_keywords = ["convert", "konwertuj", "przekonwertuj", "zamień format", "zmień format",
+                        "export to", "eksportuj", "change format", "save as"]
+    ql = query.lower()
+    if any(k in ql for k in convert_keywords):
+        # Check it's about file conversion (not currency/unit conversion)
+        file_ext_pattern = r"\.(mp[34g]|avi|mov|mkv|webm|wav|ogg|flac|m4a|aac|png|jpe?g|webp|bmp|tiff?|gif|pdf|docx?|xlsx?|csv|html?|md|rtf|ico)\b"
+        format_keywords = ["to mp", "to wav", "to ogg", "to flac", "to png", "to jpg", "to jpeg",
+                           "to pdf", "to docx", "to html", "to gif", "to avi", "to mkv", "to webm",
+                           "to mov", "to csv", "to xlsx", "to txt", "to bmp", "to webp", "to tiff",
+                           "to ico", "to m4a", "to aac", "to rtf", "to md",
+                           "na mp", "na wav", "na ogg", "na flac", "na png", "na jpg", "na jpeg",
+                           "na pdf", "na docx", "na html", "na gif", "na avi", "na mkv", "na webm",
+                           "na mov", "na csv", "na xlsx", "na txt", "na bmp", "na webp", "na tiff"]
+        if re.search(file_ext_pattern, ql) or any(k in ql for k in format_keywords):
+            logging.info("File conversion keyword detected. Skipping Fast Model, routing to Main Model tool calling.")
+            return jsonify({"actions": [], "chips": []})
+
     # 1.7 Regex Shortcuts (Speed Optimization)
     # Open App
     open_match = re.search(r"^(?:open|run|launch|start)\s+(?!http|www)(.+)$", query, re.IGNORECASE)

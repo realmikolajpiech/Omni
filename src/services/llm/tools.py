@@ -444,6 +444,38 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "convert_file",
+            "description": (
+                "Convert a file to a different format. "
+                "Supports: images (PNG, JPG, WEBP, BMP, TIFF, ICO, GIF), "
+                "documents (PDF, DOCX, TXT, HTML, MD), "
+                "audio (MP3, WAV, OGG, FLAC, M4A), "
+                "video (MP4, MOV, AVI, MKV, WEBM, GIF). "
+                "Use when user asks to convert, export, or change file format."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input_path": {
+                        "type": "string",
+                        "description": "Path to the source file.",
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "Target format extension without dot (e.g. 'png', 'pdf', 'mp3', 'mp4').",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Optional custom output path. Defaults to same directory with new extension.",
+                    },
+                },
+                "required": ["input_path", "output_format"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_file",
             "description": (
                 "Find files or folders on the user's Mac by name or partial name. "
@@ -541,6 +573,12 @@ def execute_tool(name: str, arguments: dict) -> str:
                 arguments.get("name", ""),
                 arguments.get("folder", ""),
                 arguments.get("include_dirs", True),
+            )
+        elif name == "convert_file":
+            return _tool_convert_file(
+                arguments.get("input_path", ""),
+                arguments.get("output_format", ""),
+                arguments.get("output_path", ""),
             )
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
@@ -1069,3 +1107,363 @@ def _tool_find_file(name: str, folder: str = "", include_dirs: bool = True) -> s
         lines.append(f"[{kind}] {p}{size_str}")
 
     return "\n".join(lines)
+
+
+# ── File format sets ─────────────────────────────────────────────────────────
+_IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "ico", "gif"}
+_DOC_EXTS = {"pdf", "docx", "txt", "html", "htm", "md", "rtf", "csv", "xlsx"}
+_AUDIO_EXTS = {"mp3", "wav", "ogg", "flac", "m4a", "aac", "wma"}
+_VIDEO_EXTS = {"mp4", "mov", "avi", "mkv", "webm", "gif"}
+
+
+def _format_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} bytes"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    else:
+        return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _tool_convert_file(input_path: str, output_format: str, output_path: str = "") -> str:
+    """Convert a file to a different format. Requires trust level 2."""
+    import os
+    import subprocess
+    import shutil
+
+    input_path = input_path.strip()
+    output_format = output_format.strip().lower().lstrip(".")
+    if not input_path:
+        return "Error: empty input path."
+    if not output_format:
+        return "Error: empty output format."
+
+    current = get_effective_trust()
+    if current < 2:
+        _get_pending().append({
+            "type":           "trust_request",
+            "required_level": 2,
+            "command":        f"convert file to {output_format}",
+            "description":    f"Convert '{os.path.basename(input_path)}' to .{output_format}",
+        })
+        return f"[Permission required] 'Automation' trust is needed to convert files."
+
+    input_path = os.path.expanduser(input_path)
+    if not os.path.isfile(input_path):
+        return f"Error: file not found: {input_path}"
+
+    src_ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+
+    # Normalize jpeg → jpg
+    if src_ext == "jpeg":
+        src_ext = "jpg"
+    if output_format == "jpeg":
+        output_format = "jpg"
+
+    if src_ext == output_format:
+        return f"Error: file is already in .{output_format} format."
+
+    # Determine output path
+    if output_path:
+        out = os.path.expanduser(output_path.strip())
+    else:
+        base = os.path.splitext(input_path)[0]
+        out = f"{base}.{output_format}"
+
+    # Avoid overwriting
+    if os.path.exists(out):
+        name, ext = os.path.splitext(out)
+        counter = 1
+        while os.path.exists(out):
+            out = f"{name}_{counter}{ext}"
+            counter += 1
+
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+    logging.info(f"[tool:convert_file] {input_path} ({src_ext}) → {out} ({output_format})")
+
+    try:
+        # ── Image conversions (Pillow) ────────────────────────────────────
+        if src_ext in _IMAGE_EXTS and output_format in _IMAGE_EXTS:
+            return _convert_image(input_path, out, output_format)
+
+        # ── Image → PDF ───────────────────────────────────────────────────
+        if src_ext in _IMAGE_EXTS and output_format == "pdf":
+            return _convert_image_to_pdf(input_path, out)
+
+        # ── PDF → Image ───────────────────────────────────────────────────
+        if src_ext == "pdf" and output_format in _IMAGE_EXTS:
+            return _convert_pdf_to_image(input_path, out, output_format)
+
+        # ── Document conversions (macOS textutil) ─────────────────────────
+        if src_ext in ("docx", "doc", "rtf", "html", "htm", "txt") and \
+           output_format in ("pdf", "docx", "doc", "rtf", "html", "txt"):
+            return _convert_doc_textutil(input_path, out, output_format)
+
+        # ── Markdown → HTML ───────────────────────────────────────────────
+        if src_ext == "md" and output_format == "html":
+            return _convert_md_to_html(input_path, out)
+
+        # ── CSV → XLSX or XLSX → CSV ─────────────────────────────────────
+        if (src_ext == "csv" and output_format == "xlsx") or \
+           (src_ext == "xlsx" and output_format == "csv"):
+            return _convert_spreadsheet(input_path, out, src_ext, output_format)
+
+        # ── Audio conversions (ffmpeg) ────────────────────────────────────
+        if src_ext in _AUDIO_EXTS and output_format in _AUDIO_EXTS:
+            return _convert_ffmpeg(input_path, out, "audio")
+
+        # ── Video conversions (ffmpeg) ────────────────────────────────────
+        if src_ext in _VIDEO_EXTS and output_format in _VIDEO_EXTS:
+            return _convert_ffmpeg(input_path, out, "video")
+
+        # ── Video → Audio (extract audio) ─────────────────────────────────
+        if src_ext in _VIDEO_EXTS and output_format in _AUDIO_EXTS:
+            return _convert_ffmpeg(input_path, out, "audio_extract")
+
+        # ── Video → GIF ───────────────────────────────────────────────────
+        if src_ext in _VIDEO_EXTS and output_format == "gif":
+            return _convert_ffmpeg(input_path, out, "video_to_gif")
+
+        return f"Error: unsupported conversion from .{src_ext} to .{output_format}"
+
+    except Exception as e:
+        logging.error(f"[tool:convert_file] {e}")
+        return f"Error converting file: {e}"
+
+
+def _convert_image(input_path: str, out: str, fmt: str) -> str:
+    """Convert between image formats using Pillow."""
+    import os
+    from PIL import Image
+
+    img = Image.open(input_path)
+
+    # Handle transparency for formats that don't support it
+    if fmt in ("jpg", "bmp", "ico") and img.mode in ("RGBA", "LA", "P"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        if img.mode == "P":
+            img = img.convert("RGBA")
+        bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+        img = bg
+
+    save_fmt = {"jpg": "JPEG", "tif": "TIFF"}.get(fmt, fmt.upper())
+    img.save(out, format=save_fmt)
+    size = os.path.getsize(out)
+    return f"Converted: {out} ({_format_size(size)})"
+
+
+def _convert_image_to_pdf(input_path: str, out: str) -> str:
+    """Convert image to PDF using Pillow."""
+    import os
+    from PIL import Image
+
+    img = Image.open(input_path)
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    img.save(out, format="PDF")
+    size = os.path.getsize(out)
+    return f"Converted: {out} ({_format_size(size)})"
+
+
+def _convert_pdf_to_image(input_path: str, out: str, fmt: str) -> str:
+    """Convert PDF pages to images using PyMuPDF (fitz) or sips fallback."""
+    import os
+    import subprocess
+
+    # Try PyMuPDF first
+    try:
+        import fitz
+        doc = fitz.open(input_path)
+        if len(doc) == 1:
+            page = doc[0]
+            pix = page.get_pixmap(dpi=200)
+            pix.save(out)
+            size = os.path.getsize(out)
+            return f"Converted: {out} ({_format_size(size)})"
+        else:
+            # Multi-page: save each page
+            base, ext = os.path.splitext(out)
+            paths = []
+            for i, page in enumerate(doc):
+                pix = page.get_pixmap(dpi=200)
+                page_out = f"{base}_page{i + 1}{ext}"
+                pix.save(page_out)
+                paths.append(page_out)
+            return f"Converted {len(paths)} pages: {paths[0]} ... {paths[-1]}"
+    except ImportError:
+        pass
+
+    # Fallback: macOS sips (only for single-page, first page via Preview)
+    try:
+        proc = subprocess.run(
+            ["sips", "-s", "format", fmt, input_path, "--out", out],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and os.path.isfile(out):
+            size = os.path.getsize(out)
+            return f"Converted: {out} ({_format_size(size)})"
+    except Exception:
+        pass
+
+    return "Error: PDF to image conversion requires PyMuPDF (pip install pymupdf). Install it for best results."
+
+
+def _convert_doc_textutil(input_path: str, out: str, fmt: str) -> str:
+    """Convert documents using macOS textutil."""
+    import os
+    import subprocess
+    import sys
+
+    if sys.platform != "darwin":
+        return "Error: document conversion via textutil is only available on macOS."
+
+    # textutil format names
+    fmt_map = {
+        "txt": "txt", "html": "html", "htm": "html",
+        "rtf": "rtf", "docx": "docx", "doc": "doc",
+        "pdf": "pdf",
+    }
+    tu_fmt = fmt_map.get(fmt)
+    if not tu_fmt:
+        return f"Error: textutil doesn't support .{fmt} output."
+
+    # textutil can't do PDF directly — use it to make HTML, then wkhtmltopdf or cupsfilter
+    if tu_fmt == "pdf":
+        # Convert to HTML first, then to PDF via cupsfilter
+        html_tmp = out + ".tmp.html"
+        try:
+            proc = subprocess.run(
+                ["textutil", "-convert", "html", "-output", html_tmp, input_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                return f"Error: textutil failed: {proc.stderr.strip()}"
+
+            # Try cupsfilter for HTML→PDF
+            proc2 = subprocess.run(
+                ["cupsfilter", html_tmp],
+                capture_output=True, timeout=30,
+            )
+            if proc2.returncode == 0 and proc2.stdout:
+                with open(out, "wb") as f:
+                    f.write(proc2.stdout)
+                os.unlink(html_tmp)
+                size = os.path.getsize(out)
+                return f"Converted: {out} ({_format_size(size)})"
+
+            # Fallback: just keep the HTML
+            os.rename(html_tmp, out.replace(".pdf", ".html"))
+            return f"Converted to HTML (PDF conversion needs wkhtmltopdf): {out.replace('.pdf', '.html')}"
+        except Exception as e:
+            if os.path.exists(html_tmp):
+                os.unlink(html_tmp)
+            return f"Error converting to PDF: {e}"
+
+    proc = subprocess.run(
+        ["textutil", "-convert", tu_fmt, "-output", out, input_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        return f"Error: textutil failed: {proc.stderr.strip()}"
+
+    if not os.path.isfile(out):
+        return "Error: conversion produced no output."
+
+    size = os.path.getsize(out)
+    return f"Converted: {out} ({_format_size(size)})"
+
+
+def _convert_md_to_html(input_path: str, out: str) -> str:
+    """Convert Markdown to HTML."""
+    import os
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        md_text = f.read()
+
+    try:
+        import markdown
+        html = markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+    except ImportError:
+        # Simple fallback: wrap in <pre>
+        import html as html_mod
+        html = f"<html><body><pre>{html_mod.escape(md_text)}</pre></body></html>"
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    size = os.path.getsize(out)
+    return f"Converted: {out} ({_format_size(size)})"
+
+
+def _convert_spreadsheet(input_path: str, out: str, src_ext: str, dst_ext: str) -> str:
+    """Convert between CSV and XLSX."""
+    import os
+    import csv
+
+    if src_ext == "csv" and dst_ext == "xlsx":
+        try:
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            with open(input_path, "r", encoding="utf-8") as f:
+                for row in csv.reader(f):
+                    ws.append(row)
+            wb.save(out)
+            size = os.path.getsize(out)
+            return f"Converted: {out} ({_format_size(size)})"
+        except ImportError:
+            return "Error: CSV to XLSX conversion requires openpyxl (pip install openpyxl)."
+
+    elif src_ext == "xlsx" and dst_ext == "csv":
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(input_path, read_only=True)
+            ws = wb.active
+            with open(out, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                for row in ws.iter_rows(values_only=True):
+                    writer.writerow(row)
+            size = os.path.getsize(out)
+            return f"Converted: {out} ({_format_size(size)})"
+        except ImportError:
+            return "Error: XLSX to CSV conversion requires openpyxl (pip install openpyxl)."
+
+    return f"Error: unsupported spreadsheet conversion."
+
+
+def _convert_ffmpeg(input_path: str, out: str, mode: str) -> str:
+    """Convert audio/video using ffmpeg."""
+    import os
+    import subprocess
+    import shutil
+
+    if not shutil.which("ffmpeg"):
+        return "Error: ffmpeg not found. Install it with: brew install ffmpeg"
+
+    if mode == "audio_extract":
+        cmd = ["ffmpeg", "-i", input_path, "-vn", "-y", out]
+    elif mode == "video_to_gif":
+        cmd = [
+            "ffmpeg", "-i", input_path,
+            "-vf", "fps=15,scale=480:-1:flags=lanczos",
+            "-y", out,
+        ]
+    else:
+        cmd = ["ffmpeg", "-i", input_path, "-y", out]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        err = proc.stderr.strip().split("\n")[-1] if proc.stderr else "unknown error"
+        return f"Error: ffmpeg failed: {err}"
+
+    if not os.path.isfile(out):
+        return "Error: conversion produced no output."
+
+    size = os.path.getsize(out)
+    return f"Converted: {out} ({_format_size(size)})"
