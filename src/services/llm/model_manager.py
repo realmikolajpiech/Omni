@@ -328,6 +328,29 @@ def _detect_embed_device() -> str:
     return "cpu"
 
 
+def _ensure_hf_shard_index(model_id: str):
+    """embed-anything panics when model.safetensors.index.json is missing (single-file models).
+    This creates a synthetic index pointing all weights to model.safetensors if needed."""
+    try:
+        import json
+        from huggingface_hub import snapshot_download
+        from safetensors import safe_open
+
+        model_dir = snapshot_download(model_id)
+        st_path = os.path.join(model_dir, "model.safetensors")
+        index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        if not os.path.exists(st_path) or os.path.exists(index_path):
+            return  # nothing to do
+        file_size = os.path.getsize(st_path)
+        with safe_open(st_path, framework="pt", device="cpu") as f:
+            weight_map = {k: "model.safetensors" for k in f.keys()}
+        with open(index_path, "w") as f:
+            json.dump({"metadata": {"total_size": file_size}, "weight_map": weight_map}, f)
+        logging.info(f"Created missing shard index for {model_id} ({len(weight_map)} weights)")
+    except Exception as e:
+        logging.warning(f"Could not create shard index for {model_id}: {e}")
+
+
 class _EmbedAnythingWrapper:
     """Wraps an embed-anything text model to match the .encode(texts) → np.ndarray interface.
 
@@ -428,6 +451,7 @@ def ensure_resources():
                 else:
                     logging.info("Embedding: Using CPU.")
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+                _ensure_hf_shard_index(EMBED_MODEL_HF_ID)
                 logging.info(f"Loading embedding model ({EMBED_MODEL_HF_ID})...")
                 _raw = EmbeddingModel.from_pretrained_hf(model_id=EMBED_MODEL_HF_ID)
                 embed_model = _EmbedAnythingWrapper(_raw)
