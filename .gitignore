@@ -59,4 +59,7 @@ searxng/searxng_local/
 
 .claude/
 
-installer/Omni.dmg
+# Installer artifacts — too large for GitHub (>100 MB)
+installer/*.dmg
+installer/.temp_omni.dmg
+installer/.dmg_staging/

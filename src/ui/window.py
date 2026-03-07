@@ -1326,6 +1326,15 @@ class OmniWindow(QWidget):
                     self.on_entered(current_item)
                     return True
                 else:
+                    # If the first visible item is an AppActionWidget, accept it directly
+                    # so pressing Enter immediately launches the app without a second query.
+                    if self.list_widget.count() > 0:
+                        first_item = self.list_widget.item(0)
+                        if first_item:
+                            first_data = first_item.data(Qt.ItemDataRole.UserRole)
+                            if isinstance(first_data, dict) and first_data.get('type') == 'open_app':
+                                self.on_entered(first_item)
+                                return True
                     query = self.input_field.text().strip()
                     if query:
                         self.perform_ai_query(query)
@@ -2141,7 +2150,20 @@ class OmniWindow(QWidget):
                     w.uninstall_accepted.connect(_make_uninstall_fast_cb(a['name'], w))
                     return w
                 elif a.get('type') == 'open_app':
-                    return AppActionWidget(a['name'])
+                    w = AppActionWidget(a['name'])
+                    def _make_open_app_cb(_name=a['name']):
+                        def _cb(name, _widget):
+                            import src.services.llm.model_manager as mm
+                            mm.abort_fast_event.set()
+                            self.cleanup_worker('action_worker')
+                            self.cleanup_worker('search_worker')
+                            self.cleanup_worker('file_search_worker')
+                            self.input_field.clear()
+                            find_and_launch_app(name)
+                            self.animate_close()
+                        return _cb
+                    w.app_accepted.connect(_make_open_app_cb())
+                    return w
                 elif a.get('type') == 'person':
                     w = PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
                     if not a.get('image'):
