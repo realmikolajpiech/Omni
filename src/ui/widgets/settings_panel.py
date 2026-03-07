@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
     QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget, QTextEdit,
-    QApplication,
+    QApplication, QProgressBar,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
@@ -911,7 +911,7 @@ class SettingsPanel(QWidget):
         dark = self.current_theme == "dark"
         status_card = _FeedbackFormCard(dark=dark)
         lay = status_card._inner
-        lay.setSpacing(12)
+        lay.setSpacing(10)
 
         # Status row
         status_row = QHBoxLayout()
@@ -936,7 +936,28 @@ class SettingsPanel(QWidget):
         self._files_detail_lbl.setWordWrap(True)
         lay.addWidget(self._files_detail_lbl)
 
-        lay.addSpacing(8)
+        # Progress bar (visible only while indexing)
+        self._files_progress_bar = QProgressBar()
+        self._files_progress_bar.setRange(0, 100)
+        self._files_progress_bar.setValue(0)
+        self._files_progress_bar.setFixedHeight(6)
+        self._files_progress_bar.setTextVisible(False)
+        self._files_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: rgba(255,255,255,0.08);
+                border: none;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #8B5CF6, stop:1 #3B82F6);
+                border-radius: 3px;
+            }
+        """)
+        self._files_progress_bar.hide()
+        lay.addWidget(self._files_progress_bar)
+
+        lay.addSpacing(4)
 
         # Action button
         self._files_btn = QPushButton()
@@ -961,26 +982,44 @@ class SettingsPanel(QWidget):
         return page
 
     def _index_state(self):
-        """Return ('done'|'running'|'paused'|'not_started', detail_str)."""
+        """Return ('done'|'running'|'paused'|'not_started', detail_str, overall_pct)."""
         import json, os
         if os.path.exists(INDEX_DONE_MARKER):
-            return "done", ""
-        if self._indexer_proc is not None and self._indexer_proc.poll() is None:
-            return "running", ""
-        if os.path.exists(INDEX_PROGRESS_PATH):
+            return "done", "", 100
+
+        is_running = self._indexer_proc is not None and self._indexer_proc.poll() is None
+
+        if is_running or os.path.exists(INDEX_PROGRESS_PATH):
             try:
                 prog = json.loads(open(INDEX_PROGRESS_PATH).read())
-                phases = [prog.get("phase1_complete"), prog.get("phase2_complete"), prog.get("phase3_complete")]
-                done = sum(1 for p in phases if p)
-                return "paused", f"Phase {done + 1} of 3 — paused"
+                phase      = prog.get("current_phase", 1)
+                phase_pct  = float(prog.get("phase_pct", 0))
+                eta        = prog.get("eta", "")
+                label      = prog.get("phase_label", f"Phase {phase} of 3")
+                phases_done = sum(1 for k in ("phase1_complete", "phase2_complete", "phase3_complete") if prog.get(k))
+
+                # Overall progress: each phase is 1/3 of the total
+                overall = (phases_done * 100 + phase_pct) / 3
+
+                detail = f"Phase {phase}/3 — {label}  ·  {phase_pct:.0f}%"
+                if eta and eta != "?":
+                    detail += f"  ·  ETA {eta}"
+
+                state = "running" if is_running else "paused"
+                return state, detail, int(overall)
             except Exception:
-                return "paused", "Paused"
-        return "not_started", ""
+                pass
+
+            if is_running:
+                return "running", "", 0
+            return "paused", "Paused", 0
+
+        return "not_started", "", 0
 
     def _refresh_files_status(self):
-        state, detail = self._index_state()
+        state, detail, overall_pct = self._index_state()
 
-        dot_color = {"done": "#34c759", "running": "#007aff", "paused": "#ff9500", "not_started": "#8e8e93"}[state]
+        dot_color  = {"done": "#34c759", "running": "#007aff", "paused": "#ff9500", "not_started": "#8e8e93"}[state]
         label_text = {"done": "Indexed", "running": "Indexing…", "paused": "Paused", "not_started": "Not indexed"}[state]
         btn_text   = {"done": "Re-index", "running": "Running…", "paused": "Resume Indexing", "not_started": "Start Indexing"}[state]
 
@@ -991,12 +1030,16 @@ class SettingsPanel(QWidget):
         self._files_btn.setText(btn_text)
         self._files_btn.setEnabled(state != "running")
 
-        if state != "running":
+        if state == "running":
+            self._files_progress_bar.setValue(overall_pct)
+            self._files_progress_bar.show()
+        else:
+            self._files_progress_bar.hide()
             self._files_poll_timer.stop()
 
     def _on_files_btn_clicked(self):
         import subprocess, sys, os
-        state, _ = self._index_state()
+        state, _detail, _pct = self._index_state()
         if state == "running":
             return
 

@@ -201,6 +201,22 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
                 'content': v.get('snippet', ''),
             })
     else:
+        # General Search Normalization
+        # 1. Knowledge Graph (right-side box in Google)
+        kg = data.get('knowledgeGraph', {})
+        if kg:
+            # If we have a knowledge graph, it's often the best "single truth" result.
+            # We inject it as the first result with high priority.
+            results.append({
+                'title': kg.get('title', ''),
+                'url': kg.get('website', ''),
+                'content': kg.get('description', '') + (' ' + kg.get('type', '') if kg.get('type') else ''),
+                'img_src': kg.get('imageUrl', ''),
+                'attributes': kg.get('attributes', {}), # e.g. Born, Spouse, Education
+                'is_knowledge_graph': True
+            })
+
+        # 2. Organic Results
         for item in data.get('organic', [])[:count]:
             results.append({
                 'title': item.get('title', ''),
@@ -461,22 +477,36 @@ def get_person_result(name, existing_results=None):
 
         if results:
             best = results[0]
+            
+            # Prefer knowledge graph result if available
+            kg_result = next((r for r in results if r.get('is_knowledge_graph')), None)
+            if kg_result:
+                best = kg_result
+                logging.info(f"Using Knowledge Graph result for person: {best.get('title')}")
+
             title = best.get('title', name)
             # Improved cleaning: split by common separators but allow unicode characters
             # Specifically handle " – " (en dash) and " - " (hyphen) and " | "
             name_clean = title.split(' – ')[0].split(' - ')[0].split(' | ')[0].split('(')[0].strip()
             
             description = (best.get('content') or best.get('snippet', '')).strip()
+            
+            # Append KG attributes to description if available (e.g. "Born: 1990. Spouse: Jane Doe")
+            if best.get('attributes'):
+                attr_str = " ".join([f"{k}: {v}." for k, v in best.get('attributes').items()])
+                if attr_str:
+                    description += f" {attr_str}"
+
             if description.endswith('...'):
                 description = description[:-3].strip()
-            description = description[:300]
+            description = description[:400] # Increased limit slightly for richer KG data
 
             # Try to find an image in the general results first
             image_url = best.get('img_src') or best.get('thumbnail') or best.get('image')
             
             # If no image in first result, check others briefly
             if not image_url:
-                for r in results[:3]:
+                for r in results[:5]: # Check slightly more results
                     potential = r.get('img_src') or r.get('thumbnail') or r.get('image')
                     if potential:
                         image_url = potential

@@ -1,10 +1,7 @@
 import logging
 import time
-from sentence_transformers import SentenceTransformer
 from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_model, fast_lock, db_conn, vision_model
 from src.services.memory.memvid_store import get_user_memory
-
-# We need to update the global vision_model in model_manager if we load it here
 import src.services.llm.model_manager as model_manager
 
 def should_search_images(query):
@@ -25,12 +22,7 @@ def should_search_images(query):
     return False
 
 def ensure_vision_model():
-    if model_manager.vision_model is None:
-         logging.info("Loading CLIP model for Search...")
-         try:
-            model_manager.vision_model = SentenceTransformer('clip-ViT-B-32', device='cpu')
-         except Exception as e:
-            logging.error(f"Failed to load CLIP model: {e}")
+    model_manager.ensure_vision_model()
 
 def perform_image_search(query):
     """Searches LanceDB 'images' table using CLIP text embedding."""

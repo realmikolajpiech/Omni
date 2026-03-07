@@ -1,6 +1,5 @@
 import os
 import lancedb
-from PIL import Image
 import logging
 import sys
 import gc
@@ -168,6 +167,15 @@ def _save_progress(progress: dict):
             json.dump(progress, f)
     except Exception as e:
         logging.warning(f"Could not save progress: {e}")
+
+
+def _write_phase_progress(progress: dict, phase: int, pct: float, eta: str, label: str):
+    """Update the progress file with live within-phase progress for the UI."""
+    progress["current_phase"] = phase
+    progress["phase_pct"]     = round(pct, 1)
+    progress["eta"]           = eta
+    progress["phase_label"]   = label
+    _save_progress(progress)
 
 
 def _clear_progress():
@@ -342,6 +350,7 @@ def main():
     else:
         logging.info("Phase 1/3 — Indexing filenames...")
         phase_start = time.time()
+        _write_phase_progress(progress, 1, 0.0, "?", "Indexing file names")
 
         BATCH_SIZE = 512
 
@@ -402,6 +411,7 @@ def main():
                             f"  [filenames] {total_files_indexed:,} / {total_files_count:,} "
                             f"({pct:.1f}%)  ({_elapsed(phase_start)})  ETA {eta}"
                         )
+                        _write_phase_progress(progress, 1, pct, eta, "Indexing file names")
 
                         if total_files_indexed >= next_sample_at:
                             samples = [d["path"] for d in data[:3]]
@@ -444,6 +454,7 @@ def main():
         content_files = 0
     else:
         logging.info("Phase 2/3 — Indexing file content (text/PDF/DOCX/XLSX/PPTX/CSV)...")
+        _write_phase_progress(progress, 2, 0.0, "?", "Reading file content")
     phase_start = time.time()
 
     if not progress.get("phase2_complete"):
@@ -566,6 +577,7 @@ def main():
                             f"~{total_tokens:,} tokens  "
                             f"({_elapsed(phase_start)})  ETA {eta}"
                         )
+                        _write_phase_progress(progress, 2, pct, eta, "Reading file content")
 
                         if content_files >= next_sample_at:
                             logging.info(f"    sample: {full_path}")
@@ -620,6 +632,7 @@ def main():
     else:
         logging.info("Phase 3/3 — Indexing images with CLIP...")
         phase_start = time.time()
+        _write_phase_progress(progress, 3, 0.0, "?", "Indexing images")
 
         # Resume: find already-indexed image paths
         existing_image_paths = _get_existing_paths(db, IMAGES_TABLE)
@@ -645,16 +658,33 @@ def main():
                 return vmodel, tbl, count
 
             if vmodel is None:
-                from sentence_transformers import SentenceTransformer
-                logging.info("  Loading CLIP vision model (first time)...")
-                vmodel = SentenceTransformer("clip-ViT-B-32", device="cpu")
+                from embed_anything import EmbeddingModel, ImageEmbedConfig
+                import embed_anything as _ea
+                logging.info("  Loading CLIP vision model (embed-anything, first time)...")
+
+                _raw_clip = EmbeddingModel.from_pretrained_hf(model_id="openai/clip-vit-base-patch32")
+                _img_cfg = ImageEmbedConfig(batch_size=IMAGE_BATCH_SIZE)
+
+                class _CLIPWrapper:
+                    def __init__(self, m, cfg):
+                        self.model = m
+                        self.cfg = cfg
+                    def encode(self, image_path):
+                        import numpy as np
+                        results = _ea.embed_file(image_path, embedder=self.model, config=self.cfg)
+                        if not results:
+                            return np.zeros(512, dtype=np.float32)
+                        vec = np.array(results[0].embedding, dtype=np.float32)
+                        norm = np.linalg.norm(vec)
+                        return vec / norm if norm > 0 else vec
+
+                vmodel = _CLIPWrapper(_raw_clip, _img_cfg)
 
             vectors = []
             valid = []
             for item in batch:
                 try:
-                    img = Image.open(item["path"])
-                    vectors.append(vmodel.encode(img).tolist())
+                    vectors.append(vmodel.encode(item["path"]).tolist())
                     valid.append(item)
                 except Exception as e:
                     logging.warning(f"  Skipping image {item['path']}: {e}")
@@ -690,6 +720,7 @@ def main():
                     f"  [images] {total_images:,} / {total_image_count:,} "
                     f"({pct:.1f}%)  ({_elapsed(phase_start)})  ETA {eta}"
                 )
+                _write_phase_progress(progress, 3, pct, eta, "Indexing images")
                 img_batch = []
 
         vision_model, img_table, total_images = _flush_image_batch(

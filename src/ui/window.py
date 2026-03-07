@@ -2143,7 +2143,10 @@ class OmniWindow(QWidget):
                 elif a.get('type') == 'open_app':
                     return AppActionWidget(a['name'])
                 elif a.get('type') == 'person':
-                    return PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
+                    w = PersonActionWidget(a['name'], a['description'], a.get('image'), a.get('url'))
+                    if not a.get('image'):
+                        QTimer.singleShot(200, lambda _w=w, _n=a['name']: _w.fetch_image_for_name(_n))
+                    return w
                 elif a.get('type') == 'place':
                     # Use PlaceActionWidget for rich place cards (images + map)
                     return PlaceActionWidget(
@@ -2756,8 +2759,13 @@ class OmniWindow(QWidget):
             elif data.get('type') == 'open_app':
                 # Launch App (from Regex Shortcut)
                 app_name = data.get('name')
-                success, msg = find_and_launch_app(app_name)
-                # We could show status, but typically we close or show notification
+                import src.services.llm.model_manager as mm
+                mm.abort_fast_event.set()
+                self.cleanup_worker('action_worker')
+                self.cleanup_worker('search_worker')
+                self.cleanup_worker('file_search_worker')
+                self.input_field.clear()
+                find_and_launch_app(app_name)
                 self.animate_close()
             elif data.get('type') == 'open_file':
                 # Open file in default application
@@ -3573,6 +3581,8 @@ class OmniWindow(QWidget):
                             w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
+                            if not act.get('image'):
+                                w.fetch_image_for_name(act['name'])
                         elif act.get('type') == 'place':
                             w = MapNavigationWidget(act['name'], act.get('address'))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
@@ -3700,7 +3710,13 @@ class OmniWindow(QWidget):
                         elif act.get('type') == 'open_app':
                             w = AppActionWidget(act['name'])
                             def launch_app(name, widget):
-                                success, msg = find_and_launch_app(name)
+                                import src.services.llm.model_manager as mm
+                                mm.abort_fast_event.set()
+                                self.cleanup_worker('action_worker')
+                                self.cleanup_worker('search_worker')
+                                self.cleanup_worker('file_search_worker')
+                                self.input_field.clear()
+                                find_and_launch_app(name)
                                 self.animate_close()
                             w.app_accepted.connect(launch_app)
                             self.insert_list_item(insert_pos, w, act, animation="fade")
@@ -4042,6 +4058,8 @@ class OmniWindow(QWidget):
                 elif act.get('type') == 'person':
                     w = PersonActionWidget(act['name'], act.get('description', ''), act.get('image'), act.get('url'))
                     add_item(w, act, anim="pop")
+                    if not act.get('image'):
+                        w.fetch_image_for_name(act['name'])
                 elif act.get('type') == 'place':
                     w = PlaceActionWidget(
                         act['name'],
@@ -4127,7 +4145,13 @@ class OmniWindow(QWidget):
                 elif act.get('type') == 'open_app':
                     w = AppActionWidget(act['name'])
                     def launch_app(name, widget):
-                        success, msg = find_and_launch_app(name)
+                        import src.services.llm.model_manager as mm
+                        mm.abort_fast_event.set()
+                        self.cleanup_worker('action_worker')
+                        self.cleanup_worker('search_worker')
+                        self.cleanup_worker('file_search_worker')
+                        self.input_field.clear()
+                        find_and_launch_app(name)
                         self.animate_close()
                     w.app_accepted.connect(launch_app)
                     add_item(w, act, anim="fade")

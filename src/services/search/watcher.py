@@ -7,7 +7,6 @@ import json
 import urllib.request
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from PIL import Image
 
 # Ensure project root is in path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -26,17 +25,36 @@ TABLE_NAME = "files"
 CHUNKS_TABLE_NAME = "file_chunks"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
 
-# Lazy-loaded CLIP vision model (only instantiated on first image event)
+# Lazy-loaded CLIP vision model via embed-anything (only instantiated on first image event)
 _vision_model = None
 
 
 def _get_vision_model():
-    """Load clip-ViT-B-32 on first use instead of at startup."""
+    """Load CLIP via embed-anything on first use."""
     global _vision_model
     if _vision_model is None:
-        from sentence_transformers import SentenceTransformer
+        from embed_anything import EmbeddingModel, ImageEmbedConfig
+        import embed_anything as _ea
         logger.info("Loading CLIP vision model (lazy)...")
-        _vision_model = SentenceTransformer('clip-ViT-B-32', device='cpu')
+
+        _raw = EmbeddingModel.from_pretrained_hf(model_id="openai/clip-vit-base-patch32")
+
+        class _CLIPWrapper:
+            def __init__(self, m):
+                self.model = m
+            def encode(self, image_path):
+                import numpy as np
+                results = _ea.embed_file(
+                    image_path, embedder=self.model,
+                    config=ImageEmbedConfig(batch_size=1),
+                )
+                if not results:
+                    return np.zeros(512, dtype=np.float32)
+                vec = np.array(results[0].embedding, dtype=np.float32)
+                norm = np.linalg.norm(vec)
+                return vec / norm if norm > 0 else vec
+
+        _vision_model = _CLIPWrapper(_raw)
         logger.info("CLIP vision model loaded.")
     return _vision_model
 
@@ -103,8 +121,7 @@ class IndexHandler(FileSystemEventHandler):
             try:
                 logging.info(f"Indexing IMAGE: {path}")
                 vision_model = _get_vision_model()
-                img = Image.open(path)
-                vector = vision_model.encode(img).tolist()
+                vector = vision_model.encode(path).tolist()
                 filename = os.path.basename(path)
                 self.img_table.delete(f'path = "{path}"')
                 self.img_table.add([{"vector": vector, "filename": filename, "path": path}])

@@ -1,114 +1,148 @@
 #!/usr/bin/env python3
 """
 Generate the Omni DMG background image.
-660×400 points @2x = 1320×800 px — dark with violet/blue spotlight glows.
-Pure stdlib, numpy fast-path if available.
+660×420 pt @2x = 1320×840 px
+Premium dark design: deep violet glow + dot grid + smooth bezier arrow.
+Requires: Pillow, numpy (both available in the build environment).
 """
 import sys
-import struct
-import zlib
 import math
 
-W, H = 1320, 800   # @2x retina
+# ── Canvas ────────────────────────────────────────────────────────────────────
+W, H = 1320, 840   # @2x retina (660×420 pt window)
 
-# Brand colours (Omni's palette)
-BG_R, BG_G, BG_B   = 10, 10, 13      # slightly darker than #0D0D10
+# ── Icon centres in @2x pixels (mirrors create_dmg.sh layout) ────────────────
+# APP_X=178, APP_Y=192 in pt  →  @2x = (356, 384)
+# APPS_X=482, APPS_Y=192 in pt →  @2x = (964, 384)
+APP_CX,  APP_CY  = 356, 384
+APPS_CX, APPS_CY = 964, 384
 
-# Left spotlight  — violet  (#8B5CF6) — sits under the app icon
-LX, LY   = W * 0.273, H * 0.46
-L_R, L_G, L_B = 139, 92, 246
-L_RADIUS = W * 0.32
-L_ALPHA  = 0.22
-
-# Right spotlight — indigo-blue (#3B82F6) — sits under the Applications arrow
-RX, RY   = W * 0.727, H * 0.46
-R_R, R_G, R_B = 59, 130, 246
-R_RADIUS = W * 0.30
-R_ALPHA  = 0.17
-
-# Vignette strength (darken edges)
-VIG = 0.30
+# ── Palette ───────────────────────────────────────────────────────────────────
+BG          = (8,   8,  14)    # deep near-black, very slight blue tint
+VIOLET      = (139, 92, 246)   # #8B5CF6 — Omni brand violet
+INDIGO      = (99,  102, 241)  # #6366F1 — supporting indigo
 
 
-def _write_png(rgb_rows: bytes, path: str):
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-
-    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
-    idat = chunk(b"IDAT", zlib.compress(rgb_rows, 1))
-    iend = chunk(b"IEND", b"")
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend)
-
-
-def _fast(path: str):
+def _build_base(xg, yg):
+    """Numpy gradient: dark BG + two radial glows + vignette → RGBA ndarray."""
     import numpy as np
 
-    xv = np.linspace(0, W - 1, W, dtype=np.float32)
-    yv = np.linspace(0, H - 1, H, dtype=np.float32)
-    xg, yg = np.meshgrid(xv, yv)
-
-    def spotlight(cx, cy, radius, alpha):
+    def radial(cx, cy, r, exp=1.8):
         d = np.sqrt((xg - cx) ** 2 + (yg - cy) ** 2)
-        return np.maximum(0.0, 1.0 - d / radius) ** 2.0 * alpha
+        return np.clip(1.0 - d / r, 0, 1) ** exp
 
-    li = spotlight(LX, LY, L_RADIUS, L_ALPHA)
-    ri = spotlight(RX, RY, R_RADIUS, R_ALPHA)
+    li = radial(APP_CX,  APP_CY,  520)   # wide violet glow
+    ri = radial(APPS_CX, APPS_CY, 480)   # wide indigo glow
 
-    # Vignette
+    # Strong violet on left, strong indigo on right
+    V_A, I_A = 0.58, 0.48
+    # Light vignette — keeps edges dark without crushing the glow areas
     ex = (xg / W - 0.5) * 2
     ey = (yg / H - 0.5) * 2
-    vig = np.clip(1.0 - (ex * ex + ey * ey) * VIG, 0.4, 1.0)
+    vig = np.clip(1.0 - (ex ** 2 + ey ** 2) * 0.25, 0.50, 1.0)
 
-    r = np.clip((BG_R + L_R * li + R_R * ri) * vig, 0, 255).astype(np.uint8)
-    g = np.clip((BG_G + L_G * li + R_G * ri) * vig, 0, 255).astype(np.uint8)
-    b = np.clip((BG_B + L_B * li + R_B * ri) * vig, 0, 255).astype(np.uint8)
+    r = np.clip((BG[0] + VIOLET[0] * li * V_A + INDIGO[0] * ri * I_A) * vig, 0, 255)
+    g = np.clip((BG[1] + VIOLET[1] * li * V_A + INDIGO[1] * ri * I_A) * vig, 0, 255)
+    b = np.clip((BG[2] + VIOLET[2] * li * V_A + INDIGO[2] * ri * I_A) * vig, 0, 255)
 
-    # Interleave into filter-byte-prefixed rows
-    rows = np.zeros((H, 1 + W * 3), dtype=np.uint8)
-    rows[:, 0] = 0          # filter byte: None
-    rows[:, 1::3] = r
-    rows[:, 2::3] = g
-    rows[:, 3::3] = b
-
-    _write_png(rows.tobytes(), path)
+    rgb = np.stack([r, g, b], axis=2).astype(np.uint8)
+    alpha = np.full((H, W, 1), 255, dtype=np.uint8)
+    return np.concatenate([rgb, alpha], axis=2)
 
 
-def _slow(path: str):
-    def clamp(v):
-        return max(0, min(255, int(v)))
+def _dot_grid(draw):
+    """Very subtle white dot grid — premium tech-tool aesthetic."""
+    SPACING = 40
+    R       = 1
+    COLOR   = (255, 255, 255, 14)
+    for gy in range(SPACING // 2, H, SPACING):
+        for gx in range(SPACING // 2, W, SPACING):
+            draw.ellipse([gx - R, gy - R, gx + R, gy + R], fill=COLOR)
 
-    buf = bytearray()
-    for y in range(H):
-        buf.append(0)  # filter byte
-        for x in range(W):
-            ld = math.sqrt((x - LX) ** 2 + (y - LY) ** 2)
-            li = max(0.0, 1.0 - ld / L_RADIUS) ** 2.0 * L_ALPHA
 
-            rd = math.sqrt((x - RX) ** 2 + (y - RY) ** 2)
-            ri = max(0.0, 1.0 - rd / R_RADIUS) ** 2.0 * R_ALPHA
+def _bezier(p0, p1, p2, n=300):
+    """Quadratic bezier — returns list of (x, y) float tuples."""
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0]
+        y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1]
+        pts.append((x, y))
+    return pts
 
-            ex = (x / W - 0.5) * 2
-            ey = (y / H - 0.5) * 2
-            vig = max(0.4, min(1.0, 1.0 - (ex * ex + ey * ey) * VIG))
 
-            buf.append(clamp((BG_R + L_R * li + R_R * ri) * vig))
-            buf.append(clamp((BG_G + L_G * li + R_G * ri) * vig))
-            buf.append(clamp((BG_B + L_B * li + R_B * ri) * vig))
+def _draw_arrow(layer, draw):
+    """
+    Smooth bezier arrow from the app icon to Applications.
+    Three-layer paint: wide violet glow → mid glow → crisp white core → head.
+    """
+    # Icon half-width at 128pt @2x = 256px.  Start/end just outside icon edge.
+    GAP = 108
+    p0 = (APP_CX  + GAP, APP_CY + 4)    # starts right of app icon
+    p1 = (W // 2,        APP_CY - 95)   # control point — gentle arc upward
+    p2 = (APPS_CX - GAP, APP_CY + 4)   # ends left of Applications icon
 
-    _write_png(bytes(buf), path)
+    pts = _bezier(p0, p1, p2)
+    segs = list(zip(pts, pts[1:]))
+
+    # Outer violet aura (wide + very soft)
+    for a, b in segs:
+        draw.line([a, b], fill=(180, 140, 255, 22), width=28)
+    # Inner glow
+    for a, b in segs:
+        draw.line([a, b], fill=(220, 190, 255, 45), width=12)
+    # Core white line
+    for a, b in segs:
+        draw.line([a, b], fill=(255, 255, 255, 210), width=5)
+
+    # ── Arrowhead ────────────────────────────────────────────────────────────
+    # Tangent at t=1 for quadratic bezier = 2*(p2 - p1)
+    tx = 2 * (p2[0] - p1[0])
+    ty = 2 * (p2[1] - p1[1])
+    mag = math.sqrt(tx ** 2 + ty ** 2)
+    dx, dy = tx / mag, ty / mag   # forward direction
+    px, py = -dy, dx              # perpendicular
+
+    HEAD_LEN, HEAD_W = 38, 20
+    tip = p2
+    bx = tip[0] - dx * HEAD_LEN
+    by = tip[1] - dy * HEAD_LEN
+    draw.polygon(
+        [tip, (bx + px * HEAD_W, by + py * HEAD_W),
+              (bx - px * HEAD_W, by - py * HEAD_W)],
+        fill=(255, 255, 255, 225),
+    )
+
+
+def generate(path: str):
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    xv = np.arange(W, dtype=np.float32)
+    yv = np.arange(H, dtype=np.float32)
+    xg, yg = np.meshgrid(xv, yv)
+
+    # Base gradient
+    base_arr = _build_base(xg, yg)
+    img = Image.fromarray(base_arr, "RGBA")
+
+    # Dot grid layer
+    grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    _dot_grid(ImageDraw.Draw(grid))
+    img = Image.alpha_composite(img, grid)
+
+    # Arrow layer
+    arrow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    _draw_arrow(arrow, ImageDraw.Draw(arrow))
+    img = Image.alpha_composite(img, arrow)
+
+    img.convert("RGB").save(path, "PNG")
+    print(f"[bg] {W}×{H} → {path}")
 
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "background.png"
-    try:
-        _fast(out)
-        print(f"[bg] numpy fast-path → {out}")
-    except ImportError:
-        print("[bg] numpy not available, using pure Python (may be slow)…")
-        _slow(out)
-        print(f"[bg] done → {out}")
+    generate(out)
 
 
 if __name__ == "__main__":

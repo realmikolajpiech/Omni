@@ -25,9 +25,9 @@ SIGN_ID="Developer ID Application: Daniel Piech (D3S4G4R6GM)"
 KEYCHAIN_PROFILE="notarytool-password"
 
 # ── DMG window layout ─────────────────────────────────────────────────────────
-# 660×400 pt window — centered at 200, 120 from top-left of screen
+# 660×420 pt window — centered near top-left of screen
 WIN_X=200;    WIN_Y=120
-WIN_W=660;    WIN_H=400
+WIN_W=660;    WIN_H=420
 WIN_RIGHT=$((WIN_X + WIN_W))
 WIN_BOTTOM=$((WIN_Y + WIN_H))
 
@@ -35,8 +35,10 @@ ICON_SIZE=128       # icon pt size
 TEXT_SIZE=13        # label font size
 
 # Icon centres in window coordinates (points)
-APP_X=180;   APP_Y=185
-APPS_X=480;  APPS_Y=185
+# Horizontally: app at 27%, Applications at 73% of width
+# Vertically:   centred at ~47% of height
+APP_X=178;   APP_Y=192
+APPS_X=482;  APPS_Y=192
 
 echo "========================================="
 echo "  Omni DMG Build"
@@ -77,10 +79,14 @@ mkdir -p "$STAGING_DIR"
 # Hidden background folder — Finder reads background.png from here
 mkdir -p "${STAGING_DIR}/.background"
 echo "==> Generating background image…"
+python3 -c "import PIL" 2>/dev/null || pip3 install Pillow -q
 python3 "$BG_SCRIPT" "${STAGING_DIR}/.background/background.png"
 
 cp -R "$APP_PATH" "$STAGING_DIR/"
 ln -s /Applications "${STAGING_DIR}/Applications"
+
+# Mark .background invisible so Finder doesn't show it
+chflags hidden "${STAGING_DIR}/.background"
 
 # ── Step 3: Create writable DMG ───────────────────────────────────────────────
 echo ""
@@ -110,6 +116,9 @@ echo "    Mounted at: $MOUNT_DIR"
 # Give Finder a moment to register the volume
 sleep 2
 
+# Hide macOS-generated metadata folders
+[ -d "$MOUNT_DIR/.fseventsd" ] && chflags hidden "$MOUNT_DIR/.fseventsd"
+
 echo "==> Styling Finder window via AppleScript…"
 /usr/bin/osascript << APPLESCRIPT
 tell application "Finder"
@@ -133,8 +142,8 @@ tell application "Finder"
         set shows item info of opts to false
         set label position of opts to bottom
 
-        -- Background image (the hidden .background folder)
-        set background picture of opts to file ".background:background.png"
+        -- Background image (absolute POSIX path → HFS alias)
+        set background picture of opts to (POSIX file "$MOUNT_DIR/.background/background.png") as alias
 
         -- Icon positions
         set position of item "Omni.app"      of container window to {$APP_X,  $APP_Y}

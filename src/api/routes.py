@@ -5,7 +5,6 @@ import logging
 import re
 import threading
 from typing import Optional
-import torch
 from flask import Blueprint, request, jsonify, Response
 
 from src.core.config import COMMON_SHORTCUTS
@@ -44,45 +43,102 @@ def _pending_actions_get(pending_id: str) -> Optional[dict]:
         return _PENDING_ACTIONS.get(pending_id)
 
 
-def _llm_person_description(name: str, context: str, safe_fast_completion) -> Optional[str]:
+def _llm_person_description(name: str, context: str, safe_fast_completion) -> Optional[tuple[str, str]]:
     """Ask the fast model to write a person description from search context.
-    Returns the description string, or None on failure."""
-    try:
-        out = safe_fast_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Based on the search results, write a concise biography for a person card.\n\n"
-                        "Output exactly two lines:\n"
-                        "NAME: [person's full name only]\n"
-                        "DESCRIPTION: [A third-person summary in 1-2 sentences with specific context "
-                        "(role + organization/school/company/location if available). "
-                        "No handles, follower counts, phone numbers, or raw snippet fragments.]"
-                    ),
-                },
-                {"role": "user", "content": f"Search results about: {name}\n\n{context}\n\nWrite the person card:"},
-            ],
-            max_tokens=150,
-            temperature=0.5,
-            step_name="Person card description",
-        )
-        if out:
-            card_text = out['choices'][0]['message']['content'].strip()
-            logging.info(f"[DEBUG] LLM person description output:\n{card_text}")
-            for part in card_text.split("\n"):
-                part = part.strip()
-                if part.upper().startswith("DESCRIPTION:"):
-                    desc = part.split(":", 1)[1].strip()
-                    if desc:
-                        return desc
-            # Fallback: take non-NAME lines
-            lines = [l.strip() for l in card_text.split("\n") if l.strip() and "NAME:" not in l.upper()]
-            if lines:
-                return " ".join(lines)
-    except Exception as e:
-        logging.error(f"[DEBUG] LLM person description failed: {e}")
+    Returns (name, description), or None on failure."""
+
+    system_content = (
+        "You are an expert biographer. Write a concise Person Card based on the search results.\n"
+        "You MUST always output both lines, even if information is limited — do your best with what is available.\n"
+        "Strictly follow this format (no markdown, no preamble):\n"
+        "NAME: [Full Name]\n"
+        "DESCRIPTION: [1-2 sentences. Third-person. Role + organization/location. No social stats, no handles.]"
+    )
+    user_content = f"Search Context for '{name}':\n{context}\n\nGenerate the Person Card now. You must always write both NAME and DESCRIPTION lines:"
+
+    def _parse_card_text(text):
+        if not text: return None
+        # Handle cases where model adds markdown or preamble
+        text = text.replace("```", "").replace("**", "")
+        
+        name_found = None
+        desc_found = None
+        
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line: continue
+            if line.upper().startswith("NAME:"):
+                name_found = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("DESCRIPTION:"):
+                desc_found = line.split(":", 1)[1].strip()
+        
+        if desc_found:
+            return name_found, desc_found
+            
+        # Fallback: if no strict format, take the longest line that isn't the name
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if not lines: return None
+        
+        # If model just outputted the description without tags
+        longest = max(lines, key=len)
+        if len(longest) > 20 and "NAME:" not in longest.upper():
+            return None, longest
+            
+        return None
+
+    # Try Fast Model (with retry)
+    for i in range(2):
+        try:
+            out = safe_fast_completion(
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=300, # Increased from 200 to prevent cutoff
+                temperature=0.3, # Lower temp for more deterministic formatting
+                step_name=f"Person card description (attempt {i+1})",
+            )
+            if out:
+                card_text = out['choices'][0]['message']['content'].strip()
+                if card_text:
+                    logging.info(f"[DEBUG] Fast Model person desc output (try {i+1}):\n{card_text}")
+                    parsed_name, parsed_desc = _parse_card_text(card_text)
+                    if parsed_desc: return parsed_name, parsed_desc
+                else:
+                    logging.warning(f"[DEBUG] Fast Model returned empty text (try {i+1})")
+        except Exception as e:
+            logging.warning(f"Fast model person desc attempt {i+1} failed: {e}")
+
     return None
+
+
+def _build_person_desc_from_snippets(name: str, search_results: list) -> Optional[str]:
+    """Rule-based fallback: build a readable description from search snippets."""
+    import re as _re
+    # Try to find a snippet that mentions the person's name (case-insensitive)
+    name_lower = name.lower()
+    name_parts = [p for p in name_lower.split() if len(p) > 2]
+    best_snippet = None
+    for r in search_results[:5]:
+        snippet = (r.get('content') or r.get('snippet', '')).strip()
+        if not snippet:
+            continue
+        snippet_lower = snippet.lower()
+        if any(p in snippet_lower for p in name_parts):
+            best_snippet = snippet
+            break
+    if not best_snippet and search_results:
+        best_snippet = (search_results[0].get('content') or search_results[0].get('snippet', '')).strip()
+    if not best_snippet:
+        return None
+    # Clean up: remove trailing ellipsis, excess whitespace
+    desc = _re.sub(r'\s+', ' ', best_snippet).strip()
+    if desc.endswith('...'):
+        desc = desc[:-3].strip()
+    # Truncate to a reasonable length
+    if len(desc) > 300:
+        desc = desc[:300].rsplit(' ', 1)[0] + '.'
+    return desc if len(desc) > 15 else None
 
 
 def _parse_fast_action_output(
@@ -396,9 +452,14 @@ Instructions:
                                     if person_desc:
                                         person_res_fallback['description'] = person_desc
                                     else:
-                                        llm_desc = _llm_person_description(person_name, context, safe_fast_completion)
+                                        llm_result = _llm_person_description(person_name, context, safe_fast_completion)
+                                        llm_desc = llm_result[1] if isinstance(llm_result, tuple) else None
                                         if llm_desc:
                                             person_res_fallback['description'] = llm_desc
+                                        else:
+                                            fallback_desc = _build_person_desc_from_snippets(person_name, results or [])
+                                            if fallback_desc:
+                                                person_res_fallback['description'] = fallback_desc
                                     actions.append(person_res_fallback)
                                 else:
                                     actions.append({
@@ -439,13 +500,35 @@ Instructions:
 
             person_candidate = _extract_person_candidate(query) or _extract_person_candidate(q)
             if person_candidate:
+                # If we don't have results yet (e.g. search failed for original query but might work for person name),
+                # fetch them now to ensure we have context for the description.
+                if not results:
+                    try:
+                        from src.services.search.web_search import search_api
+                        logging.info(f"Fetching search results for Person card (heuristic): {person_candidate}")
+                        results = search_api(person_candidate, categories='general', fast=True)
+                        if results:
+                            text_res = []
+                            for i, r in enumerate(results[:3]):
+                                text_res.append(f"Title: {r.get('title')}\nDescription: {r.get('content') or r.get('snippet')}\nURL: {r.get('url')}")
+                            context = "\n\n".join(text_res)
+                    except Exception: pass
+
                 person_result = get_person_result(person_candidate, existing_results=results if results else None)
                 if person_result:
                     logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
                     if context:
-                        llm_desc = _llm_person_description(person_candidate, context, safe_fast_completion)
+                        llm_name, llm_desc = _llm_person_description(person_candidate, context, safe_fast_completion) or (None, None)
                         if llm_desc:
                             person_result['description'] = llm_desc
+                        else:
+                            fallback_desc = _build_person_desc_from_snippets(person_candidate, results or [])
+                            if fallback_desc:
+                                person_result['description'] = fallback_desc
+                        if llm_name:
+                             # Same logic as above
+                             if len(person_result['name']) < 5 or (llm_name.lower().startswith(person_result['name'].lower()) and len(llm_name) > len(person_result['name'])):
+                                 person_result['name'] = llm_name
                     actions.append(person_result)
                     continue
 
@@ -505,29 +588,33 @@ Instructions:
 
             already_have = any(a.get('type') == 'person' for a in actions)
             if not already_have:
+                # Ensure we have search results/context to generate a good card
+                # If the model output PERSON directly without a prior search, we might lack context.
+                if not search_results:
+                    try:
+                        from src.services.search.web_search import search_api
+                        logging.info(f"Fetching search results for Person card: {name}")
+                        search_results = search_api(name, categories='general', fast=True)
+                        if search_results:
+                            text_res = []
+                            for i, r in enumerate(search_results[:3]):
+                                text_res.append(f"Title: {r.get('title')}\nDescription: {r.get('content') or r.get('snippet')}\nURL: {r.get('url')}")
+                            search_context = "\n\n".join(text_res)
+                    except Exception as e:
+                        logging.error(f"Failed to fetch fallback results for person card: {e}")
+
                 # If we have a valid name, try to use it.
                 # BUT, if the name is just a fragment (like "Miko"), 
                 # we should try to recover the full name from the search results context if possible.
-                # However, _parse_fast_action_output is generic.
-                # Let's trust get_person_result to find the best match.
-                
-                # IMPORTANT: Pass the 'name' from the LLM as the query to get_person_result.
-                # If the LLM said "Miko", get_person_result might fail if existing_results are for "Mikołaj Piech".
-                # Actually, get_person_result uses existing_results if provided.
-                
-                # Refinement: If the LLM output name is very short (< 5 chars) and we have search results,
-                # maybe we should use the query or the first result's title instead?
-                # Case: User query "Mikołaj Piech", LLM output "PERSON:Miko".
-                # We want "Mikołaj Piech".
                 
                 target_name = name
-                if len(target_name) < 5 and search_results:
+                if len(target_name) < 5:
                     # Heuristic: LLM truncated the name. Use the user's query or first result.
-                    # Prefer query if it looks like a name, or first result title.
                     if len(query) > len(target_name):
                         target_name = query
+                    elif search_results:
+                        target_name = search_results[0].get('title', target_name)
                     
-                    # CRITICAL: If the LLM output is empty or generic, use the query as the name.
                     if not target_name:
                         target_name = query
 
@@ -536,9 +623,19 @@ Instructions:
                     if person_desc and len(person_desc) > 10:
                         res['description'] = person_desc
                     elif search_context:
-                        llm_desc = _llm_person_description(target_name, search_context, safe_fast_completion)
+                        llm_name, llm_desc = _llm_person_description(target_name, search_context, safe_fast_completion) or (None, None)
                         if llm_desc:
                             res['description'] = llm_desc
+                        else:
+                            fallback_desc = _build_person_desc_from_snippets(target_name, search_results or [])
+                            if fallback_desc:
+                                res['description'] = fallback_desc
+                        if llm_name:
+                             # If the model explicitly refined the name (e.g. from "Miko" to "Mikołaj Piech"), use it
+                             # But keep the original if it was already good, to avoid "Mikołaj Piech - Omni" etc.
+                             # Only update if the current name is very short or the LLM name is a superstring
+                             if len(res['name']) < 5 or (llm_name.lower().startswith(res['name'].lower()) and len(llm_name) > len(res['name'])):
+                                 res['name'] = llm_name
                     actions.append(res)
             
         elif "SEARCH:" in line:
@@ -556,7 +653,11 @@ Instructions:
                      if search_context:
                          llm_desc = _llm_person_description(q_val, search_context, safe_fast_completion)
                          if llm_desc:
-                             person_res['description'] = llm_desc
+                             person_res['description'] = llm_desc[1] if isinstance(llm_desc, tuple) else llm_desc
+                         if not person_res.get('description') or len(person_res.get('description', '')) < 20:
+                             fallback_desc = _build_person_desc_from_snippets(q_val, search_results or [])
+                             if fallback_desc:
+                                 person_res['description'] = fallback_desc
                      actions.append(person_res)
                      continue # Skip adding the search action if we found a person card
 
@@ -888,6 +989,32 @@ def search_endpoint():
             logging.error(f"Search error: {e}")
 
     return jsonify({"results": results})
+
+@api_bp.route('/person_image', methods=['POST'])
+def person_image_endpoint():
+    """Fetch an image URL for a person name (called after the card is already shown)."""
+    try:
+        req = request.get_json(force=True)
+    except Exception:
+        return jsonify({"image_url": None}), 400
+
+    name = (req.get('name') or '').strip()
+    if not name:
+        return jsonify({"image_url": None})
+
+    try:
+        from src.services.search.web_search import search_api
+        results = search_api(name, categories='images', fast=True)
+        image_url = None
+        for r in results:
+            image_url = r.get('img_src') or r.get('thumbnail') or r.get('image')
+            if image_url:
+                break
+        return jsonify({"image_url": image_url})
+    except Exception as e:
+        logging.warning(f"[person_image] Failed for '{name}': {e}")
+        return jsonify({"image_url": None})
+
 
 def _chip_site_name(url: str) -> str:
     """'https://www.tesla.com/path' → 'Tesla'"""
@@ -1533,9 +1660,6 @@ OPEN:https://www.pornhub.com
                 "subtitle": q_tool,
             }
             return jsonify({"actions": [pending_act], "action": pending_act, "chips": []})
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
 
         # Check if this request was cancelled during inference
         if model_manager.current_fast_request_id != request_id:

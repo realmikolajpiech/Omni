@@ -325,10 +325,11 @@ MAIN_MODEL_XAI_NONREASONING = "grok-4-1-fast-non-reasoning"
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 # Embedding Model
-EMBED_MODEL_HF_ID = "perplexity-ai/pplx-embed-context-v1-0.6b"  # 1024-dim, 32K context, contextualized
-EMBED_MODEL_FILENAME = "pplx-embed-context-v1-0.6b"
+EMBED_MODEL_HF_ID = "Qwen/Qwen3-Embedding-0.6B"  # 1024-dim, multilingual, causal LM
+EMBED_MODEL_FILENAME = "Qwen3-Embedding-0.6B"
 EMBED_MODEL_PATH = os.path.join(MODEL_DIR, EMBED_MODEL_FILENAME)
 EMBED_MODEL_URL = ""
+CLIP_MODEL_HF_ID = "openai/clip-vit-base-patch32"  # 512-dim, image+text via CLIP
 
 # Voice Models
 OWW_WAKE_WORD_MODEL = "Hey_Omni"  # Custom wake word; set OWW_CUSTOM_MODEL_PATH to load local .onnx

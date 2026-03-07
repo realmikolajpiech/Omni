@@ -18,17 +18,14 @@ class PermissionErrorFilter(logging.Filter):
 
 
 logging.getLogger("huggingface_hub").addFilter(PermissionErrorFilter())
-logging.getLogger("transformers").addFilter(PermissionErrorFilter())
 
 from src.core.config import (
     FAST_MODEL_GROQ,
     GROQ_API_KEY,
     MAIN_MODEL_XAI,
     XAI_API_KEY,
-    EMBED_MODEL_PATH,
-    EMBED_MODEL_FILENAME,
-    EMBED_MODEL_URL,
     EMBED_MODEL_HF_ID,
+    CLIP_MODEL_HF_ID,
     DB_PATH,
     BACKEND_URL,
     OMNI_SECRET,
@@ -315,16 +312,31 @@ class XAIMainWrapper:
         }
 
 
-class _PplxEmbedWrapper:
-    """Wraps perplexity-ai/pplx-embed-context-v1-0.6b to match the SentenceTransformer .encode() interface.
+def _detect_embed_device() -> str:
+    """Return 'cuda', 'mps', or 'cpu' based on available hardware (no torch required)."""
+    import platform, subprocess
+    # Apple Silicon → Metal
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        return "mps"
+    # CUDA → check nvidia-smi
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, timeout=3)
+        if r.returncode == 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
-    The pplx model takes list[list[str]] (documents → chunks) and returns
-    list[np.ndarray] with shape (num_chunks, 1024).  We treat each input text
-    as a single-chunk document and L2-normalise the output so the existing
-    LanceDB L2-distance threshold (~1.1) stays meaningful.
+
+class _EmbedAnythingWrapper:
+    """Wraps an embed-anything text model to match the .encode(texts) → np.ndarray interface.
+
+    Returns L2-normalised vectors so the existing LanceDB distance threshold (~1.1) stays valid.
     """
 
     def __init__(self, model):
+        import embed_anything as _ea
+        self._ea = _ea
         self.model = model
 
     def encode(self, texts):
@@ -332,13 +344,41 @@ class _PplxEmbedWrapper:
         single = isinstance(texts, str)
         if single:
             texts = [texts]
-        doc_chunks = [[t] for t in texts]
-        raw = self.model.encode(doc_chunks)          # list of (1, 1024) arrays
-        vecs = np.array([emb[0] for emb in raw])    # (N, 1024)
+        results = self._ea.embed_query(texts, embedder=self.model)
+        vecs = np.array([r.embedding for r in results], dtype=np.float32)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1.0, norms)
         normed = vecs / norms
         return normed[0] if single else normed
+
+
+class _EmbedAnythingCLIPWrapper:
+    """CLIP wrapper via embed-anything for image + text encoding.
+
+    encode(path: str)  → image vector (512-dim, L2-normalised)
+    encode(text: str)  → CLIP text vector (512-dim, L2-normalised)
+    """
+
+    def __init__(self, model):
+        import embed_anything as _ea
+        from embed_anything import ImageEmbedConfig
+        self._ea = _ea
+        self._ImageEmbedConfig = ImageEmbedConfig
+        self.model = model
+
+    def encode(self, input_):
+        import numpy as np
+        if isinstance(input_, str) and os.path.isfile(input_):
+            cfg = self._ImageEmbedConfig(batch_size=1)
+            results = self._ea.embed_file(input_, embedder=self.model, config=cfg)
+        else:
+            text = input_ if isinstance(input_, str) else str(input_)
+            results = self._ea.embed_query([text], embedder=self.model)
+        if not results:
+            return np.zeros(512, dtype=np.float32)
+        vec = np.array(results[0].embedding, dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        return vec / norm if norm > 0 else vec
 
 
 def ensure_fast_model():
@@ -377,14 +417,21 @@ def ensure_resources():
 
         if embed_model is None:
             try:
-                import numpy as np
-                from transformers import AutoModel
-                model_id = EMBED_MODEL_HF_ID
-                logging.info(f"Loading Embedding Model ({model_id})...")
+                from embed_anything import EmbeddingModel
+                import embed_anything as _ea
+                device = _detect_embed_device()
+                if device == "mps":
+                    os.environ.setdefault("METAL_DEVICE", "1")
+                    logging.info("Embedding: Metal (MPS) acceleration enabled.")
+                elif device == "cuda":
+                    logging.info("Embedding: CUDA acceleration enabled.")
+                else:
+                    logging.info("Embedding: Using CPU.")
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-                _raw = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-                embed_model = _PplxEmbedWrapper(_raw)
-                logging.info("Embedding Model loaded.")
+                logging.info(f"Loading embedding model ({EMBED_MODEL_HF_ID})...")
+                _raw = EmbeddingModel.from_pretrained_hf(model_id=EMBED_MODEL_HF_ID)
+                embed_model = _EmbedAnythingWrapper(_raw)
+                logging.info("Embedding model loaded.")
             except Exception as e:
                 logging.error(f"Embeddings Error: {e}")
 
@@ -439,3 +486,21 @@ def ensure_tts_model():
         if not tts_model:
             tts_model = {"type": "edge-tts"}
             logging.info("TTS set to edge-tts (no local model required).")
+
+
+def ensure_vision_model():
+    """Load CLIP vision model via embed-anything (lazy, thread-safe)."""
+    global vision_model
+    if vision_model is not None:
+        return
+    with search_lock:
+        if vision_model is not None:
+            return
+        try:
+            from embed_anything import EmbeddingModel
+            logging.info(f"Loading CLIP vision model ({CLIP_MODEL_HF_ID})...")
+            _raw = EmbeddingModel.from_pretrained_hf(model_id=CLIP_MODEL_HF_ID)
+            vision_model = _EmbedAnythingCLIPWrapper(_raw)
+            logging.info("CLIP vision model loaded.")
+        except Exception as e:
+            logging.error(f"CLIP model load error: {e}")

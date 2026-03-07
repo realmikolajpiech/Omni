@@ -866,10 +866,7 @@ class InstallWorker(QThread):
         python_venv = str(venv_dir / "bin" / "python3")
         self._run_cmd([pip_cmd, "install", "--upgrade", "pip", "--quiet", "--no-cache-dir"], env=env)
 
-        self.progress.emit(55, "Installing PyTorch (a few minutes)…")
-        self._run_cmd([pip_cmd, "install", "torch", "torchvision", "torchaudio", "accelerate", "transformers", "--quiet", "--no-cache-dir"], env=env)
-
-        self.progress.emit(70, "Installing requirements…")
+        self.progress.emit(55, "Installing requirements…")
         req_file = INSTALL_DIR / "requirements.txt"
         self._run_cmd([pip_cmd, "install", "-r", str(req_file), "--quiet", "--no-cache-dir"], env=env)
 

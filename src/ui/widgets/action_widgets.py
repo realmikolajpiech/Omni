@@ -2904,6 +2904,12 @@ class PersonActionWidget(QWidget):
         info_layout.setContentsMargins(0, 6, 0, 6)
 
         display_name = name.replace(" - Wikipedia", "").strip()
+        # Ensure title case for display if it looks like a name (not already uppercase/mixed)
+        if display_name.islower():
+            display_name = display_name.title()
+            
+        logging.info(f"[UI] Displaying Person Card: Name='{display_name}', Desc='{description[:50]}...'")
+        
         self.name_label = QLabel(display_name)
         self.name_label.setFont(QFont("Instrument Serif", 32, QFont.Weight.Normal))
         self.name_label.setStyleSheet("color: #111111;")
@@ -2940,9 +2946,40 @@ class PersonActionWidget(QWidget):
         
         self.nam = QNetworkAccessManager(self)
 
+        # Delayed image search/download
+        # If we have a URL, start download immediately.
+        # If not, we might want to trigger a search (but this widget doesn't have search logic).
+        # The user requested: "only once the card loads... then get it"
+        # We can simulate this by scheduling the download on the next event loop iteration
+        # or just trusting the async nature of QNAM.
+        # BUT, if image_url is missing, we can't download. The backend is supposed to provide it.
+        # If the user means "fetch image from web if missing", that logic belongs in the backend/worker, not UI.
+        # However, to prioritize "showing card first", we can use QTimer.singleShot(0, ...)
+        
         if self.image_url:
-            logging.info(f"Starting image download for {name}: {self.image_url}")
-            self._download_image()
+            QTimer.singleShot(100, self._download_image)
+
+    def fetch_image_for_name(self, name: str):
+        """Async: ask the brain for an image URL for this person, then download it."""
+        body = f'{{"name": "{name}"}}'.encode('utf-8')
+        req = QNetworkRequest(QUrl("http://127.0.0.1:5555/person_image"))
+        req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+        reply = self.nam.post(req, body)
+        reply.finished.connect(lambda: self._on_image_search_reply(reply))
+
+    def _on_image_search_reply(self, reply):
+        try:
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                import json as _json
+                data = _json.loads(bytes(reply.readAll()))
+                url = data.get('image_url')
+                if url:
+                    self.image_url = url
+                    self._download_image()
+        except Exception as e:
+            logging.warning(f"PersonActionWidget image search reply error: {e}")
+        finally:
+            reply.deleteLater()
 
     def set_theme(self, theme):
         self.current_theme = theme
