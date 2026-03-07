@@ -2,13 +2,19 @@
 set -e
 
 # build_installer.sh — One-shot build: PyInstaller + DMG packaging
-# Usage: cd installer && ./build_installer.sh
+# Usage: cd installer && ./build_installer.sh [--no-notarize]
+#   --no-notarize   Build and sign the DMG but skip Apple notarization/stapling
+
+NO_NOTARIZE=0
+for arg in "$@"; do
+    [ "$arg" = "--no-notarize" ] && NO_NOTARIZE=1
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 echo "========================================="
-echo "  Omni Installer Build"
+echo "  Omni Build"
 echo "========================================="
 echo ""
 
@@ -38,16 +44,20 @@ cd "$SCRIPT_DIR"
 python3 -m PyInstaller installer.spec --noconfirm
 
 echo ""
-echo "==> PyInstaller complete. App at: dist/Install Omni.app"
+echo "==> PyInstaller complete. App at: dist/Omni.app"
 
 # ── Step 3: Create DMG ────────────────────────────────────────────────────────
 echo ""
 echo "==> Creating DMG..."
 chmod +x "$SCRIPT_DIR/create_dmg.sh"
-"$SCRIPT_DIR/create_dmg.sh" "Omni Installer"
+if [ "$NO_NOTARIZE" = "1" ]; then
+    "$SCRIPT_DIR/create_dmg.sh" "Omni" --no-notarize
+else
+    "$SCRIPT_DIR/create_dmg.sh" "Omni"
+fi
 
 echo ""
 echo "========================================="
 echo "  Build complete!"
-echo "  Output: installer/Omni Installer.dmg"
+echo "  Output: installer/Omni.dmg"
 echo "========================================="

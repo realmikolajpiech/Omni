@@ -57,7 +57,6 @@ ERROR      = "#F87171"
 RADIUS     = 20
 
 INSTALL_DIR = Path.home() / "Library" / "Application Support" / "Omni"
-APP_WRAPPER  = Path("/Applications/Omni.app")
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "com.omni.app.plist"
 CONFIG_DIR   = Path.home() / ".config" / "omni"
 
@@ -572,7 +571,13 @@ class SystemCheckPage(QWidget):
             self.row_macos.set_fail("Unknown")
             passed = False
 
-        brew = shutil.which("brew")
+        # shutil.which only searches PATH, which is stripped inside .app bundles.
+        # Probe the fixed Homebrew locations directly (Apple Silicon + Intel).
+        brew = (
+            shutil.which("brew")
+            or (os.path.exists("/opt/homebrew/bin/brew") and "/opt/homebrew/bin/brew")
+            or (os.path.exists("/usr/local/bin/brew") and "/usr/local/bin/brew")
+        )
         if brew:
             self.row_brew.set_ok("Found")
         else:
@@ -692,7 +697,12 @@ class InstallWorker(QThread):
         self.progress.emit(0, "Starting…")
 
         self.progress.emit(5, "Checking Homebrew…")
-        if not shutil.which("brew"):
+        _brew_found = (
+            shutil.which("brew", path=env.get("PATH"))
+            or os.path.exists("/opt/homebrew/bin/brew")
+            or os.path.exists("/usr/local/bin/brew")
+        )
+        if not _brew_found:
             self.progress.emit(5, "Installing Homebrew…")
 
             import getpass as _getpass, shlex as _shlex
@@ -866,9 +876,6 @@ class InstallWorker(QThread):
         self.progress.emit(85, "Installing voice engine…")
         self._run_cmd([pip_cmd, "install", "git+https://github.com/QwenLM/Qwen3-ASR.git", "--quiet", "--no-cache-dir"], env=env)
 
-        self.progress.emit(92, "Creating Omni.app…")
-        self._create_app_wrapper()
-
         self.progress.emit(96, "Finalising…")
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         settings_file = CONFIG_DIR / "settings.json"
@@ -891,166 +898,6 @@ class InstallWorker(QThread):
 
         self.progress.emit(100, "Done.")
         self.finished_ok.emit()
-
-    def _create_app_wrapper(self):
-        contents = APP_WRAPPER / "Contents"
-        macos_dir = contents / "MacOS"
-        res_dir   = contents / "Resources"
-        macos_dir.mkdir(parents=True, exist_ok=True)
-        res_dir.mkdir(parents=True, exist_ok=True)
-        launcher = macos_dir / "Omni"
-
-        # Compile a native Mach-O launcher instead of a bash script.
-        # TCC (macOS's permission system) only resolves the responsible app
-        # bundle when the process chain includes a native binary inside the
-        # .app — a bash script breaks that chain.  A compiled C binary AS the
-        # main executable means that when it calls AXIsProcessTrustedWithOptions
-        # the system prompt says "Omni wants to control this computer" and Omni
-        # appears in System Settings → Accessibility automatically, exactly like
-        # Raycast and Screen Studio do.
-        _C_LAUNCHER = r"""
-#include <ApplicationServices/ApplicationServices.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <stdio.h>
-#include <dirent.h>
-#include <errno.h>
-
-int main(int argc, char *argv[]) {
-    /* --check-ax: silently check AX trust for this bundle (com.omni.app).
-       No prompt, no side effects beyond what's already in TCC.          */
-    if (argc > 1 && strcmp(argv[1], "--check-ax") == 0) {
-        CFStringRef key = CFSTR("AXTrustedCheckOptionPrompt");
-        CFBooleanRef val = kCFBooleanFalse;
-        CFDictionaryRef opts = CFDictionaryCreate(
-            NULL,
-            (const void **)&key, (const void **)&val, 1,
-            &kCFTypeDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks);
-        bool trusted = AXIsProcessTrustedWithOptions(opts);
-        CFRelease(opts);
-        puts(trusted ? "yes" : "no");
-        return 0;
-    }
-
-    /* --check-fda: probe ~/Library/Mail — a user-level FDA-protected path.
-       ~/Library/Mail is FDA-gated on all macOS versions and is NOT
-       additionally protected by SIP (unlike /Library/.../TCC.db which
-       Apple locked down in Sonoma/Sequoia).  The opendir() attempt:
-         • Registers com.omni.app in System Settings → Full Disk Access
-         • Returns "yes" when FDA is granted (dir opens OR ENOENT, i.e.
-           TCC allowed the call but the folder simply doesn't exist)
-         • Returns "no" when FDA is denied (EPERM / EACCES from TCC)    */
-    if (argc > 1 && strcmp(argv[1], "--check-fda") == 0) {
-        char path[4096];
-        const char *home = getenv("HOME");
-        if (!home) home = "";
-        snprintf(path, sizeof(path), "%s/Library/Mail", home);
-        errno = 0;
-        DIR *d = opendir(path);
-        if (d) {
-            closedir(d);
-            puts("yes");
-        } else {
-            /* EPERM/EACCES = TCC blocked it; ENOENT = FDA granted, dir absent */
-            puts((errno == EPERM || errno == EACCES) ? "no" : "yes");
-        }
-        return 0;
-    }
-
-    /* Normal launch: register in Accessibility and start the app.     */
-    CFStringRef key = CFSTR("AXTrustedCheckOptionPrompt");
-    CFBooleanRef val = kCFBooleanTrue;
-    CFDictionaryRef opts = CFDictionaryCreate(
-        NULL,
-        (const void **)&key, (const void **)&val, 1,
-        &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks);
-    AXIsProcessTrustedWithOptions(opts);
-    CFRelease(opts);
-
-    /* Stay alive as the root Omni.app process while run.sh runs, so that
-       TCC can always trace any subprocess (python3, etc.) back to this
-       native binary → Omni.app when checking accessibility permissions. */
-    const char *home = getenv("HOME");
-    if (!home) home = "";
-    char path[4096];
-    snprintf(path, sizeof(path),
-             "%s/Library/Application Support/Omni/run.sh", home);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        execl("/bin/bash", "bash", path, (char *)NULL);
-        _exit(1);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-}
-"""
-        _compiled = False
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".c",
-                                            delete=False) as _tf:
-                _tf.write(_C_LAUNCHER)
-                _c_path = _tf.name
-            _r = subprocess.run(
-                ["cc", _c_path, "-o", str(launcher),
-                 "-framework", "ApplicationServices",
-                 "-framework", "CoreFoundation"],
-                capture_output=True)
-            os.unlink(_c_path)
-            if _r.returncode == 0:
-                _compiled = True
-                # Ad-hoc sign so TCC can assign a stable code identity
-                subprocess.run(
-                    ["codesign", "--force", "--deep", "--sign", "-",
-                     str(APP_WRAPPER)],
-                    capture_output=True)
-        except Exception:
-            pass
-
-        if not _compiled:
-            # Fallback: bash script (permission prompt may show for bash/python)
-            launcher.write_text(
-                '#!/bin/bash\n'
-                'exec "$HOME/Library/Application Support/Omni/run.sh"\n'
-            )
-
-        launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        plist_src = resource("resources/Info.plist")
-        if os.path.exists(plist_src):
-            shutil.copy2(plist_src, contents / "Info.plist")
-        else:
-            (contents / "Info.plist").write_text(self._default_plist())
-        icon_src = resource("assets/omni.png")
-        if os.path.exists(icon_src):
-            try:
-                iconset_dir = tempfile.mkdtemp(suffix=".iconset")
-                for size in (16, 32, 64, 128, 256, 512):
-                    for mul, suffix in [(1, ""), (2, "@2x")]:
-                        out_path = os.path.join(iconset_dir, f"icon_{size}x{size}{suffix}.png")
-                        subprocess.run(["sips", "-z", str(size*mul), str(size*mul), icon_src, "--out", out_path], capture_output=True, check=False)
-                icns_path = str(res_dir / "omni.icns")
-                subprocess.run(["iconutil", "-c", "icns", iconset_dir, "-o", icns_path], capture_output=True, check=False)
-                shutil.rmtree(iconset_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-    def _default_plist(self):
-        return """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>Omni</string>
-<key>CFBundleIdentifier</key><string>com.omni.app</string>
-<key>CFBundleName</key><string>Omni</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>LSUIElement</key><true/>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>"""
 
 
 class IndexWorker(QThread):
@@ -1547,46 +1394,34 @@ class PermissionsPage(QWidget):
 
     def start_polling(self):
         """Called by the main window when this page becomes the active step."""
-        # Remove any stale "Install Omni" entry from the FDA list that may
-        # have been registered by earlier builds reading the TCC database.
-        try:
-            subprocess.run(
-                ["tccutil", "reset", "SystemPolicyAllFiles", "com.omni.installer"],
-                capture_output=True, timeout=5)
-        except Exception:
-            pass
         if not self._poll.isActive():
             self._poll.start()
         self._check_permissions()
 
-    # ── Open Accessibility (also launches Omni so it appears in the list) ───────
+    # ── Open Accessibility ───────────────────────────────────────────────────────
 
     def _open_accessibility(self):
-        try:
-            subprocess.Popen(["open", "-a", str(APP_WRAPPER)])
-        except Exception:
-            pass
+        # We ARE com.omni.app (the PyInstaller bundle has bundle ID com.omni.app),
+        # so just opening the pane is enough — macOS will show Omni there.
         subprocess.Popen([
             "open",
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         ])
 
     def _open_fda(self):
-        # Launch Omni with --check-fda so it probes the TCC-protected path as
-        # an independent process.  Using "open -a --args" detaches Omni from the
-        # installer's process tree, so macOS TCC attributes the access attempt to
-        # com.omni.app (Omni) — not com.omni.installer — and adds it to the
-        # Full Disk Access list in System Settings.
-        try:
-            # -n forces a NEW instance even if Omni is already running
-            # (LaunchAgent from the install step may have started it already).
-            subprocess.Popen(["open", "-n", "-a", str(APP_WRAPPER), "--args", "--check-fda"])
-        except Exception:
-            pass
+        # Probe ~/Library/Mail from our own process — we are com.omni.app, so
+        # this registers Omni in the Full Disk Access list in System Settings.
+        threading.Thread(target=self._probe_fda, daemon=True).start()
         subprocess.Popen([
             "open",
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         ])
+
+    def _probe_fda(self):
+        try:
+            os.listdir(os.path.expanduser("~/Library/Mail"))
+        except Exception:
+            pass
 
     def _open_file_access(self):
         """Trigger macOS folder-access TCC dialogs for Desktop/Documents/Downloads.
@@ -1616,23 +1451,32 @@ class PermissionsPage(QWidget):
         self._files_btn.setText("Grant Folder Access →")
 
     # ── Permission checks ───────────────────────────────────────────────────────
-    # AX/FDA checks are delegated to the Omni.app native binary (com.omni.app)
-    # so the installer never appears in the System Settings permission lists.
-    # File access is checked directly — once TCC has recorded a grant/deny,
-    # the listdir() calls return immediately without prompting again.
+    # AX and FDA are checked via ctypes — we ARE com.omni.app (the PyInstaller
+    # bundle carries bundle ID com.omni.app), so TCC attributes these calls to
+    # Omni directly, exactly like Raycast or any other native app.
+    # File access is probed with listdir() as before.
 
-    def _launcher_check(self, flag: str) -> bool:
-        """Run Omni's native binary with a --check-* flag; return True if 'yes'."""
-        launcher = APP_WRAPPER / "Contents" / "MacOS" / "Omni"
-        if not launcher.exists():
-            return False
+    def _check_ax(self) -> bool:
+        """Return True if Omni (com.omni.app) has Accessibility permission."""
         try:
-            result = subprocess.run(
-                [str(launcher), flag],
-                capture_output=True, text=True, timeout=4)
-            return result.stdout.strip() == "yes"
+            _appserv = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+            return bool(_appserv.AXIsProcessTrustedWithOptions(None))
         except Exception:
             return False
+
+    def _check_fda_native(self) -> bool:
+        """Return True if Omni (com.omni.app) has Full Disk Access."""
+        try:
+            os.listdir(os.path.expanduser("~/Library/Mail"))
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            # ENOENT or similar — TCC allowed the call, folder just doesn't exist
+            return True
 
     def _check_file_access(self) -> bool:
         """Return True if Desktop, Documents and Downloads are all readable.
@@ -1648,156 +1492,11 @@ class PermissionsPage(QWidget):
         return True
 
     def _check_permissions(self):
-        self._ax_badge.set_granted(self._launcher_check("--check-ax"))
-        self._fda_badge.set_granted(self._launcher_check("--check-fda"))
+        self._ax_badge.set_granted(self._check_ax())
+        self._fda_badge.set_granted(self._check_fda_native())
         if self._file_access_triggered:
             self._files_badge.set_granted(self._check_file_access())
 
-
-# ── Onboarding page ────────────────────────────────────────────────────────────
-
-class OnboardingPage(QWidget):
-    SLIDES = [
-        {
-            "label": "01 / 04",
-            "title": "Open from anywhere",
-            "body": "Press Cmd+Option to bring up Omni instantly — no matter what app you're in. It's always one keystroke away.",
-            "example": "Try it right after launch",
-        },
-        {
-            "label": "02 / 04",
-            "title": "Search by meaning",
-            "body": "Forget where you saved something? Just ask. Omni finds files, documents and emails by what they're about — not just by name.",
-            "example": "\"the NDA we sent in March\"",
-        },
-        {
-            "label": "03 / 04",
-            "title": "Omni remembers you",
-            "body": "Every conversation teaches Omni more about how you work. Over time it gets faster, more personalised, and genuinely useful.",
-            "example": "Preferences sync across your devices",
-        },
-        {
-            "label": "04 / 04",
-            "title": "Control your computer",
-            "body": "Change settings, manage files, open apps, check your calendar — just type it. Omni turns natural language into real actions.",
-            "example": "\"move screenshots to Desktop/Screenshots\"",
-        },
-    ]
-
-    def __init__(self, on_next, on_back):
-        super().__init__()
-        self.cur_slide = 0
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(52, 44, 52, 0)
-        v.setSpacing(0)
-
-        h, sub = page_header("What Omni can do", "A quick look at the features you just installed.")
-        v.addWidget(h)
-        v.addSpacing(4)
-        v.addWidget(sub)
-        v.addSpacing(24)
-
-        # Slide card
-        self.slide_card = Card(color=BG_CARD2)
-        self.slide_card.setFixedHeight(196)
-        sc_v = QVBoxLayout(self.slide_card)
-        sc_v.setContentsMargins(28, 24, 28, 24)
-        sc_v.setSpacing(0)
-
-        self.slide_num = make_label(self.SLIDES[0]["label"], size=11, color=TEXT_HINT, weight=600)
-        sc_v.addWidget(self.slide_num)
-        sc_v.addSpacing(8)
-
-        self.slide_title = make_label(self.SLIDES[0]["title"], size=20, weight=700)
-        sc_v.addWidget(self.slide_title)
-        sc_v.addSpacing(8)
-
-        self.slide_body = make_label(self.SLIDES[0]["body"], size=13, color=TEXT_SEC)
-        self.slide_body.setWordWrap(True)
-        sc_v.addWidget(self.slide_body)
-
-        sc_v.addStretch()
-
-        self.slide_example = make_label(f"eg. {self.SLIDES[0]['example']}", size=11, color=ACCENT)
-        sc_v.addWidget(self.slide_example)
-
-        v.addWidget(self.slide_card)
-        v.addSpacing(16)
-
-        # Dot nav
-        dot_row = QHBoxLayout()
-        dot_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        dot_row.setSpacing(6)
-        self.dots = []
-        for i in range(len(self.SLIDES)):
-            dot = QFrame()
-            dot.setFixedSize(6 if i != 0 else 18, 3)
-            dot.setStyleSheet(f"background: {''+ACCENT if i == 0 else BORDER}; border-radius: 1px;")
-            self.dots.append(dot)
-            dot_row.addWidget(dot)
-        dot_row.addStretch()
-        v.addLayout(dot_row)
-
-        v.addStretch(1)
-        v.addWidget(Divider())
-
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 16, 0, 20)
-
-        back_btn = QPushButton("← Back")
-        back_btn.setObjectName("secondary")
-        back_btn.setFixedSize(96, 38)
-        back_btn.clicked.connect(on_back)
-
-        self.prev_btn = QPushButton("← Prev")
-        self.prev_btn.setObjectName("ghost")
-        self.prev_btn.setFixedSize(72, 38)
-        self.prev_btn.setEnabled(False)
-        self.prev_btn.clicked.connect(self.prev_slide)
-
-        self.slide_next_btn = QPushButton("Next →")
-        self.slide_next_btn.setObjectName("secondary")
-        self.slide_next_btn.setFixedSize(80, 38)
-        self.slide_next_btn.clicked.connect(self.next_slide)
-
-        self.finish_btn = QPushButton("Finish →")
-        self.finish_btn.setObjectName("primary")
-        self.finish_btn.setFixedSize(100, 38)
-        self.finish_btn.hide()
-        self.finish_btn.clicked.connect(on_next)
-
-        footer.addWidget(back_btn)
-        footer.addStretch()
-        footer.addWidget(self.prev_btn)
-        footer.addSpacing(6)
-        footer.addWidget(self.slide_next_btn)
-        footer.addWidget(self.finish_btn)
-        v.addLayout(footer)
-
-    def go_to(self, idx):
-        self.cur_slide = idx
-        s = self.SLIDES[idx]
-        self.slide_num.setText(s["label"])
-        self.slide_title.setText(s["title"])
-        self.slide_body.setText(s["body"])
-        self.slide_example.setText(f"eg. {s['example']}")
-
-        for i, dot in enumerate(self.dots):
-            active = i == idx
-            dot.setFixedWidth(18 if active else 6)
-            dot.setStyleSheet(f"background: {ACCENT if active else BORDER}; border-radius: 1px;")
-
-        self.prev_btn.setEnabled(idx > 0)
-        last = idx == len(self.SLIDES) - 1
-        self.slide_next_btn.setVisible(not last)
-        self.finish_btn.setVisible(last)
-
-    def next_slide(self):
-        if self.cur_slide < len(self.SLIDES) - 1: self.go_to(self.cur_slide + 1)
-
-    def prev_slide(self):
-        if self.cur_slide > 0: self.go_to(self.cur_slide - 1)
 
 
 # ── Done page ──────────────────────────────────────────────────────────────────
@@ -1805,6 +1504,7 @@ class OnboardingPage(QWidget):
 class DonePage(QWidget):
     def __init__(self, on_launch):
         super().__init__()
+        self._on_launch = on_launch
 
         v = QVBoxLayout(self)
         v.setContentsMargins(52, 52, 52, 0)
@@ -1833,8 +1533,8 @@ class DonePage(QWidget):
         v.addSpacing(6)
 
         sub = make_label(
-            "Omni is installed in /Applications and ready to use.\n"
-            "Press Cmd+Option from anywhere to open it.",
+            "Everything is set up. Press Cmd+Option from any app to open Omni.\n"
+            "It will start automatically at login if you enable it below.",
             size=13, color=TEXT_SEC
         )
         sub.setWordWrap(True)
@@ -1885,9 +1585,9 @@ class DonePage(QWidget):
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 16, 0, 20)
 
-        quit_btn = QPushButton("Quit installer")
+        quit_btn = QPushButton("Quit")
         quit_btn.setObjectName("secondary")
-        quit_btn.setFixedSize(120, 38)
+        quit_btn.setFixedSize(96, 38)
         quit_btn.clicked.connect(QApplication.quit)
 
         launch_btn = QPushButton("Launch Omni →")
@@ -1929,9 +1629,7 @@ class DonePage(QWidget):
             print(f"LaunchAgent error: {e}")
 
     def _launch(self):
-        try: subprocess.Popen(["open", "-a", "/Applications/Omni.app"])
-        except Exception: pass
-        QApplication.quit()
+        self._on_launch()
 
 
 # ── Installer frame — owns the background fill and the animated aurora border ──
@@ -2066,7 +1764,7 @@ class _InstallerFrame(QWidget):
 class OmniInstallerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Install Omni")
+        self.setWindowTitle("Omni")
         self.setFixedSize(WINDOW_W, WINDOW_H)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -2085,24 +1783,23 @@ class OmniInstallerWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # Step indicator at top
-        self.dots = StepDots(7, self.central)
+        self.dots = StepDots(6, self.central)
         self.dots.setContentsMargins(0, 10, 0, 0)
         main_layout.addWidget(self.dots)
 
         self.stack = QStackedWidget()
         main_layout.addWidget(self.stack, 1)
 
-        self.page_welcome    = WelcomePage(on_next=lambda: self.go_to(1))
-        self.page_syscheck   = SystemCheckPage(on_next=lambda: self.go_to(2), on_back=lambda: self.go_to(0))
-        self.page_install    = InstallPage(on_next=lambda: self.go_to(3), on_back=lambda: self.go_to(1))
-        self.page_perms      = PermissionsPage(on_next=lambda: self.go_to(4), on_back=lambda: self.go_to(2))
-        self.page_index      = IndexingPage(on_next=lambda: self.go_to(5))
-        self.page_onboarding = OnboardingPage(on_next=lambda: self.go_to(6), on_back=lambda: self.go_to(4))
-        self.page_done       = DonePage(on_launch=self._launch_omni)
+        self.page_welcome  = WelcomePage(on_next=lambda: self.go_to(1))
+        self.page_syscheck = SystemCheckPage(on_next=lambda: self.go_to(2), on_back=lambda: self.go_to(0))
+        self.page_install  = InstallPage(on_next=lambda: self.go_to(3), on_back=lambda: self.go_to(1))
+        self.page_perms    = PermissionsPage(on_next=lambda: self.go_to(4), on_back=lambda: self.go_to(2))
+        self.page_index    = IndexingPage(on_next=lambda: self.go_to(5))
+        self.page_done     = DonePage(on_launch=self._launch_omni)
 
         for page in (
             self.page_welcome, self.page_syscheck, self.page_install,
-            self.page_perms, self.page_index, self.page_onboarding, self.page_done,
+            self.page_perms, self.page_index, self.page_done,
         ):
             self.stack.addWidget(page)
 
@@ -2248,8 +1945,26 @@ class OmniInstallerWindow(QMainWindow):
         self.dots.set_step(idx)
 
     def _launch_omni(self):
-        try: subprocess.Popen(["open", "-a", "/Applications/Omni.app"])
-        except Exception: pass
+        # Hide the wizard, then keep com.omni.app alive as the parent process
+        # while the Omni app runs.  macOS TCC traces the "responsible app" by
+        # walking up the parent chain — python3 must have com.omni.app as an
+        # ancestor, or global hotkeys (Accessibility permission) won't work.
+        # subprocess.Popen uses posix_spawn (Cocoa-safe, unlike os.fork after
+        # Cocoa init) and still gives us a direct parent-child relationship.
+        self.hide()
+        run_sh = INSTALL_DIR / "run.sh"
+        try:
+            proc = subprocess.Popen(["/bin/bash", str(run_sh)])
+            # Background thread blocks until Omni quits, then exits the wizard.
+            def _wait():
+                try:
+                    proc.wait()
+                except Exception:
+                    pass
+                QApplication.quit()
+            threading.Thread(target=_wait, daemon=True).start()
+        except Exception:
+            QApplication.quit()
 
     # ── Drag to move ─────────────────────────────────────────────────────────
 
@@ -2267,6 +1982,14 @@ class OmniInstallerWindow(QMainWindow):
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _setup_complete() -> bool:
+    """Return True if Omni has already been installed into INSTALL_DIR."""
+    return (
+        (INSTALL_DIR / "venv" / "bin" / "python3").exists()
+        and (INSTALL_DIR / "run.sh").exists()
+    )
+
+
 def main():
     # Subclass QApplication to suppress macOS "reopen" events.
     # When pip/venv spawns Python subprocesses, macOS sends
@@ -2281,8 +2004,22 @@ def main():
                 return True  # suppress — window already visible
             return super().event(e)
 
+    # ── Routing: if already installed, supervise the main app and exit when done ─
+    # subprocess.Popen (posix_spawn internally on macOS) keeps com.omni.app
+    # alive as the direct parent process while python3 runs.  macOS TCC traces
+    # the "responsible app" up the parent chain — without a live com.omni.app
+    # ancestor, global hotkeys (Accessibility permission) break at runtime.
+    if _setup_complete():
+        run_sh = INSTALL_DIR / "run.sh"
+        try:
+            proc = subprocess.Popen(["/bin/bash", str(run_sh)])
+            proc.wait()   # block; exits when user quits Omni
+        except Exception:
+            pass
+        sys.exit(0)
+
     app = _App(sys.argv)
-    app.setApplicationName("Omni Installer")
+    app.setApplicationName("Omni")
     app.setApplicationVersion(VERSION)
     app.setStyle("Fusion")
 

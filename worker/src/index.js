@@ -381,7 +381,8 @@ async function handleCreateCheckoutSession(request, env) {
     metadata,
   };
   // Give referred users a 1-month free trial as incentive to go Pro.
-  if (referredBy) checkoutBody.trial_period_days = 30;
+  // trial_period_days must be nested inside subscription_data per Dodo API.
+  if (referredBy) checkoutBody.subscription_data = { trial_period_days: 30 };
 
   const upstream = await fetch(`${base}/checkouts`, {
     method: "POST",
@@ -752,14 +753,30 @@ async function extendSubscriptionByMonths(userId, months, env) {
   const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
   const base = mode.includes("test") ? "https://test.dodopayments.com" : "https://live.dodopayments.com";
 
-  // Dodo: PATCH /subscriptions/{id} with trial_period_days to extend the trial.
+  // Dodo: GET current subscription to read next_billing_date, then PATCH with
+  // an extended next_billing_date. trial_period_days is not supported on PATCH
+  // for active subscriptions.
+  const getRes = await fetch(`${base}/subscriptions/${subId}`, {
+    headers: { Authorization: `Bearer ${env.DODO_PAYMENTS_API_KEY}` },
+  });
+  if (!getRes.ok) return;
+  const sub = await getRes.json();
+
+  // Use next_billing_date if available, otherwise fall back to now.
+  const currentBilling = sub.next_billing_date
+    ? new Date(sub.next_billing_date)
+    : new Date();
+
+  // Extend by months * 30 days from the current next_billing_date.
+  const newBillingDate = new Date(currentBilling.getTime() + months * 30 * 24 * 60 * 60 * 1000);
+
   await fetch(`${base}/subscriptions/${subId}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${env.DODO_PAYMENTS_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ trial_period_days: months * 30 }),
+    body: JSON.stringify({ next_billing_date: newBillingDate.toISOString() }),
   });
 }
 

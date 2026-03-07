@@ -1,0 +1,63 @@
+# Core
+flask
+requests
+httpx[http2]
+simpleeval
+sentence_transformers
+lancedb
+memvid_sdk
+PyQt6
+Pillow
+watchdog
+packaging
+pypdf
+python-docx
+openpyxl
+python-pptx
+
+# Keyboard handling
+keyboard
+pynput; sys_platform == 'darwin'
+
+# AI / LLM (Groq + xAI via OpenAI-compatible API)
+openai
+groq
+# Explicitly pin torch to avoid long dependency resolution scans
+torch
+torchvision
+torchaudio
+accelerate
+transformers
+huggingface_hub[hf_xet]
+fastembed
+
+# Voice (ASR & TTS)
+numpy
+scipy
+soundfile
+librosa
+sox
+openwakeword
+onnxruntime
+SpeechRecognition
+edge-tts
+langdetect
+
+# NLP / Utils
+pytz
+nagisa
+soynlp
+qwen-omni-utils
+# qwen-asr - Removing problematic package, installing directly via git in script
+
+
+# Windows specific
+pywin32; sys_platform == 'win32'
+BlurWindow; sys_platform == 'win32'
+
+# macOS specific
+pyobjc; sys_platform == 'darwin'
+spacy
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+qrcode

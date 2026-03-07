@@ -1,36 +1,64 @@
 #!/bin/bash
 set -e
 
-# create_dmg.sh — Signs Install Omni.app, packages into DMG, notarizes, and staples
+# create_dmg.sh — Signs Omni.app, builds a styled DMG, notarizes and staples.
+#
+# The DMG gets a custom dark background, large icons positioned like Raycast/Arc,
+# and no Finder toolbar — a clean drag-to-Applications experience.
+#
 # Usage: ./create_dmg.sh [output_name]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_NAME="${1:-Omni Installer}"
+OUTPUT_NAME="${1:-Omni}"
+NO_NOTARIZE=0
+for arg in "$@"; do
+    [ "$arg" = "--no-notarize" ] && NO_NOTARIZE=1
+done
 OUTPUT_DMG="${SCRIPT_DIR}/${OUTPUT_NAME}.dmg"
-APP_PATH="${SCRIPT_DIR}/dist/Install Omni.app"
+APP_PATH="${SCRIPT_DIR}/dist/Omni.app"
 STAGING_DIR="${SCRIPT_DIR}/.dmg_staging"
-TEMP_DMG="${SCRIPT_DIR}/.temp_installer.dmg"
+TEMP_DMG="${SCRIPT_DIR}/.temp_omni.dmg"
 ENTITLEMENTS="${SCRIPT_DIR}/resources/entitlements.plist"
+BG_SCRIPT="${SCRIPT_DIR}/resources/generate_dmg_background.py"
 
 SIGN_ID="Developer ID Application: Daniel Piech (D3S4G4R6GM)"
 KEYCHAIN_PROFILE="notarytool-password"
 
-echo "==> Checking for Install Omni.app..."
+# ── DMG window layout ─────────────────────────────────────────────────────────
+# 660×400 pt window — centered at 200, 120 from top-left of screen
+WIN_X=200;    WIN_Y=120
+WIN_W=660;    WIN_H=400
+WIN_RIGHT=$((WIN_X + WIN_W))
+WIN_BOTTOM=$((WIN_Y + WIN_H))
+
+ICON_SIZE=128       # icon pt size
+TEXT_SIZE=13        # label font size
+
+# Icon centres in window coordinates (points)
+APP_X=180;   APP_Y=185
+APPS_X=480;  APPS_Y=185
+
+echo "========================================="
+echo "  Omni DMG Build"
+echo "========================================="
+echo ""
+
+# ── Guard ─────────────────────────────────────────────────────────────────────
+echo "==> Checking for Omni.app…"
 if [ ! -d "$APP_PATH" ]; then
     echo "Error: '$APP_PATH' not found. Run PyInstaller first."
     exit 1
 fi
 
-# ── Step 1: Sign the .app ─────────────────────────────────────────────────────
+# ── Step 1: Sign .app ─────────────────────────────────────────────────────────
 echo ""
-echo "==> Signing .app bundle..."
+echo "==> Signing .app bundle…"
 
-# Sign all dylibs and .so files first (bottom-up)
-find "$APP_PATH" \( -name "*.dylib" -o -name "*.so" -o -name "*.framework" \) | while read -r f; do
-    codesign --force --verify --sign "$SIGN_ID" --options runtime "$f" 2>/dev/null || true
-done
+find "$APP_PATH" \( -name "*.dylib" -o -name "*.so" -o -name "*.framework" \) \
+    | while read -r f; do
+        codesign --force --verify --sign "$SIGN_ID" --options runtime "$f" 2>/dev/null || true
+    done
 
-# Sign the main executable and bundle
 codesign --force --verify --verbose \
     --sign "$SIGN_ID" \
     --options runtime \
@@ -38,59 +66,148 @@ codesign --force --verify --verbose \
     --deep \
     "$APP_PATH"
 
-echo "==> App signed successfully."
+echo "==> Signed."
 
-# ── Step 2: Build the DMG ─────────────────────────────────────────────────────
+# ── Step 2: Staging directory ─────────────────────────────────────────────────
 echo ""
-echo "==> Cleaning up old artifacts..."
+echo "==> Preparing staging directory…"
 rm -rf "$STAGING_DIR"
-rm -f "$TEMP_DMG"
-rm -f "$OUTPUT_DMG"
-
-echo "==> Creating staging directory..."
 mkdir -p "$STAGING_DIR"
-cp -R "$APP_PATH" "$STAGING_DIR/"
-ln -s /Applications "$STAGING_DIR/Applications"
 
-echo "==> Creating temporary writable DMG..."
+# Hidden background folder — Finder reads background.png from here
+mkdir -p "${STAGING_DIR}/.background"
+echo "==> Generating background image…"
+python3 "$BG_SCRIPT" "${STAGING_DIR}/.background/background.png"
+
+cp -R "$APP_PATH" "$STAGING_DIR/"
+ln -s /Applications "${STAGING_DIR}/Applications"
+
+# ── Step 3: Create writable DMG ───────────────────────────────────────────────
+echo ""
+echo "==> Creating writable DMG…"
+rm -f "$TEMP_DMG"
+
+# Size: app size × 1.5 + 20 MB buffer (plenty for .DS_Store + background)
+APP_MB=$(du -sm "$APP_PATH" | awk '{print $1}')
+DMG_MB=$(( APP_MB * 3 / 2 + 20 ))
+
 hdiutil create \
-    -volname "Install Omni" \
+    -volname "$OUTPUT_NAME" \
     -srcfolder "$STAGING_DIR" \
     -ov \
     -format UDRW \
+    -size "${DMG_MB}m" \
     "$TEMP_DMG"
 
-echo "==> Converting to compressed read-only DMG..."
+# ── Step 4: Mount + style with Finder ─────────────────────────────────────────
+echo ""
+echo "==> Mounting for styling…"
+
+MOUNT_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$TEMP_DMG")
+MOUNT_DIR=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | awk -F'\t' '{print $NF}' | tail -1)
+echo "    Mounted at: $MOUNT_DIR"
+
+# Give Finder a moment to register the volume
+sleep 2
+
+echo "==> Styling Finder window via AppleScript…"
+/usr/bin/osascript << APPLESCRIPT
+tell application "Finder"
+    tell disk "$OUTPUT_NAME"
+        open
+
+        -- Icon view, no chrome
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set sidebar width of container window to 0
+
+        -- Window geometry (screen coords)
+        set the bounds of container window to {$WIN_X, $WIN_Y, $WIN_RIGHT, $WIN_BOTTOM}
+
+        -- Icon view options
+        set opts to the icon view options of container window
+        set arrangement of opts to not arranged
+        set icon size of opts to $ICON_SIZE
+        set text size of opts to $TEXT_SIZE
+        set shows item info of opts to false
+        set label position of opts to bottom
+
+        -- Background image (the hidden .background folder)
+        set background picture of opts to file ".background:background.png"
+
+        -- Icon positions
+        set position of item "Omni.app"      of container window to {$APP_X,  $APP_Y}
+        set position of item "Applications"  of container window to {$APPS_X, $APPS_Y}
+
+        -- Commit
+        update without registering applications
+        delay 3
+        close
+    end tell
+end tell
+APPLESCRIPT
+
+# Second pass — open/close again to ensure .DS_Store is fully flushed
+sleep 1
+/usr/bin/osascript << APPLESCRIPT2
+tell application "Finder"
+    tell disk "$OUTPUT_NAME"
+        open
+        update without registering applications
+        delay 2
+        close
+    end tell
+end tell
+APPLESCRIPT2
+
+echo "==> Syncing and unmounting…"
+sync
+hdiutil detach "$MOUNT_DIR" -quiet
+
+# ── Step 5: Convert to compressed read-only DMG ───────────────────────────────
+echo ""
+echo "==> Converting to read-only compressed DMG…"
+rm -f "$OUTPUT_DMG"
 hdiutil convert "$TEMP_DMG" \
     -format UDZO \
     -imagekey zlib-level=9 \
     -o "$OUTPUT_DMG"
 
-echo "==> Cleaning up staging files..."
-rm -rf "$STAGING_DIR"
+echo "==> Cleaning up staging files…"
 rm -f "$TEMP_DMG"
+rm -rf "$STAGING_DIR"
 
-# ── Step 3: Sign the DMG ──────────────────────────────────────────────────────
+# ── Step 6: Sign the DMG ──────────────────────────────────────────────────────
 echo ""
-echo "==> Signing DMG..."
+echo "==> Signing DMG…"
 codesign --force --verify --sign "$SIGN_ID" "$OUTPUT_DMG"
 echo "==> DMG signed."
 
-# ── Step 4: Notarize ──────────────────────────────────────────────────────────
-echo ""
-echo "==> Submitting to Apple for notarization (this takes a few minutes)..."
-xcrun notarytool submit "$OUTPUT_DMG" \
-    --keychain-profile "$KEYCHAIN_PROFILE" \
-    --wait
+# ── Step 7: Notarize + Staple (skipped with --no-notarize) ───────────────────
+if [ "$NO_NOTARIZE" = "1" ]; then
+    echo ""
+    echo "==> Skipping notarization (--no-notarize)."
+    echo ""
+    echo "========================================="
+    echo "  DMG ready (unsigned): $OUTPUT_DMG"
+    echo "========================================="
+    du -sh "$OUTPUT_DMG"
+else
+    echo ""
+    echo "==> Submitting to Apple for notarization (a few minutes)…"
+    xcrun notarytool submit "$OUTPUT_DMG" \
+        --keychain-profile "$KEYCHAIN_PROFILE" \
+        --wait
 
-# ── Step 5: Staple ────────────────────────────────────────────────────────────
-echo ""
-echo "==> Stapling notarization ticket to DMG..."
-xcrun stapler staple "$OUTPUT_DMG"
+    echo ""
+    echo "==> Stapling notarization ticket…"
+    xcrun stapler staple "$OUTPUT_DMG"
 
-echo ""
-echo "========================================="
-echo "  DMG ready: $OUTPUT_DMG"
-echo "========================================="
-xcrun stapler validate "$OUTPUT_DMG"
-du -sh "$OUTPUT_DMG"
+    echo ""
+    echo "========================================="
+    echo "  DMG ready: $OUTPUT_DMG"
+    echo "========================================="
+    xcrun stapler validate "$OUTPUT_DMG"
+    du -sh "$OUTPUT_DMG"
+fi

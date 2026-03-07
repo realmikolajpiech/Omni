@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Math Renderer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <style>
+        body {
+            font-family: 'Instrument Serif', serif;
+            background: transparent;
+            margin: 0;
+            padding: 8px 12px;
+            color: #050505;
+        }
+        .equation {
+            font-size: 14px;
+            color: #555555;
+            text-align: center;
+            margin-top: 4px;
+        }
+        .result {
+            font-size: 36px;
+            font-weight: normal;
+            color: #050505;
+            text-align: center;
+            margin-bottom: 8px;
+        }
+        .katex {
+            font-size: 1em !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="result" id="result"></div>
+    <div class="equation" id="equation"></div>
+    
+    <script>
+        function renderMath() {
+            const result = document.getElementById('result');
+            const equation = document.getElementById('equation');
+            
+            // Get parameters from URL
+            const params = new URLSearchParams(window.location.search);
+            const resultText = params.get('result') || '';
+            const equationText = params.get('equation') || '';
+            
+            result.textContent = resultText;
+            
+            if (equationText) {
+                equation.textContent = equationText;
+                
+                // Render LaTeX when KaTeX is ready
+                if (window.renderMathInElement) {
+                    renderMathInElement(equation, {
+                        delimiters: [
+                            {left: "$$", right: "$$", display: true},
+                            {left: "$", right: "$", display: false},
+                            {left: "\\(", right: "\\)", display: false},
+                            {left: "\\[", right: "\\]", display: true}
+                        ]
+                    });
+                }
+            }
+        }
+        
+        // Render when page loads
+        window.addEventListener('DOMContentLoaded', renderMath);
+    </script>
+</body>
+</html>
