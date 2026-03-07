@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# Always run from the directory this script lives in.
+# When launched via open -a Omni.app the CWD is / (root), which breaks
+# every relative path below (./venv/bin/python3, etc.).
+cd "$(dirname "$0")" || exit 1
+
 echo "Starting Omni..."
 
 # Function to check if a command exists

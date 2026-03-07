@@ -4,7 +4,8 @@ SettingsPanel — Redesigned settings UI with sidebar navigation.
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QScrollArea, QFrame, QSizePolicy,
-    QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget, QTextEdit
+    QButtonGroup, QListWidget, QListWidgetItem, QStackedWidget, QTextEdit,
+    QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
@@ -14,7 +15,16 @@ import src.core.settings_store as settings_store
 import src.core.subscription as subscription
 import src.core.auth as auth
 import src.core.billing as billing
-from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH
+from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, SUPABASE_URL, SUPABASE_ANON_KEY
+
+# ── Website Supabase (waitlist / referrals) ───────────────────────────────────
+_WEBSITE_SB_URL  = "https://rfirkagyggkumbeqzxgf.supabase.co"
+_WEBSITE_SB_KEY  = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmaXJrYWd5Z2drdW1iZXF6eGdmIiwic"
+    "m9sZSI6ImFub24iLCJpYXQiOjE3NjcyOTk0NTUsImV4cCI6MjA4Mjg3NTQ1NX0"
+    ".n_cf788aLOsS27S-7XJ7phRH2csrs6MnxgF8dSeAWSE"
+)
 
 # ── Trust level data ─────────────────────────────────────────────────────────
 
@@ -484,6 +494,120 @@ class _FeedbackFormCard(QWidget):
         p.drawPath(path)
 
 
+class _ReferralCard(QWidget):
+    """Warm amber-tinted card for the referral section — stands out from other cards."""
+    _BG     = QColor(251, 191, 36, 18)   # amber tint
+    _BORDER = QColor(251, 191, 36, 90)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        self._inner = lay
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 14, 14)
+        p.fillPath(path, QBrush(self._BG))
+        p.setPen(QPen(self._BORDER, 1))
+        p.drawPath(path)
+
+
+class _MilestoneTrack(QWidget):
+    """Horizontal milestone progress track: 0 → 1 → 3 → 5 confirmed referrals."""
+
+    _MILESTONES = [1, 3, 5]
+    _REWARDS    = ["1 month free", "2 months free", "3 months free"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._confirmed = 0
+        self.setFixedHeight(56)
+
+    def set_confirmed(self, n: int):
+        self._confirmed = n
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        track_y   = 12
+        track_h   = 3
+        pad       = 24
+        amber     = QColor(251, 191, 36)
+        amber_dim = QColor(251, 191, 36, 50)
+        white_dim = QColor(255, 255, 255, 28)
+        dot_r     = 6
+
+        # Milestone x-positions at 1/5, 3/5, 5/5 of track
+        track_w = w - 2 * pad
+        positions = [pad + (m / 5.0) * track_w for m in self._MILESTONES]
+
+        # Background track
+        p.setBrush(QBrush(white_dim))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(int(pad), track_y, int(track_w), track_h, 2, 2)
+
+        # Amber fill up to current progress
+        conf = self._confirmed
+        if conf >= 5:
+            fill_end = positions[2]
+        elif conf >= 3:
+            t = (conf - 3) / 2.0
+            fill_end = positions[1] + (positions[2] - positions[1]) * min(t, 1.0)
+        elif conf >= 1:
+            t = (conf - 1) / 2.0
+            fill_end = positions[0] + (positions[1] - positions[0]) * min(t, 1.0)
+        else:
+            fill_end = pad
+
+        if fill_end > pad:
+            p.setBrush(QBrush(amber))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(int(pad), track_y, int(fill_end - pad), track_h, 2, 2)
+
+        # Dots and labels
+        font = QFont("Manrope", 8)
+        p.setFont(font)
+        fm = QFontMetrics(font)
+        center_y = track_y + track_h // 2
+
+        for i, (x, reward) in enumerate(zip(positions, self._REWARDS)):
+            milestone = self._MILESTONES[i]
+            reached   = conf >= milestone
+
+            if reached:
+                p.setBrush(QBrush(amber))
+                p.setPen(Qt.PenStyle.NoPen)
+            else:
+                p.setBrush(QBrush(QColor(30, 30, 40)))
+                p.setPen(QPen(amber_dim, 1.2))
+            p.drawEllipse(int(x - dot_r), center_y - dot_r, dot_r * 2, dot_r * 2)
+
+            if reached:
+                p.setBrush(QBrush(QColor(255, 255, 255, 210)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(int(x - 3), center_y - 3, 6, 6)
+
+            label = f"{milestone} → {reward}"
+            lw = fm.horizontalAdvance(label)
+            text_x = int(x - lw / 2)
+            text_y = center_y + dot_r + 13
+            alpha  = 200 if reached else 90
+            p.setPen(QPen(QColor(255, 255, 255, alpha)))
+            p.drawText(text_x, text_y, label)
+
+        p.end()
+
+
 # Button stylesheet constants — applied inline so parent cascade can't override
 _PLAN_BTN_SS = (
     "QPushButton { background: #6366f1; border: none; border-radius: 8px; "
@@ -613,6 +737,7 @@ class SettingsPanel(QWidget):
         self._add_page("Trust", self._build_trust())
         self._add_page("Files", self._build_files())
         self._add_page("Account", self._build_account())
+        self._add_page("Referrals", self._build_referral())
         self._add_page("Feedback", self._build_feedback())
 
         root.addWidget(self.sidebar)
@@ -912,6 +1037,189 @@ class SettingsPanel(QWidget):
         page.add_widget(self.account_status_lbl)
 
         page.add_stretch()
+        return page
+
+    # ── Referrals page ────────────────────────────────────────────────
+
+    def _build_referral(self) -> QWidget:
+        page = SettingsPage("Referrals")
+        lay = page.content_layout
+
+        self._referral_card = _ReferralCard()
+        rc = self._referral_card._inner
+
+        # Header
+        ref_hdr_row = QHBoxLayout()
+        ref_hdr_row.setContentsMargins(0, 0, 0, 0)
+        ref_hdr_row.setSpacing(0)
+        ref_title = QLabel("Invite friends")
+        ref_title.setFont(_font("Manrope", 15, bold=True))
+        ref_title.setStyleSheet("color: rgba(255,255,255,0.95);")
+        ref_hdr_row.addWidget(ref_title)
+        ref_hdr_row.addStretch()
+        ref_star = QLabel("✦")
+        ref_star.setFont(_font("Manrope", 13))
+        ref_star.setStyleSheet("color: rgba(251,191,36,0.60);")
+        ref_hdr_row.addWidget(ref_star)
+        rc.addLayout(ref_hdr_row)
+
+        # Benefits — two rows: referrer and referred
+        benefits_widget = QWidget()
+        benefits_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        bv = QVBoxLayout(benefits_widget)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(5)
+
+        def _section_label(text, color):
+            lbl = QLabel(text)
+            lbl.setFont(_font("Manrope", 8, bold=True))
+            lbl.setStyleSheet(f"color: {color}; background: transparent;")
+            return lbl
+
+        def _tier_row(milestone, reward):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(0)
+            left = QLabel(milestone)
+            left.setFont(_font("Manrope", 10))
+            left.setStyleSheet("color: rgba(255,255,255,0.55); background: transparent;")
+            left.setFixedWidth(100)
+            right = QLabel(reward)
+            right.setFont(_font("Manrope", 10, bold=True))
+            right.setStyleSheet("color: rgba(255,255,255,0.85); background: transparent;")
+            row.addWidget(left)
+            row.addWidget(right)
+            row.addStretch()
+            return row
+
+        # YOU section
+        bv.addWidget(_section_label("YOU EARN", "#FBBF24"))
+        bv.addSpacing(2)
+        bv.addLayout(_tier_row("1 referral",   "1 month free"))
+        bv.addLayout(_tier_row("3 referrals",  "2 months free"))
+        bv.addLayout(_tier_row("5 referrals",  "3 months free"))
+        bv.addLayout(_tier_row("5+ active",    "Omni free forever"))
+
+        bv.addSpacing(8)
+
+        # THEY section
+        bv.addWidget(_section_label("THEY GET", "rgba(255,255,255,0.30)"))
+        bv.addSpacing(2)
+        they_lbl = QLabel("1 month free trial when signing up for Pro with your link")
+        they_lbl.setFont(_font("Manrope", 10))
+        they_lbl.setStyleSheet("color: rgba(255,255,255,0.55); background: transparent;")
+        they_lbl.setWordWrap(True)
+        bv.addWidget(they_lbl)
+        rc.addWidget(benefits_widget)
+
+        rc.addSpacing(6)
+
+        # Stats row — clean large numbers with thin dividers
+        stats_widget = QWidget()
+        stats_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        stats_h = QHBoxLayout(stats_widget)
+        stats_h.setContentsMargins(0, 0, 0, 0)
+        stats_h.setSpacing(0)
+
+        def _stat_col(label, value_attr):
+            col = QWidget()
+            col.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            cl = QVBoxLayout(col)
+            cl.setContentsMargins(0, 4, 0, 4)
+            cl.setSpacing(2)
+            val = QLabel("—")
+            val.setFont(_font("Manrope", 22, bold=True))
+            val.setStyleSheet("color: rgba(255,255,255,0.90); background: transparent;")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel(label)
+            lbl.setFont(_font("Manrope", 9))
+            lbl.setStyleSheet("color: rgba(255,255,255,0.32); background: transparent;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(val)
+            cl.addWidget(lbl)
+            setattr(self, value_attr, val)
+            return col
+
+        def _stat_divider():
+            d = QFrame()
+            d.setFrameShape(QFrame.Shape.VLine)
+            d.setFixedWidth(1)
+            d.setStyleSheet("background: rgba(255,255,255,0.09); border: none;")
+            return d
+
+        stats_h.addWidget(_stat_col("Total invites",  "_ref_stat_total"),     1)
+        stats_h.addWidget(_stat_divider())
+        stats_h.addWidget(_stat_col("Confirmed Pro",  "_ref_stat_confirmed"), 1)
+        stats_h.addWidget(_stat_divider())
+        stats_h.addWidget(_stat_col("Active",         "_ref_stat_active"),    1)
+        stats_h.addWidget(_stat_divider())
+        stats_h.addWidget(_stat_col("Free months",    "_ref_stat_months"),    1)
+        rc.addWidget(stats_widget)
+
+        rc.addSpacing(2)
+
+        # Milestone progress track
+        self._milestone_track = _MilestoneTrack()
+        rc.addWidget(self._milestone_track)
+
+        rc.addSpacing(4)
+
+        # Permanently free badge (hidden until 5 active)
+        self._ref_free_badge = QLabel("✦  Permanently Free  —  5 active referrals maintained")
+        self._ref_free_badge.setFont(_font("Manrope", 10, bold=True))
+        self._ref_free_badge.setStyleSheet(
+            "color: #FBBF24; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.35); "
+            "border-radius: 8px; padding: 6px 14px;"
+        )
+        self._ref_free_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._ref_free_badge.setVisible(False)
+        rc.addWidget(self._ref_free_badge)
+
+        # Link container — dark inner box
+        link_container = QWidget()
+        link_container.setObjectName("RefLinkContainer")
+        link_container.setStyleSheet(
+            "#RefLinkContainer { background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; }"
+        )
+        link_lay = QHBoxLayout(link_container)
+        link_lay.setContentsMargins(12, 0, 8, 0)
+        link_lay.setSpacing(8)
+
+        self._ref_link_edit = QLineEdit()
+        self._ref_link_edit.setReadOnly(True)
+        self._ref_link_edit.setPlaceholderText("Sign in to see your link…")
+        self._ref_link_edit.setFixedHeight(40)
+        self._ref_link_edit.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; color: rgba(255,255,255,0.72); "
+            "font-family: Menlo, 'SF Mono', monospace; font-size: 10px; "
+            "selection-background-color: rgba(251,191,36,0.25); }"
+        )
+        link_lay.addWidget(self._ref_link_edit, 1)
+
+        self._ref_copy_btn = QPushButton("Copy ↗")
+        self._ref_copy_btn.setFixedHeight(28)
+        self._ref_copy_btn.setFixedWidth(72)
+        self._ref_copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ref_copy_btn.setStyleSheet(
+            "QPushButton { background: rgba(251,191,36,0.16); border: 1px solid rgba(251,191,36,0.38); "
+            "border-radius: 7px; color: #FBBF24; font-family: Manrope; font-size: 10px; font-weight: 700; } "
+            "QPushButton:hover { background: rgba(251,191,36,0.28); border-color: rgba(251,191,36,0.60); } "
+            "QPushButton:disabled { opacity: 0.28; }"
+        )
+        self._ref_copy_btn.setEnabled(False)
+        self._ref_copy_btn.clicked.connect(self._copy_referral_link)
+        link_lay.addWidget(self._ref_copy_btn)
+
+        rc.addWidget(link_container)
+
+        self._ref_status_lbl = QLabel("")
+        self._ref_status_lbl.setFont(_font("Manrope", 9))
+        self._ref_status_lbl.setStyleSheet("color: rgba(251,191,36,0.65);")
+        self._ref_status_lbl.setMaximumHeight(0)
+        rc.addWidget(self._ref_status_lbl)
+
+        lay.addWidget(self._referral_card)
+        lay.addStretch()
         return page
 
     # ── Developer page ────────────────────────────────────────────────
@@ -1629,6 +1937,10 @@ class SettingsPanel(QWidget):
             item = self.sidebar.item(row)
             if item and item.text() == "Account":
                 self.refresh_account()
+            elif item and item.text() == "Referrals":
+                user = auth.get_user()
+                if user and user.get("email"):
+                    self._refresh_referral(user["email"])
             elif item and item.text() == "Files":
                 self._refresh_files_status()
 
@@ -1734,6 +2046,197 @@ class SettingsPanel(QWidget):
         else:
             self.account_status_lbl.setText("")
 
+        # Refresh referral data whenever account state updates
+        user = auth.get_user()
+        if user and user.get("email"):
+            self._refresh_referral(user["email"])
+
+    # ── Referral ──────────────────────────────────────────────────────
+
+    def _refresh_referral(self, email: str):
+        """Resolve referral code for this user, creating one locally if needed."""
+        import threading
+
+        # Show cached code immediately while the network fetch runs
+        cached_code = settings_store.get("referral_code", "")
+        if cached_code:
+            self._apply_referral_ui(cached_code, 0)
+
+        def _fetch():
+            user         = auth.get_user() or {}
+            user_id      = user.get("id", "")
+            access_token = auth.get_access_token() or ""
+
+            # 1. Fast path: already stored in Omni app Supabase (has full stats)
+            code, stats = self._fetch_referral_from_app_sb(user_id, access_token)
+            if code:
+                settings_store.save_settings({"referral_code": code})
+                self._dispatch.emit(lambda c=code, s=stats: self._apply_referral_ui(c, s))
+                return
+
+            # 2. User was on the website waitlist — sync their existing code
+            ws_code, ws_count, _ = self._read_waitlist_code(email)
+            if ws_code:
+                stats = {"referral_count": ws_count, "confirmed_count": 0, "active_count": 0, "free_months_due": 0}
+                self._save_referral_to_app_sb(user_id, access_token, ws_code, ws_count)
+                settings_store.save_settings({"referral_code": ws_code})
+                self._dispatch.emit(lambda c=ws_code, s=stats: self._apply_referral_ui(c, s))
+                return
+
+            # 3. Not on waitlist — generate a code locally, save to Omni app SB only
+            new_code = self._generate_referral_code()
+            stats = {"referral_count": 0, "confirmed_count": 0, "active_count": 0, "free_months_due": 0}
+            self._save_referral_to_app_sb(user_id, access_token, new_code, 0)
+            settings_store.save_settings({"referral_code": new_code})
+            self._dispatch.emit(lambda c=new_code, s=stats: self._apply_referral_ui(c, s))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _read_waitlist_code(self, email: str):
+        """Read-only lookup on website Supabase.
+
+        Returns (own_code, count, referred_by_code) or (None, 0, None).
+        referred_by_code is the referral code used when this user signed up —
+        saved as used_referral_code so it's passed on checkout.
+        """
+        import urllib.request
+        import urllib.parse
+        import json as _json
+        try:
+            params = urllib.parse.urlencode({
+                "email": f"eq.{email}",
+                "select": "referral_code,referral_count,referred_by",
+            })
+            req = urllib.request.Request(
+                f"{_WEBSITE_SB_URL}/rest/v1/waitlist?{params}",
+                headers={
+                    "apikey": _WEBSITE_SB_KEY,
+                    "Authorization": f"Bearer {_WEBSITE_SB_KEY}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                rows = _json.loads(resp.read())
+            if rows:
+                row = rows[0]
+                # If this user was referred and we haven't stored the code yet, save it now.
+                referred_by = row.get("referred_by") or None
+                if referred_by and not settings_store.get("used_referral_code"):
+                    settings_store.set("used_referral_code", referred_by)
+                if row.get("referral_code"):
+                    return row["referral_code"], row.get("referral_count", 0), referred_by
+        except Exception:
+            pass
+        return None, 0, None
+
+    @staticmethod
+    def _generate_referral_code() -> str:
+        """Generate an 8-char referral code matching the website's format."""
+        import hashlib, random
+        return hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
+
+    def _fetch_referral_from_app_sb(self, user_id: str, access_token: str):
+        """Read referral data from the Omni app's Supabase referral_codes table."""
+        import urllib.request
+        import urllib.parse
+        import json as _json
+        if not user_id or not access_token:
+            return None, 0
+        try:
+            params = urllib.parse.urlencode({
+                "user_id": f"eq.{user_id}",
+                "select": "referral_code,referral_count,confirmed_count,active_count,free_months_due",
+            })
+            req = urllib.request.Request(
+                f"{SUPABASE_URL}/rest/v1/referral_codes?{params}",
+                headers={
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {access_token}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                rows = _json.loads(resp.read())
+            if rows:
+                r = rows[0]
+                return r.get("referral_code", ""), {
+                    "referral_count":  r.get("referral_count",  0),
+                    "confirmed_count": r.get("confirmed_count", 0),
+                    "active_count":    r.get("active_count",    0),
+                    "free_months_due": r.get("free_months_due", 0),
+                }
+        except Exception:
+            pass
+        return None, 0
+
+    def _save_referral_to_app_sb(self, user_id: str, access_token: str, code: str, count: int):
+        """Upsert referral code into the Omni app's Supabase referral_codes table."""
+        import urllib.request
+        import json as _json
+        from datetime import datetime, timezone
+        if not user_id or not access_token:
+            return
+        try:
+            payload = _json.dumps({
+                "user_id": user_id,
+                "referral_code": code,
+                "referral_count": count,
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }).encode()
+            req = urllib.request.Request(
+                f"{SUPABASE_URL}/rest/v1/referral_codes",
+                data=payload,
+                headers={
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6):
+                pass
+        except Exception:
+            pass
+
+    def _apply_referral_ui(self, code: str, stats):
+        if not hasattr(self, "_ref_link_edit"):
+            return
+        if isinstance(stats, int):
+            # Legacy: plain count passed (cached from old settings_store entry)
+            stats = {"referral_count": stats, "confirmed_count": 0, "active_count": 0, "free_months_due": 0}
+
+        total     = stats.get("referral_count",  0)
+        confirmed = stats.get("confirmed_count", 0)
+        active    = stats.get("active_count",    0)
+        months    = stats.get("free_months_due", 0)
+
+        link = f"https://heyomni.app?ref={code}"
+        self._ref_link_edit.setText(link)
+        self._ref_copy_btn.setEnabled(True)
+
+        # Stat labels
+        if hasattr(self, "_ref_stat_total"):
+            self._ref_stat_total.setText(str(total) if total else "—")
+        if hasattr(self, "_ref_stat_confirmed"):
+            self._ref_stat_confirmed.setText(str(confirmed) if confirmed else "—")
+        if hasattr(self, "_ref_stat_active"):
+            self._ref_stat_active.setText(str(active) if active else "—")
+        if hasattr(self, "_ref_stat_months"):
+            self._ref_stat_months.setText("∞" if active >= 5 else (str(months) if months else "—"))
+
+        # Milestone track
+        if hasattr(self, "_milestone_track"):
+            self._milestone_track.set_confirmed(confirmed)
+
+        # Permanently free badge
+        if hasattr(self, "_ref_free_badge"):
+            self._ref_free_badge.setVisible(active >= 5)
+
+    def _copy_referral_link(self):
+        link = self._ref_link_edit.text()
+        if link:
+            QApplication.clipboard().setText(link)
+            self._ref_copy_btn.setText("✓")
+            QTimer.singleShot(1800, lambda: self._ref_copy_btn.setText("Copy ↗"))
+
     def _set_checkout_busy(self, busy: bool):
         for w in (
             getattr(self, "upgrade_monthly_btn", None),
@@ -1774,6 +2277,7 @@ class SettingsPanel(QWidget):
                     access_token=token,
                     customer_email=email,
                     customer_name=name,
+                    referred_by=settings_store.get("used_referral_code") or None,
                 )
                 print(f"[Settings] Checkout URL generated: {url}")
                 # Emit signal — guaranteed to be delivered on the main thread.

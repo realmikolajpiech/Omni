@@ -14,7 +14,7 @@ import webbrowser
 from src.core.config import BACKEND_URL, CHECKOUT_SESSION_URL, DEVICE_ID, OMNI_SECRET
 
 
-def create_pro_checkout_url(*, interval: str, access_token: str | None, customer_email: str | None = None, customer_name: str | None = None) -> str:
+def create_pro_checkout_url(*, interval: str, access_token: str | None, customer_email: str | None = None, customer_name: str | None = None, referred_by: str | None = None) -> str:
     interval = (interval or "").strip().lower()
     if interval not in ("monthly", "yearly"):
         raise ValueError("interval must be 'monthly' or 'yearly'")
@@ -24,6 +24,8 @@ def create_pro_checkout_url(*, interval: str, access_token: str | None, customer
         payload["customer_email"] = customer_email
     if customer_name:
         payload["customer_name"] = customer_name
+    if referred_by:
+        payload["referred_by"] = referred_by.strip()
 
     headers = {
         "Content-Type": "application/json",
@@ -114,13 +116,14 @@ def poll_checkout_payment(
     return t
 
 
-def open_pro_checkout(*, interval: str, access_token: str | None, customer_email: str | None = None, customer_name: str | None = None) -> str:
+def open_pro_checkout(*, interval: str, access_token: str | None, customer_email: str | None = None, customer_name: str | None = None, referred_by: str | None = None) -> str:
     """Create a session and open the checkout URL in the browser. Returns the URL."""
     url = create_pro_checkout_url(
         interval=interval,
         access_token=access_token,
         customer_email=customer_email,
         customer_name=customer_name,
+        referred_by=referred_by,
     )
     webbrowser.open(url)
     return url

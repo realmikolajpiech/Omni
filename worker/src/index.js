@@ -360,6 +360,11 @@ async function handleCreateCheckoutSession(request, env) {
   };
   if (userId) metadata.user_id = userId;
 
+  // Referral: if the user was referred, store the referrer's code in metadata
+  // so the webhook can credit them on successful payment.
+  const referredBy = typeof body.referred_by === "string" ? body.referred_by.trim() : null;
+  if (referredBy) metadata.referred_by = referredBy;
+
   const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
   const base =
     mode.includes("test") ? "https://test.dodopayments.com" : "https://live.dodopayments.com";
@@ -369,18 +374,22 @@ async function handleCreateCheckoutSession(request, env) {
     env.CHECKOUT_RETURN_URL ||
     "https://heyomni.app/thanks";
 
+  const checkoutBody = {
+    product_cart: [{ product_id: productId, quantity: 1 }],
+    ...(Object.keys(customer).length ? { customer } : {}),
+    return_url: returnUrl,
+    metadata,
+  };
+  // Give referred users a 1-month free trial as incentive to go Pro.
+  if (referredBy) checkoutBody.trial_period_days = 30;
+
   const upstream = await fetch(`${base}/checkouts`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      product_cart: [{ product_id: productId, quantity: 1 }],
-      ...(Object.keys(customer).length ? { customer } : {}),
-      return_url: returnUrl,
-      metadata,
-    }),
+    body: JSON.stringify(checkoutBody),
   });
 
   const text = await upstream.text();
@@ -443,7 +452,7 @@ async function handlePaymentWebhook(request, env) {
     (body.data && body.data.type) ||
     "";
 
-  // Only react to successful payments/subscriptions; ignore other noise.
+  // React to successful payments and cancellations (for referral tracking).
   const isPaymentSucceeded =
     typeof eventType === "string" &&
     (eventType === "payment.succeeded" ||
@@ -453,8 +462,27 @@ async function handlePaymentWebhook(request, env) {
       eventType === "subscription.activated" ||
       eventType === "subscription.created");
 
-  if (!isPaymentSucceeded) {
+  const isCancellation =
+    typeof eventType === "string" &&
+    (eventType === "subscription.cancelled" ||
+      eventType === "subscription.canceled" ||
+      eventType === "subscription.ended" ||
+      eventType === "subscription.inactive");
+
+  if (!isPaymentSucceeded && !isCancellation) {
     return resp({ received: true, ignored: true });
+  }
+
+  // Handle cancellations: decrement active referral counts.
+  if (isCancellation) {
+    const cancelSubId =
+      body.data?.payload_type === "Subscription"
+        ? body.data?.subscription_id || body.data?.id
+        : body.data?.subscription_id || null;
+    if (cancelSubId && env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY) {
+      await handleReferralChurn(cancelSubId, env).catch(() => {});
+    }
+    return resp({ received: true, source: "dodo_cancellation" });
   }
 
   // Extract product and identity from likely Dodo payload shapes.
@@ -527,6 +555,18 @@ async function handlePaymentWebhook(request, env) {
   }
   await markProForId(primaryId, billingInterval, dodoSubscriptionId, env);
 
+  // Referral crediting: if this checkout was made via a referral link.
+  const referredByCode = meta.referred_by || null;
+  if (referredByCode && supabaseUserId && env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY) {
+    await handleReferralCredit({
+      referralCode: referredByCode,
+      referredUserId: supabaseUserId,
+      referredEmail: customerEmail,
+      dodoSubscriptionId,
+      env,
+    }).catch(e => console.error("[referral] credit error:", e));
+  }
+
   // Also immediately unlock the device (user may not have logged in yet).
   if (deviceId && deviceId !== primaryId) {
     await env.SUBSCRIPTIONS.put(deviceId, "pro");
@@ -551,6 +591,176 @@ async function handlePaymentWebhook(request, env) {
   }
 
   return resp({ received: true, source: "dodo", billing_interval: billingInterval });
+}
+
+
+// ── Referral: credit referrer when a referred user converts to Pro ────────────
+async function handleReferralCredit({ referralCode, referredUserId, referredEmail, dodoSubscriptionId, env }) {
+  const sb = env.SUPABASE_URL;
+  const key = env.SUPABASE_SERVICE_KEY;
+
+  // 1. Look up the referrer by their code.
+  const codeRes = await fetch(
+    `${sb}/rest/v1/referral_codes?referral_code=eq.${encodeURIComponent(referralCode)}&select=user_id,confirmed_count,active_count,free_months_due&limit=1`,
+    { headers: { Authorization: `Bearer ${key}`, apikey: key } }
+  );
+  if (!codeRes.ok) return;
+  const codeRows = await codeRes.json();
+  if (!codeRows.length) return;
+
+  const { user_id: referrerUserId, confirmed_count, active_count, free_months_due } = codeRows[0];
+
+  // 2. Upsert a referrals row for this conversion.
+  const newConfirmed = confirmed_count + 1;
+  const newActive    = active_count    + 1;
+
+  // Free months milestones (cumulative total earned):
+  //   1 confirmed → 1 month,  3 → 2 months,  5 → 3 months
+  const milestonesTotal = newConfirmed >= 5 ? 3 : newConfirmed >= 3 ? 2 : newConfirmed >= 1 ? 1 : 0;
+  const newFreeDue = Math.max(free_months_due, milestonesTotal);
+
+  await fetch(`${sb}/rest/v1/referrals`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`, apikey: key,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({
+      referral_code: referralCode,
+      referrer_user_id: referrerUserId,
+      referred_user_id: referredUserId,
+      referred_email: referredEmail || null,
+      dodo_subscription_id: dodoSubscriptionId || null,
+      status: "confirmed",
+      confirmed_at: new Date().toISOString(),
+    }),
+  });
+
+  // 3. Update referrer's referral_codes row.
+  await fetch(`${sb}/rest/v1/referral_codes?user_id=eq.${referrerUserId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${key}`, apikey: key,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify({
+      confirmed_count: newConfirmed,
+      active_count:    newActive,
+      free_months_due: newFreeDue,
+      synced_at:       new Date().toISOString(),
+    }),
+  });
+
+  // 4. If referrer has reached 5 active referrals → grant permanently-free plan.
+  if (newActive >= 5) {
+    await env.SUBSCRIPTIONS.put(`referral_free:${referrerUserId}`, "1");
+    // Also persist to user_metadata so it survives KV expiry.
+    await fetch(`${sb}/auth/v1/admin/users/${referrerUserId}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${key}`, apikey: key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ user_metadata: { plan: "pro", referral_free: true } }),
+    }).catch(() => {});
+  } else if (newFreeDue > free_months_due && dodoSubscriptionId) {
+    // New free month(s) unlocked — extend the referrer's subscription trial.
+    const newMonths = newFreeDue - free_months_due;
+    await extendSubscriptionByMonths(referrerUserId, newMonths, env).catch(() => {});
+  }
+}
+
+// ── Referral: handle churn (referred user cancels) ───────────────────────────
+async function handleReferralChurn(dodoSubscriptionId, env) {
+  const sb  = env.SUPABASE_URL;
+  const key = env.SUPABASE_SERVICE_KEY;
+
+  // Find the referral row for this subscription.
+  const refRes = await fetch(
+    `${sb}/rest/v1/referrals?dodo_subscription_id=eq.${encodeURIComponent(dodoSubscriptionId)}&select=referral_code,referrer_user_id,status&limit=1`,
+    { headers: { Authorization: `Bearer ${key}`, apikey: key } }
+  );
+  if (!refRes.ok) return;
+  const refRows = await refRes.json();
+  if (!refRows.length || refRows[0].status === "churned") return;
+
+  const { referral_code: referralCode, referrer_user_id: referrerUserId } = refRows[0];
+
+  // Mark referral as churned.
+  await fetch(
+    `${sb}/rest/v1/referrals?dodo_subscription_id=eq.${encodeURIComponent(dodoSubscriptionId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${key}`, apikey: key,
+        "Content-Type": "application/json", Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ status: "churned", churned_at: new Date().toISOString() }),
+    }
+  );
+
+  // Decrement referrer's active_count.
+  const codeRes = await fetch(
+    `${sb}/rest/v1/referral_codes?user_id=eq.${referrerUserId}&select=active_count&limit=1`,
+    { headers: { Authorization: `Bearer ${key}`, apikey: key } }
+  );
+  if (!codeRes.ok) return;
+  const codeRows = await codeRes.json();
+  if (!codeRows.length) return;
+
+  const newActive = Math.max(0, codeRows[0].active_count - 1);
+  await fetch(`${sb}/rest/v1/referral_codes?user_id=eq.${referrerUserId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${key}`, apikey: key,
+      "Content-Type": "application/json", Prefer: "return=minimal",
+    },
+    body: JSON.stringify({ active_count: newActive, synced_at: new Date().toISOString() }),
+  });
+
+  // If active count dropped below 5, remove permanently-free benefit.
+  if (newActive < 5) {
+    await env.SUBSCRIPTIONS.delete(`referral_free:${referrerUserId}`);
+    // Restore normal pro metadata (they may still have a paid subscription).
+    await fetch(`${sb}/auth/v1/admin/users/${referrerUserId}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${key}`, apikey: key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ user_metadata: { referral_free: false } }),
+    }).catch(() => {});
+  }
+}
+
+// ── Referral: extend a subscription's trial by N months via Dodo API ─────────
+async function extendSubscriptionByMonths(userId, months, env) {
+  if (!env.DODO_PAYMENTS_API_KEY || !env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return;
+
+  // Look up the dodo_subscription_id for this user.
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${userId}&select=dodo_subscription_id&limit=1`,
+    { headers: { Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`, apikey: env.SUPABASE_SERVICE_KEY } }
+  );
+  if (!res.ok) return;
+  const rows = await res.json();
+  const subId = rows[0]?.dodo_subscription_id;
+  if (!subId) return;
+
+  const mode = (env.DODO_ENVIRONMENT || env.DODO_ENV || "live_mode").toLowerCase();
+  const base = mode.includes("test") ? "https://test.dodopayments.com" : "https://live.dodopayments.com";
+
+  // Dodo: PATCH /subscriptions/{id} with trial_period_days to extend the trial.
+  await fetch(`${base}/subscriptions/${subId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${env.DODO_PAYMENTS_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ trial_period_days: months * 30 }),
+  });
 }
 
 // Mark an id (Supabase user_id or device_id) as Pro in KV, Supabase user_metadata,
@@ -701,6 +911,11 @@ async function resolveIdentity(request, env) {
         //    Fastest — no extra network call. Present in every token issued after
         //    the user was marked pro.
         if (user.userMetadata?.plan === "pro") {
+          return { id: user.id, isPro: true };
+        }
+
+        // 1b. Referral-free: user has 5+ active paying referrals → permanently free.
+        if ((await env.SUBSCRIPTIONS.get(`referral_free:${user.id}`)) === "1") {
           return { id: user.id, isPro: true };
         }
 

@@ -42,7 +42,7 @@ STEPS = [
     {
         "kind": "welcome",
         "title": "Welcome to Omni",
-        "subtitle": "Your AI companion for everything on your computer.",
+        "subtitle": "Find files, control your Mac, get answers, manage email — just ask.",
     },
     {
         "kind": "feature",
@@ -340,6 +340,55 @@ class _PrivacyVisual(QWidget):
             p.drawText(int(lx), int(ly), int(lw), int(lh), Qt.AlignmentFlag.AlignCenter, lbl)
             lx += lw + lgap
 
+        p.end()
+
+
+class _ToggleSwitch(QWidget):
+    """iOS-style pill toggle with smooth thumb animation."""
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._on = True
+        self.setFixedSize(44, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        h = 24
+        self._thumb_x = float(44 - h + 2)  # start at "on" position
+        self._target_x = self._thumb_x
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(12)
+        self._anim_timer.timeout.connect(self._tick)
+
+    def _tick(self):
+        diff = self._target_x - self._thumb_x
+        if abs(diff) < 0.5:
+            self._thumb_x = self._target_x
+            self._anim_timer.stop()
+        else:
+            self._thumb_x += diff * 0.25
+        self.update()
+
+    def mousePressEvent(self, _):
+        self._on = not self._on
+        h = self.height()
+        self._target_x = float(self.width() - h + 2) if self._on else 2.0
+        self._anim_timer.start()
+        self.toggled.emit(self._on)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        # Interpolate track colour based on thumb position
+        t = (self._thumb_x - 2) / max(w - h, 1)
+        t = max(0.0, min(1.0, t))
+        alpha = int(30 + t * 170)
+        track = QColor(139, 92, 246, alpha)
+        p.setBrush(QBrush(track))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, w, h, h // 2, h // 2)
+        p.setBrush(QBrush(QColor(255, 255, 255, 230)))
+        p.drawEllipse(int(self._thumb_x), 2, h - 4, h - 4)
         p.end()
 
 
@@ -650,42 +699,71 @@ class OnboardingDialog(QDialog):
 
         pc.addStretch()  # pushes toggle + button to bottom
 
-        # ── Pill toggle (single segmented control) ────────────────────
+        # ── Toggle: Monthly  [switch]  Yearly  [33% off] ──────────────
         self._interval = "yearly"
 
-        pill = QFrame()
-        pill.setFixedHeight(34)
-        pill.setStyleSheet("QFrame { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; }")
-        pill_lay = QHBoxLayout(pill)
-        pill_lay.setContentsMargins(3, 3, 3, 3)
-        pill_lay.setSpacing(0)
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+        toggle_row.setContentsMargins(0, 0, 0, 0)
 
-        _active_seg   = "color: #A78BFA; background: rgba(139,92,246,0.32); border: 1px solid rgba(139,92,246,0.50); border-radius: 8px; font-family: Manrope; font-size: 11px; font-weight: 600;"
-        _inactive_seg = "color: rgba(255,255,255,0.38); background: transparent; border: none; font-family: Manrope; font-size: 11px;"
+        _lbl_ss_active   = "color: rgba(255,255,255,0.85); background: transparent; border: none;"
+        _lbl_ss_inactive = "color: rgba(255,255,255,0.30); background: transparent; border: none;"
 
-        self._seg_yearly  = QPushButton("Yearly · $6/mo  ✦ Save 33%")
-        self._seg_monthly = QPushButton("Monthly · $9")
-        for b in (self._seg_yearly, self._seg_monthly):
-            b.setFixedHeight(28)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            pill_lay.addWidget(b)
+        self._lbl_monthly = QLabel("Monthly")
+        self._lbl_monthly.setFont(QFont("Manrope", 11))
 
-        def _select_interval(chosen: str):
-            self._interval = chosen
-            self._seg_yearly.setStyleSheet(_active_seg if chosen == "yearly" else _inactive_seg)
-            self._seg_monthly.setStyleSheet(_active_seg if chosen == "monthly" else _inactive_seg)
-            if chosen == "yearly":
+        self._toggle_sw = _ToggleSwitch()  # True = yearly
+
+        self._lbl_yearly = QLabel("Yearly")
+        self._lbl_yearly.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+
+        self._save_badge = QLabel("33% off")
+        self._save_badge.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self._save_badge.setStyleSheet(
+            "color: #A78BFA; background: rgba(139,92,246,0.22); border: 1px solid rgba(139,92,246,0.38); border-radius: 7px; padding: 2px 7px;"
+        )
+
+        toggle_row.addWidget(self._lbl_monthly)
+        toggle_row.addWidget(self._toggle_sw)
+        toggle_row.addWidget(self._lbl_yearly)
+        toggle_row.addSpacing(4)
+        toggle_row.addWidget(self._save_badge)
+        toggle_row.addStretch()
+
+        def _select_interval(yearly: bool):
+            self._interval = "yearly" if yearly else "monthly"
+            self._lbl_monthly.setStyleSheet(_lbl_ss_inactive if yearly else _lbl_ss_active)
+            self._lbl_yearly.setStyleSheet(_lbl_ss_active if yearly else _lbl_ss_inactive)
+            self._save_badge.setVisible(yearly)
+            if yearly:
                 self._paywall_price_lbl.setText("$6")
                 self._paywall_price_sub.setText("per month · billed $72/yr")
             else:
                 self._paywall_price_lbl.setText("$9")
                 self._paywall_price_sub.setText("per month · billed monthly")
 
-        self._seg_yearly.clicked.connect(lambda: _select_interval("yearly"))
-        self._seg_monthly.clicked.connect(lambda: _select_interval("monthly"))
-        _select_interval("yearly")
+        self._toggle_sw.toggled.connect(_select_interval)
+        _select_interval(True)  # default: yearly
 
-        pc.addWidget(pill)
+        # ── Referral code input ───────────────────────────────────────
+        self._referral_code_edit = QLineEdit()
+        self._referral_code_edit.setPlaceholderText("Referral code (optional — get 1 month free)")
+        self._referral_code_edit.setFixedHeight(30)
+        self._referral_code_edit.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 8px;
+                color: rgba(255,255,255,0.65);
+                font-family: Manrope; font-size: 10px;
+                padding: 0 10px;
+            }
+            QLineEdit:focus { border-color: rgba(167,139,250,0.40); }
+        """)
+        pc.addWidget(self._referral_code_edit)
+        pc.addSpacing(8)
+
+        pc.addLayout(toggle_row)
         pc.addSpacing(10)
 
         self._go_pro_btn = QPushButton("Go Pro  →")
@@ -712,7 +790,7 @@ class OnboardingDialog(QDialog):
         self._paywall_status.setStyleSheet("color: rgba(255,255,255,0.38); background: transparent; border: none;")
         self._paywall_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._paywall_status.setWordWrap(True)
-        pc.addSpacing(4)
+        self._paywall_status.setMaximumHeight(0)  # hidden until needed
         pc.addWidget(self._paywall_status)
 
         cards_row.addWidget(free_card)
@@ -1086,7 +1164,14 @@ class OnboardingDialog(QDialog):
             self._go_to(self._step - 1)
 
     def _on_skip(self):
-        self._finish()
+        # Jump to the paywall step instead of closing
+        paywall_idx = next(
+            (i for i, s in enumerate(STEPS) if s["kind"] == "paywall"), None
+        )
+        if paywall_idx is not None and self._step < paywall_idx:
+            self._go_to(paywall_idx)
+        else:
+            self._finish()
 
     def _finish(self):
         for panel in self._panels:
@@ -1174,11 +1259,19 @@ class OnboardingDialog(QDialog):
         self._paywall_status.setText("")
 
         import threading, src.core.auth as auth, src.core.billing as billing
+        import src.core.settings_store as settings_store
 
         token = auth.get_access_token()
         user  = auth.get_user() or {}
         email = user.get("email") or None
         interval = getattr(self, "_interval", "yearly")
+        referred_by = settings_store.get("used_referral_code") or None
+        # Also pick up any code typed into the referral input on the paywall
+        if hasattr(self, "_referral_code_edit"):
+            typed = self._referral_code_edit.text().strip()
+            if typed:
+                referred_by = typed
+                settings_store.set("used_referral_code", typed)
 
         def _run():
             import webbrowser
@@ -1187,6 +1280,7 @@ class OnboardingDialog(QDialog):
                     interval=interval,
                     access_token=token,
                     customer_email=email,
+                    referred_by=referred_by,
                 )
                 self._checkout_ready.emit(url)
                 webbrowser.open(url)
@@ -1206,6 +1300,7 @@ class OnboardingDialog(QDialog):
     def _on_checkout_error(self, msg: str):
         self._go_pro_btn.setEnabled(True)
         self._go_pro_btn.setText("Go Pro  →")
+        self._paywall_status.setMaximumHeight(16777215)
         self._paywall_status.setText(msg)
 
     # ── Login actions ──────────────────────────────────────────────────────────
@@ -1240,6 +1335,47 @@ class OnboardingDialog(QDialog):
 
     def _login_advance(self):
         self._go_to_kind("finish")
+        # Auto-detect referred_by from the website waitlist in the background.
+        # This ensures used_referral_code is populated before the user hits "Go Pro".
+        if not settings_store.get("used_referral_code"):
+            import threading as _t
+            def _fetch_referred_by():
+                try:
+                    import urllib.request, urllib.parse, json as _json
+                    user = auth.get_user() or {}
+                    email = user.get("email") or ""
+                    if not email:
+                        return
+                    params = urllib.parse.urlencode({
+                        "email": f"eq.{email}",
+                        "select": "referred_by",
+                    })
+                    req = urllib.request.Request(
+                        f"https://rfirkagyggkumbeqzxgf.supabase.co/rest/v1/waitlist?{params}",
+                        headers={
+                            "apikey": (
+                                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+                                ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmaXJrYWd5Z2drdW1iZXF6eGdmIiwic"
+                                "m9sZSI6ImFub24iLCJpYXQiOjE3NjcyOTk0NTUsImV4cCI6MjA4Mjg3NTQ1NX0"
+                                ".n_cf788aLOsS27S-7XJ7phRH2csrs6MnxgF8dSeAWSE"
+                            ),
+                            "Authorization": (
+                                "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+                                ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmaXJrYWd5Z2drdW1iZXF6eGdmIiwic"
+                                "m9sZSI6ImFub24iLCJpYXQiOjE3NjcyOTk0NTUsImV4cCI6MjA4Mjg3NTQ1NX0"
+                                ".n_cf788aLOsS27S-7XJ7phRH2csrs6MnxgF8dSeAWSE"
+                            ),
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=6) as r:
+                        rows = _json.loads(r.read())
+                    if rows:
+                        code = rows[0].get("referred_by") or ""
+                        if code:
+                            settings_store.set("used_referral_code", code)
+                except Exception:
+                    pass
+            _t.Thread(target=_fetch_referred_by, daemon=True).start()
 
     def _do_login_sign_in(self):
         import threading, src.core.auth as auth

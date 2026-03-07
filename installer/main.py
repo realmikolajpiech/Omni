@@ -832,6 +832,17 @@ class InstallWorker(QThread):
                 shutil.copy2(item, dest)
         run_sh = INSTALL_DIR / "run.sh"
         if run_sh.exists():
+            # Ensure run.sh starts with a cd to its own directory.
+            # When launched via open -a Omni.app the CWD is / (root), which
+            # breaks every relative path (./venv/bin/python3, etc.).
+            _cd_line = 'cd "$(dirname "$0")" || exit 1\n'
+            _content = run_sh.read_text()
+            if _cd_line not in _content:
+                # Insert after the shebang line
+                _lines = _content.splitlines(keepends=True)
+                _insert_at = 1 if _lines and _lines[0].startswith("#!") else 0
+                _lines.insert(_insert_at, "\n" + _cd_line)
+                run_sh.write_text("".join(_lines))
             run_sh.chmod(run_sh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
         venv_dir = INSTALL_DIR / "venv"
