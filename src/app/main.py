@@ -139,25 +139,31 @@ def main():
     timer.start(100)
 
     window = OmniWindow()
-    window.show()
-    window.center()
 
     # ── Onboarding (shown once on first launch) ───────────────────────────────
     from src.core import settings_store as _settings
-    import sys as _sys
     if not _settings.get("onboarding_shown"):
         from src.ui.onboarding import OnboardingDialog
 
-        def _show_onboarding():
-            dlg = OnboardingDialog()
-            # Only mark complete when the user finishes all steps (accept),
-            # not when they close/quit early (reject) — so it re-appears next launch.
-            dlg.accepted.connect(lambda: _settings.set("onboarding_shown", True))
-            dlg.finished.connect(lambda _: setattr(window, '_onboarding_dlg', None))
-            window._onboarding_dlg = dlg  # keep alive
-            dlg.show()
+        # Keep the main window invisible during onboarding — even if something
+        # (e.g. IPC toggle, media backend event processing) accidentally shows
+        # it, the user won't see it because opacity is 0.
+        window.setWindowOpacity(0.0)
 
-        QTimer.singleShot(400, _show_onboarding)
+        def _show_main_window():
+            window.setWindowOpacity(1.0)
+            window.show()
+            window.center()
+
+        dlg = OnboardingDialog()
+        dlg.accepted.connect(lambda: _settings.set("onboarding_shown", True))
+        dlg.finished.connect(lambda _: setattr(window, '_onboarding_dlg', None))
+        dlg.finished.connect(lambda _: _show_main_window())
+        window._onboarding_dlg = dlg  # keep alive
+        dlg.show()
+    else:
+        window.show()
+        window.center()
 
     # ── Background update check ───────────────────────────────────────────────
     from PyQt6.QtCore import QObject, pyqtSignal as _Signal

@@ -475,9 +475,6 @@ class OmniWindow(QWidget):
         # We use sys.executable to trigger the heavy path for EXE icons to prevent freeze on first type
         IconManager.instance().request(sys.executable)
 
-        # Apply initial blur
-        self.apply_blur()
-
         # Install an application-wide event filter to catch global shortcuts
         # (like Cmd+Option) regardless of which widget has focus (e.g. UnscrollableTextEdit)
         QApplication.instance().installEventFilter(self)
