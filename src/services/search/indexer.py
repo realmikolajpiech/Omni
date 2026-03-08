@@ -19,7 +19,7 @@ from src.core.config import (
     DB_PATH, HOME, BRAIN_HOST, BRAIN_PORT, IGNORE_DIRS, BLOCKED_EXTENSIONS,
     INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, CONTENT_SKIP_FILENAMES, CONTENT_SKIP_DIRS,
     CONTENT_SKIP_SUFFIXES, CONTENT_SKIP_EXTENSIONS, INDEX_LOG_PATH,
-    BLOCKED_FILENAMES
+    BLOCKED_FILENAMES, BACKEND_URL, OMNI_SECRET, DEVICE_ID, FAST_MODEL_GROQ,
 )
 from src.services.search.utils import process_file_content, is_text_file, is_image_file
 
@@ -27,7 +27,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 TABLE_NAME = "files"
 EMBED_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/embed"
-CLASSIFY_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/classify_files"
 LLM_FILTER_BATCH_SIZE = 32
 
 
@@ -69,6 +68,8 @@ def _remote_encode(texts: list) -> list:
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         result = json.loads(resp.read().decode("utf-8"))
+    # Throttle: yield to the brain so UI requests aren't starved between batches.
+    time.sleep(0.3)
     return result["vectors"]
 
 
@@ -96,41 +97,83 @@ def _eta(start: float, done: int, total: int) -> str:
 
 
 def _llm_filter_content(candidates: list) -> set:
-    """Batch-classify candidate files via the brain's /classify_files endpoint.
+    """Batch-classify candidate files directly via the LLM API.
 
-    Routing through the brain reuses the already-authenticated Groq fast-model
-    client.  Only filename + 2-level path context is sent — no file content,
-    so the calls are cheap and fast.
+    Runs entirely within the indexer subprocess — no brain involvement —
+    so it cannot block or starve the UI process.
 
     Returns a set of full_paths that should be skipped.
     Fails open: a failed batch leaves those files included.
     """
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="omni-proxy",
+        base_url=BACKEND_URL + "/v1",
+        default_headers={
+            "X-Omni-Secret": OMNI_SECRET,
+            "X-Device-ID":   DEVICE_ID,
+        },
+    )
+
     skip_paths: set = set()
     total_batches = (len(candidates) + LLM_FILTER_BATCH_SIZE - 1) // LLM_FILTER_BATCH_SIZE
 
     for batch_idx in range(total_batches):
         batch = candidates[batch_idx * LLM_FILTER_BATCH_SIZE:(batch_idx + 1) * LLM_FILTER_BATCH_SIZE]
 
-        files_payload = [
-            {"filename": filename, "path": full_path}
-            for full_path, filename in batch
-        ]
-        payload = json.dumps({"files": files_payload}).encode("utf-8")
+        lines = []
+        for i, (full_path, filename) in enumerate(batch):
+            parts = [p for p in full_path.split(os.sep) if p]
+            context = "/".join(parts[-3:-1]) if len(parts) >= 3 else "/".join(parts[:-1])
+            lines.append(f"{i}: {filename}  (in: {context}/)")
+
+        prompt = (
+            "You are a smart filter for a desktop file search index.\n"
+            "Your task: Decide which files are worth embedding for semantic search.\n"
+            "The goal is to index ONLY human-written content that a user would search for by meaning.\n"
+            "We want to SKIP all machine-generated files, binaries, logs, lockfiles, and boilerplate.\n\n"
+            "RULES - Output 0 (SKIP) for:\n"
+            "1. BINARIES & MODELS: .exe, .dll, .so, .dylib, .bin, .pkl, .pth, .tflite, .onnx, .wasm, .hprof, .blend, .jks, .keystore, .srcaar\n"
+            "2. MEDIA: Images (.png, .jpg), Audio (.mp3, .wav), Video (.mp4), Fonts (.ttf, .otf, .icc) \u2014 indexed separately.\n"
+            "3. LOCKFILES: package-lock.json, yarn.lock, Podfile.lock, pubspec.lock, Cargo.lock, poetry.lock\n"
+            "4. LOGS & DUMPS: .log, .out, .err, .dump, .stacktrace, .tsbuildinfo, sha_debug.txt, errors.txt\n"
+            "5. CONFIG METADATA: .pbxproj, .xcworkspacedata, .plist, .storyboard, .xib, .entitlements, analysis_options.yaml, .idea/, .vscode/\n"
+            "6. BUILD ARTIFACTS: gradlew, google-services.json, GeneratedPluginRegistrant.*, build/, dist/, target/, out/\n"
+            "7. COMPILED/MINIFIED: .min.js, .min.css, .map, .d.ts (unless it has docs), .class, .pyc\n"
+            "8. BOILERPLATE: .eslintrc, .prettierrc, tsconfig.json, .gitignore, manifest.json, license.txt, .csproj, .sln\n"
+            "9. UNITY/GAME ASSETS: .meta, .prefab, .unity, .mat, .asset, .inputactions, .asmdef\n"
+            "10. APP BUNDLES: Files inside .app, .framework, .asar, Contents/Info.plist\n"
+            "11. LIBRARY VENDOR DATA: PHP files in font dirs (ttfontdata/, patterns/, font/), Firebase *Dependencies.xml, *_manifest.txt, maven-metadata.xml\n"
+            "12. PLATFORM RUNNER BOILERPLATE: flutter_window.cpp/h, win32_window.cpp/h, resource.h, Runner.rc, my_application.cc/h (Flutter platform glue)\n\n"
+            "RULES - Output 1 (INDEX) for:\n"
+            "1. SOURCE CODE: .py, .js, .ts, .rs, .go, .c, .cpp, .java, .swift, .kt, .cs (containing LOGIC, not platform boilerplate)\n"
+            "2. DOCUMENTS: .md, .txt (notes), .docx, .pdf, .rtf\n"
+            "3. CONFIG WITH LOGIC: specific config files that contain custom logic (not just key-value pairs)\n\n"
+            "Reply with ONLY a JSON array of 0s and 1s, one per file, in order.\n"
+            "Files:\n" + "\n".join(lines)
+        )
 
         try:
-            req = urllib.request.Request(
-                CLASSIFY_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+            response = client.chat.completions.create(
+                model=FAST_MODEL_GROQ,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=len(batch) * 4 + 20,
+                temperature=0.0,
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
+            raw = (response.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1].lstrip("json").strip()
 
-            decisions = result.get("decisions", [])
+            decisions = json.loads(raw)
+            decisions = [int(bool(d)) for d in decisions]
+            while len(decisions) < len(batch):
+                decisions.append(1)
+            decisions = decisions[:len(batch)]
+
             skipped = 0
             for i, (full_path, _) in enumerate(batch):
-                if i < len(decisions) and int(decisions[i]) == 0:
+                if decisions[i] == 0:
                     skip_paths.add(full_path)
                     skipped += 1
 
@@ -171,6 +214,7 @@ def _save_progress(progress: dict):
 
 def _write_phase_progress(progress: dict, phase: int, pct: float, eta: str, label: str):
     """Update the progress file with live within-phase progress for the UI."""
+    progress.pop("preparing", None)  # Clear preparing flag on first real progress write
     progress["current_phase"] = phase
     progress["phase_pct"]     = round(pct, 1)
     progress["eta"]           = eta
@@ -188,14 +232,17 @@ def _clear_progress():
 
 
 def _get_existing_paths(db, table_name: str, path_col: str = "path") -> set:
-    """Return the set of paths already stored in a LanceDB table. Empty set on any error."""
+    """Return the set of paths already stored in a LanceDB table. Empty set on any error.
+    Selects only the path column to avoid loading large embedding vectors into memory."""
     try:
         if table_name not in db.table_names():
             return set()
         tbl = db.open_table(table_name)
-        df = tbl.to_pandas()
+        df = tbl.search().select([path_col]).limit(None).to_pandas()
         if path_col in df.columns:
-            return set(df[path_col].tolist())
+            paths = set(df[path_col].tolist())
+            del df
+            return paths
     except Exception as e:
         logging.warning(f"Could not read existing paths from '{table_name}': {e}")
     return set()
@@ -296,6 +343,15 @@ def main():
 
     skip_filenames = "--skip-filenames" in sys.argv
 
+    # Signal to the UI that the process is alive but not yet indexing.
+    # _write_phase_progress() will clear this flag on the first real progress write.
+    try:
+        existing = _load_progress()
+        existing["preparing"] = True
+        _save_progress(existing)
+    except Exception:
+        pass
+
     logging.info(f"Waiting for brain service at {EMBED_URL}...")
     if not _wait_for_brain(timeout=60):
         logging.error("Brain service did not become available in time. Exiting.")
@@ -334,7 +390,7 @@ def main():
     logging.info(f"Connecting to LanceDB at {DB_PATH}...")
     db = lancedb.connect(DB_PATH)
 
-    EMBED_WORKERS = 3
+    EMBED_WORKERS = 1
 
     # ── Phase 1: Filename indexing ────────────────────────────────
     total_files_indexed = 0
@@ -352,7 +408,7 @@ def main():
         phase_start = time.time()
         _write_phase_progress(progress, 1, 0.0, "?", "Indexing file names")
 
-        BATCH_SIZE = 512
+        BATCH_SIZE = 128
 
         # Resume: open existing table and find already-indexed paths
         existing_filename_paths = _get_existing_paths(db, TABLE_NAME)

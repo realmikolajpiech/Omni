@@ -966,7 +966,9 @@ def search_endpoint():
 
             tbl = model_manager.db_conn.open_table("files")
             # Encoding and searching must be thread-safe (hence the lock)
-            res = tbl.search(model_manager.embed_model.encode(query)).limit(3).to_pandas()
+            with model_manager.embed_lock:
+                query_vec = model_manager.embed_model.encode(query)
+            res = tbl.search(query_vec).limit(3).to_pandas()
             if not res.empty:
                 for _, row in res.iterrows():
                     if row.get('_distance', 0) < 1.1:
@@ -2152,7 +2154,8 @@ def embed_endpoint():
         return jsonify({"vectors": []})
 
     try:
-        vectors = model_manager.embed_model.encode(texts).tolist()
+        with model_manager.embed_lock:
+            vectors = model_manager.embed_model.encode(texts).tolist()
         return jsonify({"vectors": vectors})
     except Exception as e:
         logging.error(f"Embed endpoint error: {e}")

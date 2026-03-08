@@ -711,6 +711,10 @@ class SettingsPanel(QWidget):
         subscription.add_listener(
             lambda s: self._dispatch.emit(lambda: self._update_account_ui(s))
         )
+        # Kill indexer subprocess on app quit so it doesn't orphan and hammer the
+        # next brain instance with embed requests, making the re-launched app unresponsive.
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().aboutToQuit.connect(self._kill_indexer)
 
     # ── Build ────────────────────────────────────────────────────────
 
@@ -959,14 +963,36 @@ class SettingsPanel(QWidget):
 
         lay.addSpacing(4)
 
-        # Action button
+        # Button row: action button + pause button
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
+
         self._files_btn = QPushButton()
         self._files_btn.setFixedHeight(38)
         self._files_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._files_btn.setFont(_font("Manrope", 11, bold=True))
         self._files_btn.setObjectName("FilesActionBtn")
+        self._files_btn.setStyleSheet(_PRIMARY_BTN_SS)
         self._files_btn.clicked.connect(self._on_files_btn_clicked)
-        lay.addWidget(self._files_btn)
+
+        self._files_pause_btn = QPushButton("Pause")
+        self._files_pause_btn.setFixedHeight(38)
+        self._files_pause_btn.setFixedWidth(90)
+        self._files_pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._files_pause_btn.setFont(_font("Manrope", 11, bold=True))
+        self._files_pause_btn.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); "
+            "border-radius: 10px; color: rgba(255,255,255,0.75); padding: 0px 18px; } "
+            "QPushButton:hover { background: rgba(255,255,255,0.14); color: #ffffff; } "
+            "QPushButton:pressed { background: rgba(255,255,255,0.06); }"
+        )
+        self._files_pause_btn.clicked.connect(self._on_files_pause_clicked)
+        self._files_pause_btn.hide()
+
+        btn_row.addWidget(self._files_btn)
+        btn_row.addWidget(self._files_pause_btn)
+        lay.addLayout(btn_row)
 
         page.add_widget(status_card)
         page.add_stretch()
@@ -992,6 +1018,10 @@ class SettingsPanel(QWidget):
         if is_running or os.path.exists(INDEX_PROGRESS_PATH):
             try:
                 prog = json.loads(open(INDEX_PROGRESS_PATH).read())
+
+                if is_running and prog.get("preparing"):
+                    return "preparing", "Preparing…", 0
+
                 phase      = prog.get("current_phase", 1)
                 phase_pct  = float(prog.get("phase_pct", 0))
                 eta        = prog.get("eta", "")
@@ -1000,18 +1030,19 @@ class SettingsPanel(QWidget):
 
                 # Overall progress: each phase is 1/3 of the total
                 overall = (phases_done * 100 + phase_pct) / 3
+                overall_pct = int(overall)
 
-                detail = f"Phase {phase}/3 — {label}  ·  {phase_pct:.0f}%"
+                detail = f"Phase {phase}/3 — {label}  ·  {overall_pct}%"
                 if eta and eta != "?":
                     detail += f"  ·  ETA {eta}"
 
                 state = "running" if is_running else "paused"
-                return state, detail, int(overall)
+                return state, detail, overall_pct
             except Exception:
                 pass
 
             if is_running:
-                return "running", "", 0
+                return "preparing", "Preparing…", 0
             return "paused", "Paused", 0
 
         return "not_started", "", 0
@@ -1019,23 +1050,44 @@ class SettingsPanel(QWidget):
     def _refresh_files_status(self):
         state, detail, overall_pct = self._index_state()
 
-        dot_color  = {"done": "#34c759", "running": "#007aff", "paused": "#ff9500", "not_started": "#8e8e93"}[state]
-        label_text = {"done": "Indexed", "running": "Indexing…", "paused": "Paused", "not_started": "Not indexed"}[state]
-        btn_text   = {"done": "Re-index", "running": "Running…", "paused": "Resume Indexing", "not_started": "Start Indexing"}[state]
+        dot_color  = {"done": "#34c759", "running": "#007aff", "preparing": "#007aff", "paused": "#ff9500", "not_started": "#8e8e93"}[state]
+        label_text = {"done": "Indexed", "running": "Indexing…", "preparing": "Indexing…", "paused": "Paused", "not_started": "Not indexed"}[state]
+        btn_text   = {"done": "Re-index", "running": "Running…", "preparing": "Preparing…", "paused": "Resume Indexing", "not_started": "Start Indexing"}[state]
+
+        is_active = state in ("running", "preparing")
 
         self._files_dot.setStyleSheet(f"color: {dot_color};")
         self._files_status_lbl.setText(label_text)
         self._files_detail_lbl.setText(detail)
         self._files_detail_lbl.setVisible(bool(detail))
         self._files_btn.setText(btn_text)
-        self._files_btn.setEnabled(state != "running")
+        self._files_btn.setEnabled(not is_active)
+        self._files_pause_btn.setVisible(is_active)
 
         if state == "running":
             self._files_progress_bar.setValue(overall_pct)
             self._files_progress_bar.show()
         else:
             self._files_progress_bar.hide()
-            self._files_poll_timer.stop()
+            if state not in ("preparing",):
+                self._files_poll_timer.stop()
+
+    def _kill_indexer(self):
+        """Terminate the indexer subprocess. Called on app quit to prevent orphaned processes."""
+        if self._indexer_proc is not None and self._indexer_proc.poll() is None:
+            try:
+                self._indexer_proc.terminate()
+            except Exception:
+                pass
+
+    def _on_files_pause_clicked(self):
+        """Pause indexing by terminating the subprocess (progress is preserved on disk)."""
+        if self._indexer_proc is not None and self._indexer_proc.poll() is None:
+            try:
+                self._indexer_proc.terminate()
+            except Exception:
+                pass
+        self._refresh_files_status()
 
     def _on_files_btn_clicked(self):
         import subprocess, sys, os
@@ -1059,6 +1111,7 @@ class SettingsPanel(QWidget):
             [sys.executable, indexer],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: os.nice(10),
         )
         self._refresh_files_status()
         self._files_poll_timer.start()

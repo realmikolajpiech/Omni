@@ -50,6 +50,7 @@ main_lock = threading.Lock()
 fast_lock = threading.Lock()
 tts_lock = threading.Lock()
 search_lock = threading.Lock()
+embed_lock = threading.Lock()  # serialises all embed_model.encode() calls (not thread-safe on MPS)
 abort_fast_event = threading.Event()
 
 # Fast model request queue for cancellation

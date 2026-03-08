@@ -1,38 +1,41 @@
 import sys
 import os
-import threading
-import time
 import subprocess
-from PyQt6.QtWidgets import QApplication
+import socket
+import time
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.app.brain import create_app
-from src.app.main import main as run_ui_main
 from src.core.logger import setup_logging
-import socket
 from src.core.config import BRAIN_PORT
+
 
 def is_brain_running():
     """Checks if the Brain service is already running on the configured port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', BRAIN_PORT)) == 0
 
+
 def run_flask():
-    """Runs the Flask API server."""
+    """Runs the Flask API server (called when mode == 'brain')."""
+    from src.app.brain import create_app
     app = create_app()
-    # Run properly
     app.run(host='127.0.0.1', port=BRAIN_PORT, debug=False, use_reloader=False, threaded=True)
+
 
 def main():
     setup_logging("launcher")
-    
+
     # Check arguments
     mode = "all"
-    if len(sys.argv) > 1:
-        mode = sys.argv[1]
-    
+    extra_args = []
+    for arg in sys.argv[1:]:
+        if arg in ("brain", "ui"):
+            mode = arg
+        else:
+            extra_args.append(arg)
+
     if mode == "brain":
         print("Starting Brain Service ONLY...")
         run_flask()
@@ -40,17 +43,41 @@ def main():
 
     if mode == "ui":
         print("Starting UI ONLY...")
+        from src.app.main import main as run_ui_main
         run_ui_main()
         return
 
-    # Default "all" mode — always start a fresh Brain in this process
-    print("Starting Brain Service...")
-    flask_thread = threading.Thread(target=run_flask, daemon=True, name="BrainThread")
-    flask_thread.start()
-    
+    # Default "all" mode — launch brain as a separate process so its
+    # heavy embedding/model work doesn't share the GIL with the Qt UI thread.
+    if not is_brain_running():
+        print("Starting Brain Service (subprocess)...")
+        logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        brain_proc = subprocess.Popen(
+            [sys.executable, __file__, "brain"],
+            stdout=open(os.path.join(logs_dir, "brain_setup.log"), "a"),
+            stderr=subprocess.STDOUT,
+        )
+
+        # Wait up to 15 s for the brain to be ready before starting the UI.
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if is_brain_running():
+                break
+            time.sleep(0.2)
+    else:
+        print("Brain Service already running.")
+        brain_proc = None
+
     print("Starting UI...")
-    # Run the UI
-    run_ui_main()
+    from src.app.main import main as run_ui_main
+    try:
+        run_ui_main()
+    finally:
+        # When the UI exits, also terminate the brain we spawned.
+        if brain_proc is not None and brain_proc.poll() is None:
+            brain_proc.terminate()
+
 
 if __name__ == "__main__":
     main()
