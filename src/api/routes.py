@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import re
+import socket
 import threading
 from typing import Optional
 from flask import Blueprint, request, jsonify, Response
@@ -16,6 +17,15 @@ from src.services.system.app_launcher import find_and_launch_app, resolve_app_me
 from src.services.system.installer import generate_install_plan, log_debug, KNOWN
 
 api_bp = Blueprint('api', __name__)
+
+
+def _is_connected(host="8.8.8.8", port=53, timeout=1.5) -> bool:
+    """Quick check for internet connectivity via DNS port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 # Pending fast actions (when fast model requests web_search)
 _PENDING_ACTIONS_LOCK = threading.Lock()
@@ -900,6 +910,14 @@ def ask_llm():
     # Check if streaming is requested
     stream = req.get("stream", False)
 
+    if not _is_connected():
+        no_internet_msg = "No internet connection. Please check your network and try again."
+        if stream:
+            def _no_internet_stream():
+                yield f'data: {json.dumps({"type": "final", "answer": no_internet_msg, "actions": []})}\n\n'
+            return Response(_no_internet_stream(), mimetype="text/event-stream")
+        return jsonify({"answer": no_internet_msg})
+
     if stream:
         # Streaming response
 
@@ -1493,10 +1511,15 @@ def action_endpoint():
     # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
     
+    # Skip LLM inference entirely if there's no internet connection
+    if not _is_connected():
+        logging.info("No internet connection, skipping fast model inference")
+        return jsonify({"actions": [], "chips": []})
+
     # Pre-emptive search REMOVED to save time (was taking ~2.8s).
     # The LLM will use the `web_search` tool if it needs information.
     # We only initialize an empty context or minimal context if needed.
-    search_context = "" 
+    search_context = ""
     search_results = []
     
     logging.info(f"Search Context prepared ({len(search_context)} chars)")

@@ -375,6 +375,7 @@ class OmniWindow(QWidget):
         self._pending_open_file = None  # file path shown as "Enter to open" hint after AI response
         self.is_settings_mode = False
         self.is_clipboard_mode = False
+        self._reset_on_next_show = False
         self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
 
         # Start clipboard history monitoring
@@ -913,6 +914,11 @@ class OmniWindow(QWidget):
                     self.follow_up_widget.set_active(True)
                     self.frame.set_minimal_mode(False)
             else:
+                # If closed via app launch, reset to a clean state instead of restoring old query
+                if getattr(self, '_reset_on_next_show', False):
+                    self._reset_on_next_show = False
+                    self.reset_to_search_mode(clear=True, animate=False)
+
                 # else: shortcut close — existing list/input preserved, just need height restore
                 # Mark animating early so changeEvent can't fire a spurious close during processEvents
                 self.is_entry_animating = True
@@ -2161,12 +2167,7 @@ class OmniWindow(QWidget):
                     w = AppActionWidget(a['name'])
                     def _make_open_app_cb(_name=a['name']):
                         def _cb(name, _widget):
-                            import src.services.llm.model_manager as mm
-                            mm.abort_fast_event.set()
-                            self.cleanup_worker('action_worker')
-                            self.cleanup_worker('search_worker')
-                            self.cleanup_worker('file_search_worker')
-                            self.input_field.clear()
+                            self._cancel_all_workers()
                             find_and_launch_app(name)
                             self.animate_close()
                         return _cb
@@ -2515,6 +2516,15 @@ class OmniWindow(QWidget):
             
             setattr(self, attr_name, None)
 
+    def _cancel_all_workers(self):
+        """Stop all in-flight workers and abort the fast model.
+        Sets _reset_on_next_show so the query is cleared when the window reopens."""
+        import src.services.llm.model_manager as mm
+        mm.abort_fast_event.set()
+        for w in ('action_worker', 'search_worker', 'file_search_worker', 'ai_worker', 'wiki_worker', 'og_worker'):
+            self.cleanup_worker(w)
+        self._reset_on_next_show = True
+
     def perform_local_search(self):
         """Debounced local search to prevent UI freezing while typing."""
         text = self.input_field.text()
@@ -2789,12 +2799,7 @@ class OmniWindow(QWidget):
             elif data.get('type') == 'open_app':
                 # Launch App (from Regex Shortcut)
                 app_name = data.get('name')
-                import src.services.llm.model_manager as mm
-                mm.abort_fast_event.set()
-                self.cleanup_worker('action_worker')
-                self.cleanup_worker('search_worker')
-                self.cleanup_worker('file_search_worker')
-                self.input_field.clear()
+                self._cancel_all_workers()
                 find_and_launch_app(app_name)
                 self.animate_close()
             elif data.get('type') == 'open_file':
@@ -3740,12 +3745,7 @@ class OmniWindow(QWidget):
                         elif act.get('type') == 'open_app':
                             w = AppActionWidget(act['name'])
                             def launch_app(name, widget):
-                                import src.services.llm.model_manager as mm
-                                mm.abort_fast_event.set()
-                                self.cleanup_worker('action_worker')
-                                self.cleanup_worker('search_worker')
-                                self.cleanup_worker('file_search_worker')
-                                self.input_field.clear()
+                                self._cancel_all_workers()
                                 find_and_launch_app(name)
                                 self.animate_close()
                             w.app_accepted.connect(launch_app)
@@ -4218,12 +4218,7 @@ class OmniWindow(QWidget):
                 elif act.get('type') == 'open_app':
                     w = AppActionWidget(act['name'])
                     def launch_app(name, widget):
-                        import src.services.llm.model_manager as mm
-                        mm.abort_fast_event.set()
-                        self.cleanup_worker('action_worker')
-                        self.cleanup_worker('search_worker')
-                        self.cleanup_worker('file_search_worker')
-                        self.input_field.clear()
+                        self._cancel_all_workers()
                         find_and_launch_app(name)
                         self.animate_close()
                     w.app_accepted.connect(launch_app)

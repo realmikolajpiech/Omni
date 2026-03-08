@@ -1495,6 +1495,7 @@ class PermissionsPage(QWidget):
             _appserv = ctypes.cdll.LoadLibrary(
                 "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
             )
+            _appserv.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
             _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
             return bool(_appserv.AXIsProcessTrustedWithOptions(None))
         except Exception:
