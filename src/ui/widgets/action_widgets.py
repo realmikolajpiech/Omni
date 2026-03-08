@@ -4883,3 +4883,327 @@ class PendingActionWidget(QWidget):
         self.icon_label.setStyleSheet(f"background: transparent; color: {t['text_secondary']}; font-size: 14px;")
         self.action_label.setStyleSheet(f"color: {t['text_secondary']}; letter-spacing: 0.5px;")
 
+
+# ---------------------------------------------------------------------------
+# OptimizeSystemWidget — system optimization suggestions card
+# ---------------------------------------------------------------------------
+
+class OptimizeSystemWidget(QWidget):
+    """
+    Displays a list of system optimization suggestions with checkboxes.
+    User can select which optimizations to apply, then click "Apply selected".
+    Each optimization command runs with trust-level permission checking.
+    """
+    apply_requested = pyqtSignal(list)  # emits list of selected suggestion dicts
+
+    def __init__(self, suggestions: list, parent=None):
+        super().__init__(parent)
+        self.suggestions = suggestions
+        self.current_theme = "light"
+        self._checkboxes = []
+        self._applied = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("OptimizeCard")
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(18, 16, 18, 16)
+        card_layout.setSpacing(0)
+
+        # ── Header ─────────────────────────────────────────────────────────
+        header = QHBoxLayout()
+        header.setSpacing(10)
+
+        icon_lbl = QLabel("⚡")
+        icon_lbl.setFont(QFont("", 18))
+        icon_lbl.setStyleSheet("background: transparent; color: #C084FC;")
+        icon_lbl.setFixedWidth(24)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title_lbl = QLabel("System Optimization")
+        title_lbl.setFont(QFont("Instrument Serif", 18, QFont.Weight.Normal))
+        title_lbl.setStyleSheet("color: #FFFFFF; background: transparent;")
+        self._title_lbl = title_lbl
+
+        header.addWidget(icon_lbl)
+        header.addWidget(title_lbl)
+        header.addStretch()
+        card_layout.addLayout(header)
+        card_layout.addSpacing(12)
+
+        # ── Suggestion rows ────────────────────────────────────────────────
+        self._rows_widget = QWidget()
+        self._rows_widget.setStyleSheet("background: transparent;")
+        rows_layout = QVBoxLayout(self._rows_widget)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(2)
+
+        for i, s in enumerate(suggestions):
+            row = self._build_suggestion_row(i, s)
+            rows_layout.addWidget(row)
+
+        card_layout.addWidget(self._rows_widget)
+        card_layout.addSpacing(14)
+
+        # ── Buttons ────────────────────────────────────────────────────────
+        self._btn_row = QWidget()
+        self._btn_row.setStyleSheet("background: transparent;")
+        btn_layout = QHBoxLayout(self._btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(10)
+
+        self.apply_btn = QPushButton("Apply selected")
+        self.apply_btn.setObjectName("OptimizeApplyBtn")
+        self.apply_btn.setFixedHeight(34)
+        self.apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_btn.clicked.connect(self._on_apply)
+
+        self.cancel_btn = QPushButton("Dismiss")
+        self.cancel_btn.setObjectName("OptimizeCancelBtn")
+        self.cancel_btn.setFixedHeight(34)
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self._on_dismiss)
+
+        btn_layout.addWidget(self.apply_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addStretch()
+        card_layout.addWidget(self._btn_row)
+
+        # ── Result row (shown after apply) ─────────────────────────────────
+        self._result_widget = QWidget()
+        self._result_widget.setStyleSheet("background: transparent;")
+        self._result_widget.hide()
+        rl = QHBoxLayout(self._result_widget)
+        rl.setContentsMargins(0, 8, 0, 4)
+        rl.setSpacing(8)
+        self._r_icon = QLabel("✓")
+        self._r_icon.setFont(QFont("", 13))
+        self._r_icon.setStyleSheet("background: transparent; color: #4ADE80;")
+        self._r_icon.setFixedWidth(20)
+        self._r_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._r_text = QLabel("Optimizations applied")
+        self._r_text.setFont(QFont("Manrope", 10, QFont.Weight.DemiBold))
+        self._r_text.setStyleSheet("background: transparent; color: #4ADE80;")
+        rl.addWidget(self._r_icon)
+        rl.addWidget(self._r_text, 1)
+        card_layout.addWidget(self._result_widget)
+
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def _build_suggestion_row(self, index: int, suggestion: dict) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(4, 6, 4, 6)
+        rl.setSpacing(10)
+
+        # Custom checkbox using QPushButton
+        cb = QPushButton()
+        cb.setObjectName(f"OptCB_{index}")
+        cb.setCheckable(True)
+        cb.setChecked(True)
+        cb.setFixedSize(20, 20)
+        cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._checkboxes.append(cb)
+
+        # Text column
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        title = QLabel(suggestion.get("title", "Optimization"))
+        title.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+        title.setStyleSheet("background: transparent; color: #FFFFFF;")
+        title.setWordWrap(True)
+        self._style_title = getattr(self, '_style_titles', [])
+        if not hasattr(self, '_style_titles'):
+            self._style_titles = []
+        self._style_titles.append(title)
+
+        desc_text = suggestion.get("description", "")
+        if desc_text:
+            desc = QLabel(desc_text)
+            desc.setFont(QFont("Manrope", 9))
+            desc.setStyleSheet("background: transparent; color: #888888;")
+            desc.setWordWrap(True)
+            if not hasattr(self, '_style_descs'):
+                self._style_descs = []
+            self._style_descs.append(desc)
+
+        # Impact badge
+        impact = suggestion.get("impact", "low")
+        impact_colors = {
+            "low": "#4ADE80",
+            "medium": "#FBBF24",
+            "high": "#F87171",
+        }
+        badge_color = impact_colors.get(impact, "#888888")
+
+        rl.addWidget(cb)
+        text_w = QWidget()
+        text_w.setStyleSheet("background: transparent;")
+        text_w.setLayout(text_col)
+        text_col.addWidget(title)
+        if desc_text:
+            text_col.addWidget(desc)
+        rl.addWidget(text_w, 1)
+
+        # Small impact dot
+        dot = QLabel("●")
+        dot.setFont(QFont("", 8))
+        dot.setStyleSheet(f"background: transparent; color: {badge_color};")
+        dot.setFixedWidth(14)
+        dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dot.setToolTip(f"{impact} impact")
+        rl.addWidget(dot)
+
+        return row
+
+    def _on_apply(self):
+        if self._applied:
+            return
+        selected = []
+        for i, cb in enumerate(self._checkboxes):
+            if cb.isChecked() and i < len(self.suggestions):
+                selected.append(self.suggestions[i])
+        if not selected:
+            return
+        self._applied = True
+        self._rows_widget.hide()
+        self._btn_row.hide()
+        self._result_widget.show()
+        self.apply_requested.emit(selected)
+        self._resize_parent()
+
+    def _on_dismiss(self):
+        self._rows_widget.hide()
+        self._btn_row.hide()
+        self._r_icon.setText("—")
+        self._r_icon.setStyleSheet("background: transparent; color: #888888;")
+        self._r_text.setText("Dismissed")
+        self._r_text.setStyleSheet("background: transparent; color: #888888;")
+        self._result_widget.show()
+        self._resize_parent()
+
+    def _resize_parent(self):
+        self.updateGeometry()
+        QTimer.singleShot(40, self._do_resize)
+
+    def _do_resize(self):
+        try:
+            win = self.window()
+            if win is None:
+                return
+            lw = getattr(win, 'list_widget', None)
+            if lw is not None:
+                for i in range(lw.count()):
+                    iw = lw.itemWidget(lw.item(i))
+                    actual = getattr(iw, 'content_widget', iw)
+                    if actual is self:
+                        lw.item(i).setSizeHint(self.sizeHint())
+                        break
+            if hasattr(win, 'adjust_window_height'):
+                win.adjust_window_height()
+        except RuntimeError:
+            pass
+
+    def show_error(self, msg: str):
+        self._r_icon.setText("✕")
+        self._r_icon.setStyleSheet("background: transparent; color: #F87171;")
+        self._r_text.setText(msg)
+        self._r_text.setStyleSheet("background: transparent; color: #F87171;")
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        t = THEMES.get(self.current_theme, THEMES["light"])
+
+        if is_dark:
+            card_bg = "rgba(255,255,255,0.04)"
+            border = "rgba(255,255,255,0.10)"
+        else:
+            card_bg = "rgba(0,0,0,0.03)"
+            border = "rgba(0,0,0,0.08)"
+
+        self.card.setStyleSheet(
+            f"QWidget#OptimizeCard {{ background-color: {card_bg}; "
+            f"border-radius: 14px; border: 1px solid {border}; }}"
+        )
+
+        tc = "#FFFFFF" if is_dark else "#111111"
+        sc = "#888888" if is_dark else "#999999"
+        self._title_lbl.setStyleSheet(f"color: {tc}; background: transparent;")
+
+        for title in getattr(self, '_style_titles', []):
+            title.setStyleSheet(f"background: transparent; color: {tc};")
+        for desc in getattr(self, '_style_descs', []):
+            desc.setStyleSheet(f"background: transparent; color: {sc};")
+
+        # Checkbox style
+        checked_bg = "qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #5B21B6,stop:1 #C026D3)"
+        unchecked_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
+        unchecked_border = "rgba(255,255,255,0.20)" if is_dark else "rgba(0,0,0,0.15)"
+        for cb in self._checkboxes:
+            cb.setStyleSheet(f"""
+                QPushButton {{
+                    background: {unchecked_bg};
+                    border: 1px solid {unchecked_border};
+                    border-radius: 5px;
+                    font-size: 11px;
+                    color: transparent;
+                }}
+                QPushButton:checked {{
+                    background: {checked_bg};
+                    border: none;
+                    color: #FFFFFF;
+                }}
+                QPushButton:checked::after {{ content: "✓"; }}
+            """)
+            # Set text for checked state visual
+            cb.setText("✓" if cb.isChecked() else "")
+            cb.toggled.connect(lambda checked, b=cb: b.setText("✓" if checked else ""))
+
+        # Button styles
+        self.apply_btn.setStyleSheet(f"""
+            QPushButton#OptimizeApplyBtn {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #5B21B6, stop:1 #C026D3);
+                color: #FFFFFF; border: none; border-radius: 9px;
+                font-family: Manrope; font-size: 11px; font-weight: 700;
+                padding: 0 18px;
+            }}
+            QPushButton#OptimizeApplyBtn:hover {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #6D28D9, stop:1 #D946EF);
+            }}
+        """)
+        cc = "#AAAAAA" if is_dark else "#666666"
+        ch = "#FFFFFF" if is_dark else "#111111"
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton#OptimizeCancelBtn {{
+                background: transparent; color: {cc};
+                border: none; border-radius: 9px;
+                font-family: Manrope; font-size: 11px; font-weight: 500;
+                padding: 0 14px;
+            }}
+            QPushButton#OptimizeCancelBtn:hover {{
+                color: {ch};
+            }}
+        """)
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0:
+                return QSize(w, h + 16)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+

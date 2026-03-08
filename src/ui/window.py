@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -3804,6 +3804,49 @@ class OmniWindow(QWidget):
                                     item.setSizeHint(widget.sizeHint())
                             except Exception as _te:
                                 logging.warning(f"[settings] Failed to add settings widget: {_te}")
+                        elif act.get('type') == 'optimize_system':
+                            suggestions = act.get('suggestions', [])
+                            if suggestions:
+                                w = OptimizeSystemWidget(suggestions)
+                                def _make_optimize_cb(_widget):
+                                    def _cb(selected):
+                                        import subprocess, logging
+                                        trust = settings_store.get("trust_level", 1)
+                                        cmds = [s.get("command", "") for s in selected if s.get("command")]
+                                        if not cmds:
+                                            return
+                                        if trust < 2:
+                                            perm = TrustPermissionChatWidget(
+                                                2, f"run {len(cmds)} optimization(s)",
+                                                getattr(self, "current_theme", "dark"),
+                                            )
+                                            self._perm_widget = perm
+                                            def _on_allow():
+                                                for cmd in cmds:
+                                                    try:
+                                                        subprocess.run(cmd, shell=True, capture_output=True, timeout=15)
+                                                    except Exception as e:
+                                                        logging.error(f"[optimize] {cmd}: {e}")
+                                                _widget._r_text.setText(f"{len(cmds)} optimization(s) applied")
+                                                self.adjust_window_height()
+                                            def _on_deny():
+                                                _widget.show_error("Permission denied")
+                                                self.adjust_window_height()
+                                            perm.allowed.connect(_on_allow)
+                                            perm.denied.connect(_on_deny)
+                                            perm.open_settings.connect(self._navigate_to_trust_settings)
+                                            self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
+                                        else:
+                                            for cmd in cmds:
+                                                try:
+                                                    subprocess.run(cmd, shell=True, capture_output=True, timeout=15)
+                                                except Exception as e:
+                                                    logging.error(f"[optimize] {cmd}: {e}")
+                                            _widget._r_text.setText(f"{len(cmds)} optimization(s) applied")
+                                    return _cb
+                                w.apply_requested.connect(_make_optimize_cb(w))
+                                self.insert_list_item(insert_pos, w, act, animation="pop")
+                                insert_pos += 1
                         elif act.get('type') == 'terminal_command':
                             if not act.get('command', '').strip():
                                 continue
