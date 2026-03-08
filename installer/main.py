@@ -893,6 +893,9 @@ class InstallWorker(QThread):
         self.progress.emit(85, "Installing voice engine…")
         self._run_cmd([pip_cmd, "install", "git+https://github.com/QwenLM/Qwen3-ASR.git", "--quiet", "--no-cache-dir"], env=env)
 
+        self.progress.emit(90, "Downloading voice activation models…")
+        self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models()"], env=env)
+
         self.progress.emit(96, "Finalising…")
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         settings_file = CONFIG_DIR / "settings.json"
@@ -1945,6 +1948,13 @@ class OmniInstallerWindow(QMainWindow):
         # subprocess.Popen uses posix_spawn (Cocoa-safe, unlike os.fork after
         # Cocoa init) and still gives us a direct parent-child relationship.
         self.hide()
+        # Remove the installer from the Dock while it stays alive as a parent
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
+            except Exception:
+                pass
         run_sh = INSTALL_DIR / "run.sh"
         try:
             child_env = {

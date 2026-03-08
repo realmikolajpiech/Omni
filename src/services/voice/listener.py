@@ -60,14 +60,16 @@ try:
     from src.core.config import (
         IPC_PORT,
         OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD,
-        GROQ_API_KEY,
+        BACKEND_URL, OMNI_SECRET, DEVICE_ID,
     )
 except ImportError:
     IPC_PORT = 5556
     OWW_WAKE_WORD_MODEL = "Hey_Omni"
     OWW_CUSTOM_MODEL_PATH = ""
     OWW_DETECTION_THRESHOLD = 0.5
-    GROQ_API_KEY = ""
+    BACKEND_URL = "https://omni-backend.heyomni.workers.dev"
+    OMNI_SECRET = ""
+    DEVICE_ID = ""
 
 # --- CONFIGURATION ---
 SAMPLE_RATE = 16000
@@ -154,16 +156,13 @@ class VoiceService:
             self.oww_model = None
             self._oww_key = None
 
-        # 2. Groq Whisper (fallback transcription when native ASR is unavailable)
-        try:
-            from groq import Groq as _GroqClient
-            if GROQ_API_KEY:
-                self.groq_client = _GroqClient(api_key=GROQ_API_KEY)
-                logger.info("Groq Whisper fallback transcription ready.")
-            else:
-                logger.info("GROQ_API_KEY not set — Groq transcription fallback disabled.")
-        except ImportError:
-            logger.info("groq package not installed — Groq transcription fallback disabled.")
+        # 2. Groq Whisper via backend proxy (fallback when native ASR is unavailable)
+        if OMNI_SECRET:
+            self.groq_client = True  # marker — we use requests-based proxy
+            logger.info("Groq Whisper fallback transcription ready (via backend proxy).")
+        else:
+            self.groq_client = None
+            logger.info("OMNI_SECRET not set — Groq transcription fallback disabled.")
 
     def _get_locale_id(self) -> str:
         """Read language preference from settings and return macOS locale ID."""
@@ -247,20 +246,45 @@ class VoiceService:
         return final_text
 
     def transcribe_audio_groq(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
-        """Transcribe audio using Groq Whisper API (fallback when native ASR unavailable)."""
+        """Transcribe audio using Groq Whisper API via backend proxy."""
         if not self.groq_client:
             return None
         try:
             import io as _io
+            import urllib.request
+            import urllib.error
+
             buf = _io.BytesIO()
             sf.write(buf, audio_data, sample_rate, format='wav')
-            buf.seek(0)
-            response = self.groq_client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",
-                file=("audio.wav", buf),
-                response_format="text",
+            wav_bytes = buf.getvalue()
+
+            # Build multipart/form-data manually (no external deps)
+            boundary = "----OmniAudioBoundary"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="model"\r\n\r\n'
+                f"whisper-large-v3-turbo\r\n"
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="response_format"\r\n\r\n'
+                f"text\r\n"
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+                f"Content-Type: audio/wav\r\n\r\n"
+            ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+            req = urllib.request.Request(
+                f"{BACKEND_URL}/v1/audio/transcriptions",
+                data=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "X-Omni-Secret": OMNI_SECRET,
+                    "X-Device-ID": DEVICE_ID,
+                },
+                method="POST",
             )
-            return response.strip() if isinstance(response, str) else response.text.strip()
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                text = resp.read().decode().strip()
+            return text if text else None
         except Exception as e:
             logger.error(f"Groq transcription error: {e}")
             return None

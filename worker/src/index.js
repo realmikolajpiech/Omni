@@ -3,6 +3,7 @@
  *
  * Routes:
  *   POST /v1/chat/completions   AI chat proxy (xAI Grok or Groq, rate-limited for free tier)
+ *   POST /v1/audio/transcriptions  Groq Whisper transcription proxy
  *   POST /v1/search             Serper web search proxy
  *   GET  /v1/status             Subscription status + daily usage
  *   POST /v1/webhook/payment    Generic payment provider webhook
@@ -70,6 +71,9 @@ export default {
 
     if (path === "/v1/chat/completions" && method === "POST")
       return handleChat(request, env);
+
+    if (path === "/v1/audio/transcriptions" && method === "POST")
+      return handleTranscription(request, env);
 
     if (path === "/v1/search" && method === "POST")
       return handleSearch(request, env);
@@ -257,6 +261,28 @@ function limitReachedResponse(stream) {
 
   return resp({
     choices: [{ message: { role: "assistant", content: msg }, finish_reason: "stop" }],
+  });
+}
+
+// ── Audio transcription proxy ─────────────────────────────────────────────────
+
+async function handleTranscription(request, env) {
+  // Forward the multipart form data directly to Groq Whisper API
+  const upstream = await fetch(`${GROQ_BASE}/audio/transcriptions`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      "Content-Type": request.headers.get("Content-Type"),
+    },
+    body: request.body,
+  });
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("Content-Type") || "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
   });
 }
 
