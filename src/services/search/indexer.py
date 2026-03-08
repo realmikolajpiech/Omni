@@ -69,7 +69,7 @@ def _remote_encode(texts: list) -> list:
     with urllib.request.urlopen(req, timeout=120) as resp:
         result = json.loads(resp.read().decode("utf-8"))
     # Throttle: yield to the brain so UI requests aren't starved between batches.
-    time.sleep(0.3)
+    time.sleep(0.1)
     return result["vectors"]
 
 
@@ -408,7 +408,7 @@ def main():
         phase_start = time.time()
         _write_phase_progress(progress, 1, 0.0, "?", "Indexing file names")
 
-        BATCH_SIZE = 128
+        BATCH_SIZE = 256
 
         # Resume: open existing table and find already-indexed paths
         existing_filename_paths = _get_existing_paths(db, TABLE_NAME)
@@ -527,7 +527,7 @@ def main():
             chunk_table = None
 
     if not progress.get("phase2_complete"):
-        CHUNK_BATCH_SIZE = 16
+        CHUNK_BATCH_SIZE = 64
         current_batch_chunks = []
         current_batch_metadata = []
         total_chunks_indexed = 0
@@ -564,6 +564,23 @@ def main():
                 f"  [llm-filter] Done in {_elapsed(filter_start)}: "
                 f"{len(llm_skip_paths)}/{len(llm_candidates)} additional files filtered out"
             )
+
+        # Reset the ETA clock to after the LLM filter so the rate reflects
+        # actual encoding speed rather than being diluted by filter time.
+        phase_start = time.time()
+
+        # Recompute the denominator to only count files that will actually be
+        # embedded — excluding already-indexed, statically-skipped, and
+        # LLM-filtered files. Using total_text_count (all text files) inflates
+        # the ETA by 5-10× when most files are boilerplate/already done.
+        total_to_embed = max(1, sum(
+            1 for p, f in text_files
+            if p not in existing_chunk_paths
+            and not _static_skip(p, f)
+            and p not in llm_skip_paths
+        ))
+        logging.info(f"  [content] {total_to_embed:,} files to embed this run "
+                     f"(out of {total_text_count:,} total text files)")
 
         total_tokens = 0
         skipped_content = 0
@@ -625,10 +642,10 @@ def main():
                             chunk_table.add(batch_data)
 
                         total_chunks_indexed += len(batch_data)
-                        pct = 100.0 * content_files / total_text_count if total_text_count else 0
-                        eta = _eta(phase_start, content_files, total_text_count)
+                        pct = 100.0 * content_files / total_to_embed
+                        eta = _eta(phase_start, content_files, total_to_embed)
                         logging.info(
-                            f"  [content] {content_files:,} / {total_text_count:,} files "
+                            f"  [content] {content_files:,} / {total_to_embed:,} files "
                             f"({pct:.1f}%), {total_chunks_indexed:,} chunks, "
                             f"~{total_tokens:,} tokens  "
                             f"({_elapsed(phase_start)})  ETA {eta}"
