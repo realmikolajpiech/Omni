@@ -21,7 +21,7 @@ from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
-from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, FollowUpWidget, AnswerWidget, StandardItemWidget, RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget, TrustPermissionChatWidget)
+from src.ui.widgets.misc_widgets import (ThinkingWidget, SeparatorWidget, SmoothEntryWidget, FollowUpWidget, AnswerWidget, StandardItemWidget, RotatingLabel, GradientBorderFrame, ReplyActionWidget, IconManager, MicWidget, TrustPermissionChatWidget, CommandPaletteItemWidget)
 from src.ui.widgets.list_widget import SmoothScrollListWidget
 from src.ui.widgets.settings_panel import SettingsPanel
 
@@ -376,7 +376,52 @@ class OmniWindow(QWidget):
         self.is_settings_mode = False
         self.is_clipboard_mode = False
         self._reset_on_next_show = False
+        self.is_command_palette = False  # True when "/" command palette is shown
         self._closed_by_deactivation = False  # True when closed by focus-loss, False when closed by shortcut
+
+        # Command palette definitions: (icon, name, description, template, category)
+        # icon = single clean character, category = color group
+        self._commands = [
+            # --- Core ---
+            ("✦",  "Ask Omni",             "Ask AI anything",                           "",                             "ai"),
+            ("⌕",  "Search the web",       "Find anything on the internet",             "search for ",                  "search"),
+            ("▶",  "Open application",     "Launch an app",                             "open ",                        "system"),
+            ("◎",  "Find files",           "Locate files by name",                      "find ",                        "file"),
+            # --- Quick actions ---
+            ("文",  "Translate",            "e.g. \"hello\" to Spanish",                  "translate ... to ",            "convert"),
+            ("=",  "Calculate",            "Math expressions and formulas",             "",                             "convert"),
+            ("$",  "Convert currency",     "e.g. 100 usd to eur",                      "convert ",                     "convert"),
+            ("↔",  "Convert units",        "e.g. 10 km to miles",                       "convert ",                     "convert"),
+            ("☀",  "Weather",              "Current conditions for any city",            "weather in ",                  "search"),
+            ("◷",  "Set a timer",          "Start a countdown",                         "set timer for ",               "tool"),
+            ("⁂",  "Generate password",    "Create a secure random password",            "generate password",            "tool"),
+            ("⊞",  "Generate QR code",     "Turn any text or URL into QR",              "generate qr code for ",        "tool"),
+            ("◉",  "Color preview",        "Preview HEX, RGB or HSL values",            "#",                            "media"),
+            # --- Communication ---
+            ("✉",  "Send email",           "Compose and send via Mail",                 "send email to ",               "comms"),
+            ("↓",  "Check emails",         "Read unread emails",                        "check my unread emails",       "comms"),
+            ("▦",  "Calendar events",      "View upcoming schedule",                    "what are my upcoming events",  "comms"),
+            ("+",  "Create event",         "Add a new calendar event",                  "create event ",                "comms"),
+            # --- AI tools ---
+            ("⌘",  "Run command",          "Execute a shell command",                   "run ",                         "system"),
+            ("□",  "Create file",          "Create a new file with content",            "create a file called ",        "file"),
+            ("✎",  "Edit file",            "Modify an existing file",                   "edit ",                        "file"),
+            ("≋",  "Search in files",      "Semantic search through documents",         "search my files for ",         "search"),
+            ("▣",  "Search images",        "Find photos by description",                "find photos of ",              "media"),
+            ("◆",  "Remember this",        "Save a fact to memory",                     "remember that ",               "memory"),
+            ("◇",  "Recall memory",        "What do I know about you",                  "what do you remember about ",  "memory"),
+            ("⤓",  "Compress files",       "Zip files or folders",                      "compress ",                    "file"),
+            ("⟲",  "Convert file",         "Change format — image, doc, audio, video",  "convert ",                     "convert"),
+            ("⊟",  "Organize folder",      "Auto-sort files into subfolders",           "organize ",                    "file"),
+            # --- Apps & system ---
+            ("↧",  "Install app",          "Install via Homebrew",                      "install ",                     "system"),
+            ("×",  "Uninstall app",        "Remove an application",                     "uninstall ",                   "system"),
+            ("⇱",  "Computer control",  "Click, type, scroll on screen",              "click on ",                    "tool"),
+            ("⚙",  "Optimize system",      "Clean up and speed up your Mac",            "optimize system",              "tool"),
+            # --- Omni ---
+            ("☰",  "Settings",             "Open Omni preferences",                     "/settings",                    "default"),
+            ("▧",  "Clipboard history",    "Browse recent clipboard",                   "/clipboard",                   "default"),
+        ]
 
         # Start clipboard history monitoring
         self._clipboard_manager = ClipboardManager.instance()
@@ -830,6 +875,7 @@ class OmniWindow(QWidget):
         self.is_entry_animating = False  # Reset so adjust_window_height is not blocked
 
         self.is_history_mode = False
+        self.is_command_palette = False
         self.follow_up_widget.set_mode("hidden")
         self.frame.set_minimal_mode(True)
         self.input_field.setPlaceholderText("Search or ask...")
@@ -1334,6 +1380,15 @@ class OmniWindow(QWidget):
                         self._handle_clipboard_item_selected(current_item, paste=True)
                     return True
 
+                # Command palette: Enter selects the current (or first) command
+                if self.is_command_palette:
+                    current_item = self.list_widget.currentItem()
+                    if not current_item and self.list_widget.count() > 0:
+                        current_item = self.list_widget.item(0)
+                    if current_item:
+                        self.on_entered(current_item)
+                    return True
+
                 # ENTER on input field - trigger selected item or AI query
                 current_item = self.list_widget.currentItem()
                 if current_item:
@@ -1356,6 +1411,14 @@ class OmniWindow(QWidget):
             elif event.key() == Qt.Key.Key_Escape:
                 logging.info("Escape key pressed (Input Field)")
 
+                if self.is_command_palette:
+                    self.is_command_palette = False
+                    self.input_field.clear()
+                    self.list_widget.clear()
+                    self.frame.set_minimal_mode(True)
+                    self.adjust_window_height(animate=True)
+                    return True
+
                 if self.is_clipboard_mode:
                     self.exit_clipboard_mode()
                     return True
@@ -1377,6 +1440,15 @@ class OmniWindow(QWidget):
                     self.animate_close()
                 return True
             elif event.key() == Qt.Key.Key_Tab:
+                # Command palette: Tab selects the current (or first) command
+                if self.is_command_palette:
+                    current_item = self.list_widget.currentItem()
+                    if not current_item and self.list_widget.count() > 0:
+                        current_item = self.list_widget.item(0)
+                    if current_item:
+                        self.on_entered(current_item)
+                    return True
+
                 # Check for Place card interaction (Tab -> Open Website)
                 current_item = self.list_widget.currentItem()
                 if current_item:
@@ -2011,7 +2083,14 @@ class OmniWindow(QWidget):
             # self.is_history_mode = False  <-- REMOVED
             # self.follow_up_widget.set_active(False) <-- REMOVED
             return
-        
+
+        # --- Command Palette: "/" prefix triggers it ---
+        if text.startswith("/"):
+            self._show_command_palette(text[1:])
+            return
+        elif self.is_command_palette:
+            self.is_command_palette = False
+
         if not text.strip():
             self.external_actions = []
             self.external_search_results = []
@@ -2044,12 +2123,107 @@ class OmniWindow(QWidget):
                 self.og_worker.og_result.connect(self.on_og_result)
                 self.og_worker.no_result.connect(lambda _q: None)
                 self.og_worker.start()
-        
+
         self.frame.set_minimal_mode(True)
         # self.refresh_list(text, animate=True)
         self.follow_up_widget.set_mode("ask_omni")
         self.local_search_timer.start() # Debounce local search slightly
         self.debounce_timer.start()
+
+    # ------------------------------------------------------------------
+    # Command Palette ("/" menu)
+    # ------------------------------------------------------------------
+    def _show_command_palette(self, filter_text=""):
+        """Show the command palette with fuzzy-filtered commands."""
+        self.is_command_palette = True
+        self.frame.set_minimal_mode(False)
+        self.follow_up_widget.set_mode("hidden")
+
+        # Stop any pending search/action workers
+        self.debounce_timer.stop()
+        self.local_search_timer.stop()
+
+        ft = filter_text.lower().strip()
+        new_items_data = []
+
+        for icon, name, desc, template, cat in self._commands:
+            # Fuzzy match: filter text must appear in name, description or template
+            if ft and ft not in name.lower() and ft not in desc.lower() and ft not in template.lower():
+                continue
+            key = f"cmd:{name}"
+            data = {"type": "command_palette", "name": name, "template": template}
+
+            def _factory(ic=icon, nm=name, ds=desc, ct=cat):
+                return CommandPaletteItemWidget(ic, nm, ds, category=ct)
+
+            new_items_data.append((key, data, _factory))
+
+        self.sync_list_items(new_items_data)
+        self.adjust_window_height(animate=True)
+
+    def _activate_command(self, data):
+        """Activate a command palette item — insert its template into the input."""
+        template = data.get("template", "")
+        name = data.get("name", "")
+
+        # Special commands
+        if template == "/settings":
+            self.input_field.clear()
+            self.is_command_palette = False
+            self.enter_settings_mode()
+            return
+        if template == "/clipboard":
+            self.input_field.clear()
+            self.is_command_palette = False
+            self.enter_clipboard_mode()
+            return
+
+        # Normal template: replace input text, exit palette mode
+        self.is_command_palette = False
+
+        if not template:
+            # Empty template (e.g. "Ask Omni") — just clear and focus for typing
+            self.input_field.blockSignals(True)
+            self.input_field.clear()
+            self.input_field.blockSignals(False)
+            self.list_widget.clear()
+            self.frame.set_minimal_mode(True)
+            self.adjust_window_height(animate=True)
+            self.input_field.setFocus()
+            return
+
+        # Templates with "..." placeholder — select the placeholder so user types over it
+        placeholder_pos = template.find("...")
+        has_placeholder = placeholder_pos >= 0
+
+        self.input_field.blockSignals(True)
+        if has_placeholder:
+            # Show the template with placeholder for visual guidance
+            self.input_field.setText(template)
+            # Select the "..." so user's next keystroke replaces it
+            self.input_field.setSelection(placeholder_pos, 3)
+        else:
+            self.input_field.setText(template)
+            self.input_field.setCursorPosition(len(template))
+            self.input_field.deselect()
+        self.input_field.blockSignals(False)
+        self.input_field.setFocus()
+
+        if has_placeholder:
+            # Don't trigger search yet — wait for user to fill in the placeholder
+            self.list_widget.clear()
+            self.frame.set_minimal_mode(True)
+            self.adjust_window_height(animate=True)
+            return
+
+        # If template is a complete command (no trailing space), submit it
+        if not template.endswith(" "):
+            self.on_text_changed(template)
+            # Trigger action immediately
+            QTimer.singleShot(50, lambda: self.on_text_changed(template))
+        else:
+            # Trigger normal search flow
+            self.on_text_changed(template)
 
     def refresh_list(self, query, animate=True):
         if not query:
@@ -2341,6 +2515,7 @@ class OmniWindow(QWidget):
         if data.get('type') == 'qrcode': return f"qrcode:{data.get('data')}"
         if data.get('type') == 'install': return f"install:{data.get('name')}"
         if data.get('type') == 'uninstall': return f"uninstall:{data.get('name')}"
+        if data.get('type') == 'command_palette': return f"cmd:{data.get('name')}"
         # Fallback for others
         return str(data)
 
@@ -2713,6 +2888,13 @@ class OmniWindow(QWidget):
 
         if not item:
             item = self.list_widget.currentItem()
+
+        # Command palette mode: activate the selected command
+        if self.is_command_palette and item:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get('type') == 'command_palette':
+                self._activate_command(data)
+                return
 
         # Clipboard mode: single click copies to clipboard (no paste, no close)
         # Double click is handled by _on_clipboard_double_click (copy + paste)
@@ -3180,6 +3362,45 @@ class OmniWindow(QWidget):
         # Stop debounce timers to prevent new fast/local searches from starting
         self.debounce_timer.stop()
         self.local_search_timer.stop()
+
+        # ── Fast-action bypass ────────────────────────────────────────────────
+        # If the query already produced a widget-type fast action (currency, unit,
+        # translate, calc), skip the AI entirely and just display that widget
+        # nicely without any reasoning model involvement.
+        _FAST_WIDGET_TYPES = {'currency', 'unit', 'translate', 'calc'}
+        _fast_actions = [a for a in self.external_actions if isinstance(a, dict) and a.get('type') in _FAST_WIDGET_TYPES]
+        if _fast_actions and not self.is_history_mode:
+            self.cleanup_worker('search_worker')
+            self.cleanup_worker('action_worker')
+            self.cleanup_worker('file_search_worker')
+            self.list_widget.clear()
+            self.frame.set_minimal_mode(False)
+            self.logo_label.stop_spinning()
+            for act in _fast_actions:
+                t = act.get('type')
+                if t == 'currency':
+                    w = CurrencyActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                elif t == 'unit':
+                    w = UnitActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                elif t == 'translate':
+                    w = TranslateActionWidget(act.get('source_text', ''), act.get('from_lang', ''), act.get('to_lang', ''), act.get('translated_text', ''))
+                elif t == 'calc':
+                    w = CalcActionWidget(act.get('content', ''), act.get('equation', ''))
+                else:
+                    continue
+                self.insert_list_item(0, w, act, animation="pop")
+            self.is_history_mode = True
+            self.input_field.setReadOnly(False)
+            self.input_field.blockSignals(True)
+            self.input_field.clear()
+            self.input_field.blockSignals(False)
+            self.input_field.setPlaceholderText("Ask a follow-up...")
+            if self.isVisible():
+                self.input_field.setFocus()
+            self.follow_up_widget.set_mode("followup")
+            self.adjust_window_height(animate=True)
+            return
+        # ─────────────────────────────────────────────────────────────────────
 
         # Remember the query text now — input_field may be cleared before on_ai_response fires
         self._current_query = query

@@ -3,7 +3,6 @@ import time
 import json
 import logging
 import re
-import socket
 import threading
 from typing import Optional
 from flask import Blueprint, request, jsonify, Response
@@ -17,15 +16,6 @@ from src.services.system.app_launcher import find_and_launch_app, resolve_app_me
 from src.services.system.installer import generate_install_plan, log_debug, KNOWN
 
 api_bp = Blueprint('api', __name__)
-
-
-def _is_connected(host="8.8.8.8", port=53, timeout=1.5) -> bool:
-    """Quick check for internet connectivity via DNS port."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 # Pending fast actions (when fast model requests web_search)
 _PENDING_ACTIONS_LOCK = threading.Lock()
@@ -910,25 +900,6 @@ def ask_llm():
     # Check if streaming is requested
     stream = req.get("stream", False)
 
-    fast_acts = check_fast_regex_actions(query)
-    if fast_acts:
-        from src.services.llm.chat import _postprocess_actions
-        _postprocess_actions(fast_acts, "")
-        response = {"answer": "", "actions": fast_acts, "thinking": ""}
-        if stream:
-            def _fast_acts_stream():
-                yield f'data: {json.dumps({"type": "final", **response})}\n\n'
-            return Response(_fast_acts_stream(), mimetype="text/event-stream")
-        return jsonify(response)
-
-    if not _is_connected():
-        no_internet_msg = "No internet connection. Please check your network and try again."
-        if stream:
-            def _no_internet_stream():
-                yield f'data: {json.dumps({"type": "final", "answer": no_internet_msg, "actions": []})}\n\n'
-            return Response(_no_internet_stream(), mimetype="text/event-stream")
-        return jsonify({"answer": no_internet_msg})
-
     if stream:
         # Streaming response
 
@@ -1099,25 +1070,118 @@ def _is_search_engine_url(url: str) -> bool:
 
 
 
-def check_fast_regex_actions(query: str):
-    """Return a list of action dicts for queries that can be resolved without LLM/internet.
-    Returns an empty list if no regex shortcut matches."""
+@api_bp.route('/action', methods=['POST'])
+def action_endpoint():
+    # Create a unique request ID
+    import uuid
+    request_id = str(uuid.uuid4())
+    
+    global current_fast_request_id
+    
+    # Set this as the current request and signal any old requests to abort
+    with model_manager.fast_queue_lock:
+        old_request_id = model_manager.current_fast_request_id
+        model_manager.current_fast_request_id = request_id
+        
+        # Log cancellation but rely on ID check in model loop to abort old request
+        if old_request_id is not None:
+            logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
+            # Do NOT set abort_fast_event here, as it kills the *current* request too in the check below.
+            # model_manager.abort_fast_event.set()
+    
+    # Check if abort was already set (meaning main AI model is starting)
+    # If so, this action request should be aborted immediately
+    if model_manager.abort_fast_event.is_set():
+        logging.info(f"Action endpoint {request_id}: Abort event already set, skipping action request")
+        return jsonify({"actions": [], "chips": []})
+    
+    # Clear abort event for this new request to proceed
+    # (set() was only for cancelling the old request)
+    model_manager.abort_fast_event.clear()
+    
+    model_manager.ensure_fast_model()
+
+    try: req = request.get_json(force=True)
+    except: return jsonify({"actions": [], "chips": []}), 400
+
+    query = req.get('query', "").strip()
+    if not query: return jsonify({"actions": [], "chips": []})
+
+    logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
+    endpoint_start_time = time.time()
+    
+    # 1. Shortcuts
+    if query.lower() in COMMON_SHORTCUTS:
+        url = COMMON_SHORTCUTS[query.lower()]
+        act = {
+                "type": "link",
+                "url": url,
+                "title": url.replace("https://", "").replace("www.", "").split('/')[0].title(),
+                "description": f"Direct Shortcut"
+            }
+        logging.info(f"Shortcut match: {url}")
+        chips = []
+        return jsonify({"action": act, "actions": [act], "chips": chips})
+
+    # 1.5 System Settings (instant – no LLM needed)
+    import re
+    try:
+        from src.services.system.macos_settings import detect_settings_command
+        settings_act = detect_settings_command(query)
+        if settings_act:
+            logging.info(f"[settings] Fast-path action detected: {settings_act['setting']}")
+            return jsonify({"actions": [settings_act], "action": settings_act, "chips": []})
+    except Exception as _e:
+        logging.warning(f"[settings] detect_settings_command failed: {_e}")
+
+    # 1.6 Computer Control Hard Override
+    cc_keywords = ["click", "type", "scroll", "press", "copy", "paste", "move mouse", "drag", "select"]
+    if any(k in query.lower() for k in cc_keywords):
+        logging.info("Computer Control keyword detected. Skipping Fast Model.")
+        return jsonify({"actions": [], "chips": []})
+
+    # 1.6b File Conversion Hard Override — let main model's convert_file tool handle it
+    convert_keywords = ["convert", "konwertuj", "przekonwertuj", "zamień format", "zmień format",
+                        "export to", "eksportuj", "change format", "save as"]
+    ql = query.lower()
+    if any(k in ql for k in convert_keywords):
+        # Check it's about file conversion (not currency/unit conversion)
+        file_ext_pattern = r"\.(mp[34g]|avi|mov|mkv|webm|wav|ogg|flac|m4a|aac|png|jpe?g|webp|bmp|tiff?|gif|pdf|docx?|xlsx?|csv|html?|md|rtf|ico)\b"
+        format_keywords = ["to mp", "to wav", "to ogg", "to flac", "to png", "to jpg", "to jpeg",
+                           "to pdf", "to docx", "to html", "to gif", "to avi", "to mkv", "to webm",
+                           "to mov", "to csv", "to xlsx", "to txt", "to bmp", "to webp", "to tiff",
+                           "to ico", "to m4a", "to aac", "to rtf", "to md",
+                           "na mp", "na wav", "na ogg", "na flac", "na png", "na jpg", "na jpeg",
+                           "na pdf", "na docx", "na html", "na gif", "na avi", "na mkv", "na webm",
+                           "na mov", "na csv", "na xlsx", "na txt", "na bmp", "na webp", "na tiff"]
+        if re.search(file_ext_pattern, ql) or any(k in ql for k in format_keywords):
+            logging.info("File conversion keyword detected. Skipping Fast Model, routing to Main Model tool calling.")
+            return jsonify({"actions": [], "chips": []})
+
+    # 1.7 Regex Shortcuts (Speed Optimization)
     # Open App
     open_match = re.search(r"^(?:open|run|launch|start)\s+(?!http|www)(.+)$", query, re.IGNORECASE)
     if open_match:
         app = open_match.group(1).strip()
-        if not ("." in app and " " not in app):  # not a URL in disguise
-            cache = get_app_cache()
-            app_lower = app.lower()
-            is_installed = (
-                app_lower in cache or
-                any(k.startswith(app_lower) for k in cache) or
-                (len(app_lower) >= 3 and any(app_lower in k for k in cache))
-            )
-            act = {"type": "open_app", "name": app} if is_installed else {"type": "install", "name": app}
-            logging.info(f"Regex shortcut Open App ({'installed' if is_installed else 'install'}): {app}")
-            return [act]
-
+        # Check if it's a website in disguise
+        if "." in app and " " not in app:
+             pass # Let LLM handle it as OPEN:url
+        else:
+             cache = get_app_cache()
+             app_lower = app.lower()
+             is_installed = (
+                 app_lower in cache or
+                 any(k.startswith(app_lower) for k in cache) or
+                 (len(app_lower) >= 3 and any(app_lower in k for k in cache))
+             )
+             if is_installed:
+                 logging.info(f"Regex Open App: {app}")
+                 act = {"type": "open_app", "name": app}
+             else:
+                 logging.info(f"Regex Open App (not installed → suggest install): {app}")
+                 act = {"type": "install", "name": app}
+             return jsonify({"actions": [act], "chips": []})
+    
     # Install
     install_match = re.search(
         r"^(?:install|zainstaluj|pobierz|pobierać|ściągnij|sciagnij|download)\s+(.+)$",
@@ -1125,10 +1189,11 @@ def check_fast_regex_actions(query: str):
     )
     if install_match:
         app = install_match.group(1).strip()
-        logging.info(f"Regex shortcut Install: {app}")
-        return [{"type": "install", "name": app}]
+        logging.info(f"Regex Install: {app}")
+        act = {"type": "install", "name": app}
+        return jsonify({"actions": [act], "chips": []})
 
-    # Bare known-app name not installed
+    # 1.7.1 Bare known-app name — if user types e.g. "chrome" or "spotify" and it's not installed
     _bare = query.strip().lower()
     if (len(_bare.split()) <= 2 and
             not any(c in _bare for c in '.:/\\?') and
@@ -1140,88 +1205,238 @@ def check_fast_regex_actions(query: str):
             (len(_bare) >= 3 and any(_bare in k for k in _cache))
         )
         if not _installed:
-            logging.info(f"Regex shortcut: known app '{_bare}' not installed → suggest install")
-            return [{"type": "install", "name": query.strip()}]
+            logging.info(f"Known app '{_bare}' not installed → suggest install")
+            return jsonify({"actions": [{"type": "install", "name": query.strip()}], "chips": []})
 
-    # Implicit Calculation (pure math expression)
+    # 1.7.5 Implicit Calculation
+    # Check for simple math expressions like "12*3", "100/4", "5+5", "10-2"
+    # We want to avoid matching dates or phone numbers if possible, but strict math is usually fine.
+    # Regex: Start with digits/parens, contains at least one operator, ends with digits/parens.
+    # Allowed chars: 0-9 . ( ) + - * / ^ % space
     if any(op in query for op in ['+', '-', '*', '/', '^', '%']):
-        if re.match(r'^[\d\s\.\(\)\+\-\*\/\^\%]+$', query):
-            if re.search(r'\d', query) and re.search(r'[\+\-\*\/\^\%]', query):
-                try:
-                    res = perform_calculation(query)
-                    if "Error" not in res:
-                        val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
-                        latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
-                        latex_eq = latex_match.group(1) if latex_match else f"{query} = {val}"
-                        logging.info(f"Regex shortcut Implicit Calc: {query} -> {val}")
-                        return [{"type": "calc", "content": val, "equation": latex_eq}]
-                except Exception:
-                    pass
+         # clean check
+         import re
+         # Allow digits, operators, parens, spaces, dots
+         if re.match(r'^[\d\s\.\(\)\+\-\*\/\^\%]+$', query):
+             # Ensure at least one digit and one operator
+             if re.search(r'\d', query) and re.search(r'[\+\-\*\/\^\%]', query):
+                 try:
+                     res = perform_calculation(query)
+                     if "Error" not in res:
+                         val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
+                         latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+                         latex_eq = latex_match.group(1) if latex_match else f"{query} = {val}"
+                         logging.info(f"Implicit Calc: {query} -> {val}")
+                         # Return immediately to avoid search
+                         calc_act = {"type": "calc", "content": val, "equation": latex_eq}
+                         return jsonify({"actions": [calc_act], "chips": []})
+                 except: pass
 
-    # Explicit Calculation
+    # Calculate (Explicit)
     calc_match = re.search(r"^(?:calculate|calc|solve|what is)\s+([\d\+\-\*\/\(\)\.\s]+)$", query, re.IGNORECASE)
     if calc_match:
         expr = calc_match.group(1).strip()
-        try:
-            res = perform_calculation(expr)
-            val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
-            latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
-            latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
-            logging.info(f"Regex shortcut Explicit Calc: {expr} -> {val}")
-            return [{"type": "calc", "content": val, "equation": latex_eq}]
-        except Exception:
-            pass
+        res = perform_calculation(expr)
+        val = res.split("Result: ")[1].split("\n")[0].strip() if "Result: " in res else res
+        latex_match = re.search(r'LaTeX: \$(.*?)\$', res)
+        latex_eq = latex_match.group(1) if latex_match else f"{expr} = {val}"
+        logging.info(f"Regex Calc: {expr} -> {val}")
+        calc_act2 = {"type": "calc", "content": val, "equation": latex_eq}
+        return jsonify({"actions": [calc_act2], "chips": []})
 
     # Open URL
     url_match = re.search(r"^(?:open|go to|visit)\s+(https?://[^\s]+|www\.[^\s]+|[a-z0-9]+\.[a-z]{2,}[^\s]*)$", query, re.IGNORECASE)
     if url_match:
         url = url_match.group(1).strip()
-        if not url.startswith("http"):
-            url = "https://" + url
+        if not url.startswith("http"): url = "https://" + url
+        logging.info(f"Regex URL: {url}")
         title = url.replace("https://", "").replace("www.", "").split('/')[0]
-        logging.info(f"Regex shortcut URL: {url}")
-        return [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]
+        link_act = {"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}
+        return jsonify({"actions": [link_act], "chips": []})
 
-    # Color Preview
+    # New Fast Actions (Color, Timer, Password, QR)
+    # 1. Color Preview
     color_match = re.match(r"^(#([a-fA-F0-9]{3}|[a-fA-F0-9]{6}))|rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", query.strip(), re.IGNORECASE)
     if color_match:
-        try:
-            from PyQt6.QtGui import QColor
-            if color_match.group(1):
-                c = QColor(color_match.group(1))
-            else:
-                c = QColor(int(color_match.group(3)), int(color_match.group(4)), int(color_match.group(5)))
-            return [{"type": "color_preview", "color_hex": c.name().upper(),
-                     "rgb_val": f"{c.red()}, {c.green()}, {c.blue()}",
-                     "hsl_val": f"{c.hslHue()}, {c.hslSaturation()}, {c.lightness()}"}]
-        except Exception:
-            pass
+        from PyQt6.QtGui import QColor
+        if color_match.group(1): # HEX
+            c = QColor(color_match.group(1))
+        else: # RGB
+            c = QColor(int(color_match.group(3)), int(color_match.group(4)), int(color_match.group(5)))
+        
+        hex_val = c.name().upper()
+        rgb_val = f"{c.red()}, {c.green()}, {c.blue()}"
+        hsl_val = f"{c.hslHue()}, {c.hslSaturation()}, {c.lightness()}"
+        act = {"type": "color_preview", "color_hex": hex_val, "rgb_val": rgb_val, "hsl_val": hsl_val}
+        return jsonify({"actions": [act], "chips": []})
 
-    # Timer
+    # 2. Timer
     timer_match = re.match(r"^(?:set\s+)?timer(?:\s+for)?\s+(\d+(?:\.\d+)?)\s*(s|sec|seconds|m|min|minutes|h|hr|hours)$", query.strip(), re.IGNORECASE)
     if timer_match:
         val = float(timer_match.group(1))
         unit = timer_match.group(2).lower()
-        if unit in ['s', 'sec', 'seconds']:
-            duration = val
-        elif unit in ['m', 'min', 'minutes']:
-            duration = val * 60
-        else:
-            duration = val * 3600
-        return [{"type": "timer", "duration": int(duration)}]
+        if unit in ['s', 'sec', 'seconds']: duration = val
+        elif unit in ['m', 'min', 'minutes']: duration = val * 60
+        else: duration = val * 3600
+        act = {"type": "timer", "duration": int(duration)}
+        return jsonify({"actions": [act], "chips": []})
 
-    # Password
+    # 3. Password
     pwd_match = re.match(r"^(?:generate\s+)?(?:password|haslo|hasło)(?:\s+(\d+))?(?:\s*chars?)?$", query.strip(), re.IGNORECASE)
     if pwd_match:
-        length = int(pwd_match.group(1)) if pwd_match.group(1) else 16
-        return [{"type": "password", "length": min(128, max(4, length))}]
+        l = int(pwd_match.group(1)) if pwd_match.group(1) else 16
+        act = {"type": "password", "length": min(128, max(4, l))}
+        return jsonify({"actions": [act], "chips": []})
 
-    # QR Code
+    # 4. QR Code
     qr_match = re.match(r"^qr(?:code)?:\s*(.+)$", query.strip(), re.IGNORECASE)
     if qr_match:
-        return [{"type": "qrcode", "data": qr_match.group(1).strip()}]
+        data = qr_match.group(1).strip()
+        act = {"type": "qrcode", "data": data}
+        return jsonify({"actions": [act], "chips": []})
 
-    return []
+    # 1.74 Unit Conversion Fast Path (no LLM needed)
+    _UNIT_CONV_RE = re.compile(
+        r'^(?:convert\s+)?(\d+(?:[.,]\d+)?)\s*([a-zA-Z°²³/µ]+(?:\^[23])?)\s+(?:to|in)\s+([a-zA-Z°²³/µ]+(?:\^[23])?)$',
+        re.IGNORECASE
+    )
+    _unit_m = _UNIT_CONV_RE.match(query.strip())
+    if _unit_m:
+        _amt_raw = _unit_m.group(1).replace(',', '.')
+        _from = _unit_m.group(2).lower().strip()
+        _to   = _unit_m.group(3).lower().strip()
+        try:
+            _amt_f = float(_amt_raw)
+            # ── conversion tables (to SI base) ──
+            # Length → metres
+            _LEN = {'m':1,'meter':1,'meters':1,'metre':1,'metres':1,
+                    'km':1e3,'kilometre':1e3,'kilometre':1e3,'kilometers':1e3,'kilometre':1e3,
+                    'cm':1e-2,'centimeter':1e-2,'centimeters':1e-2,
+                    'mm':1e-3,'millimeter':1e-3,'millimeters':1e-3,
+                    'um':1e-6,'µm':1e-6,'micrometer':1e-6,
+                    'nm':1e-9,'nanometer':1e-9,
+                    'mi':1609.344,'mile':1609.344,'miles':1609.344,
+                    'ft':0.3048,'foot':0.3048,'feet':0.3048,
+                    'in':0.0254,'inch':0.0254,'inches':0.0254,
+                    'yd':0.9144,'yard':0.9144,'yards':0.9144}
+            # Mass → kilograms
+            _MASS = {'kg':1,'kilogram':1,'kilograms':1,
+                     'g':1e-3,'gram':1e-3,'grams':1e-3,
+                     'mg':1e-6,'milligram':1e-6,'milligrams':1e-6,
+                     't':1e3,'tonne':1e3,'ton':1e3,'tonnes':1e3,'tons':1e3,
+                     'lb':0.453592,'lbs':0.453592,'pound':0.453592,'pounds':0.453592,
+                     'oz':0.0283495,'ounce':0.0283495,'ounces':0.0283495}
+            # Volume → litres
+            _VOL = {'l':1,'liter':1,'litre':1,'liters':1,'litres':1,
+                    'ml':1e-3,'milliliter':1e-3,'millilitre':1e-3,
+                    'dl':0.1,'cl':0.01,
+                    'gal':3.78541,'gallon':3.78541,'gallons':3.78541,
+                    'pt':0.473176,'pint':0.473176,'pints':0.473176,
+                    'qt':0.946353,'quart':0.946353,'quarts':0.946353,
+                    'floz':0.0295735,'fl oz':0.0295735}
+            # Area → m²
+            _AREA = {'m2':1,'m²':1,'sqm':1,
+                     'cm2':1e-4,'cm²':1e-4,
+                     'km2':1e6,'km²':1e6,
+                     'ft2':0.092903,'ft²':0.092903,'sqft':0.092903,
+                     'in2':6.4516e-4,'in²':6.4516e-4,
+                     'ha':1e4,'hectare':1e4,'hectares':1e4,
+                     'ac':4046.86,'acre':4046.86,'acres':4046.86}
+            # Speed → m/s
+            _SPD = {'m/s':1,'ms':1,
+                    'km/h':1/3.6,'kmh':1/3.6,'kph':1/3.6,
+                    'mph':0.44704,'mi/h':0.44704,
+                    'kn':0.514444,'knot':0.514444,'knots':0.514444}
+            # Data → bytes
+            _DATA = {'b':1,'byte':1,'bytes':1,
+                     'kb':1024,'kilobyte':1024,'kilobytes':1024,
+                     'mb':1024**2,'megabyte':1024**2,'megabytes':1024**2,
+                     'gb':1024**3,'gigabyte':1024**3,'gigabytes':1024**3,
+                     'tb':1024**4,'terabyte':1024**4,'terabytes':1024**4,
+                     'pb':1024**5,'petabyte':1024**5,'petabytes':1024**5}
+            # Time → seconds
+            _TIME = {'s':1,'sec':1,'second':1,'seconds':1,
+                     'ms':1e-3,'millisecond':1e-3,'milliseconds':1e-3,
+                     'min':60,'minute':60,'minutes':60,
+                     'h':3600,'hr':3600,'hour':3600,'hours':3600,
+                     'd':86400,'day':86400,'days':86400,
+                     'w':604800,'week':604800,'weeks':604800,
+                     'mo':2592000,'month':2592000,'months':2592000,
+                     'yr':31536000,'year':31536000,'years':31536000}
+
+            def _fmt(v):
+                if v == 0: return '0'
+                if isinstance(v, float) and v.is_integer() and abs(v) < 1e15:
+                    return str(int(v))
+                return f'{v:.10g}'
+
+            def _try_tables(tables, f, t, amt):
+                for tbl in tables:
+                    if f in tbl and t in tbl:
+                        si = amt * tbl[f]
+                        return _fmt(si / tbl[t])
+                return None
+
+            # Temperature (special case)
+            _temp_aliases = {'c':'c','celsius':'c','°c':'c',
+                             'f':'f','fahrenheit':'f','°f':'f',
+                             'k':'k','kelvin':'k'}
+            _fa, _ta = _temp_aliases.get(_from), _temp_aliases.get(_to)
+            result_str = None
+            if _fa and _ta and _fa != _ta:
+                if _fa == 'c' and _ta == 'f':
+                    result_str = _fmt(_amt_f * 9/5 + 32)
+                elif _fa == 'f' and _ta == 'c':
+                    result_str = _fmt((_amt_f - 32) * 5/9)
+                elif _fa == 'c' and _ta == 'k':
+                    result_str = _fmt(_amt_f + 273.15)
+                elif _fa == 'k' and _ta == 'c':
+                    result_str = _fmt(_amt_f - 273.15)
+                elif _fa == 'f' and _ta == 'k':
+                    result_str = _fmt((_amt_f - 32) * 5/9 + 273.15)
+                elif _fa == 'k' and _ta == 'f':
+                    result_str = _fmt((_amt_f - 273.15) * 9/5 + 32)
+            if result_str is None:
+                result_str = _try_tables([_LEN, _MASS, _VOL, _AREA, _SPD, _DATA, _TIME], _from, _to, _amt_f)
+
+            if result_str is not None:
+                _from_disp = _unit_m.group(2)
+                _to_disp   = _unit_m.group(3)
+                logging.info(f"Regex Unit: {_amt_raw} {_from_disp} -> {result_str} {_to_disp}")
+                return jsonify({"actions": [{"type": "unit", "amount": _amt_raw,
+                                             "from_unit": _from_disp, "to_unit": _to_disp,
+                                             "converted_value": result_str}], "chips": []})
+        except Exception as _ue:
+            logging.warning(f"Unit fast path error: {_ue}")
+
+    # 1.75 Currency Conversion Fast Path (regex → live rate, no LLM needed)
+    _CURRENCY_RE = re.compile(
+        r'^(?:convert\s+)?(\d+(?:[.,]\d+)?)\s*([a-zA-Z]{2,4})\s+(?:to|in|na|w|do|auf|en|à)\s+([a-zA-Z]{2,4})$',
+        re.IGNORECASE
+    )
+    curr_m = _CURRENCY_RE.match(query.strip())
+    if curr_m:
+        amount_raw = curr_m.group(1).replace(',', '.')
+        from_unit = curr_m.group(2).upper()
+        to_unit = curr_m.group(3).upper()
+        converted = ""
+        try:
+            import requests as _req
+            resp = _req.get(
+                f"https://api.frankfurter.app/latest?amount={amount_raw}&from={from_unit}&to={to_unit}",
+                timeout=4
+            )
+            if resp.status_code == 200:
+                rv = resp.json().get("rates", {}).get(to_unit)
+                if rv is not None:
+                    converted = f"{rv:,.2f}"
+        except Exception as _ce:
+            logging.warning(f"Currency API: {_ce}")
+        if converted:
+            logging.info(f"Regex Currency: {amount_raw} {from_unit} -> {converted} {to_unit}")
+            return jsonify({"actions": [{"type": "currency", "amount": amount_raw,
+                                         "from_unit": from_unit, "to_unit": to_unit,
+                                         "converted_value": converted}], "chips": []})
 
     # 1.76 Translate Fast Path — short phrase with non-ASCII letters (clearly foreign)
     def _looks_foreign(text: str) -> bool:
@@ -1278,15 +1493,10 @@ def check_fast_regex_actions(query: str):
     # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
     
-    # Skip LLM inference entirely if there's no internet connection
-    if not _is_connected():
-        logging.info("No internet connection, skipping fast model inference")
-        return jsonify({"actions": [], "chips": []})
-
     # Pre-emptive search REMOVED to save time (was taking ~2.8s).
     # The LLM will use the `web_search` tool if it needs information.
     # We only initialize an empty context or minimal context if needed.
-    search_context = ""
+    search_context = "" 
     search_results = []
     
     logging.info(f"Search Context prepared ({len(search_context)} chars)")

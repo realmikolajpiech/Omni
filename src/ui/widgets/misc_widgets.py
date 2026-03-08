@@ -1209,6 +1209,96 @@ class AnswerWidget(QWidget):
         if hasattr(self.window(), "adjust_window_height"):
             self.window().adjust_window_height()
 
+class CommandPaletteItemWidget(QWidget):
+    """A single command palette row: accent-colored symbol + name + description."""
+
+    # Accent colors per category — (dark_color, light_color)
+    _ACCENT = {
+        "default":  ("#8AB4F8", "#1A73E8"),   # blue
+        "search":   ("#8AB4F8", "#1A73E8"),   # blue
+        "ai":       ("#C084FC", "#7C3AED"),   # violet
+        "file":     ("#FCA5A5", "#DC2626"),   # red
+        "convert":  ("#86EFAC", "#16A34A"),   # green
+        "system":   ("#FDBA74", "#EA580C"),   # orange
+        "comms":    ("#67E8F9", "#0891B2"),   # cyan
+        "memory":   ("#C084FC", "#7C3AED"),   # violet
+        "tool":     ("#FDBA74", "#EA580C"),   # orange
+        "media":    ("#F9A8D4", "#DB2777"),   # pink
+    }
+
+    def __init__(self, icon_char, name, description, category="default", parent=None):
+        super().__init__(parent)
+        self.current_theme = "dark"
+        self._icon_char = icon_char
+        self._name = name
+        self._description = description
+        self._category = category
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 8, 20, 8)
+        layout.setSpacing(14)
+
+        # Icon — single character in a rounded-rect pill
+        self.icon_label = QLabel(icon_char)
+        self.icon_label.setFixedSize(30, 30)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setFont(QFont("Manrope", 13, QFont.Weight.Bold))
+        layout.addWidget(self.icon_label)
+
+        # Text column
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        self.name_label = QLabel(name)
+        self.name_label.setFont(QFont("Manrope", 13, QFont.Weight.DemiBold))
+
+        self.desc_label = QLabel(description)
+        self.desc_label.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+
+        text_col.addWidget(self.name_label)
+        text_col.addWidget(self.desc_label)
+        layout.addLayout(text_col, 1)
+
+        self.update_style()
+
+    def update_style(self):
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        is_dark = self.current_theme == "dark"
+        accent_pair = self._ACCENT.get(self._category, self._ACCENT["default"])
+        accent = accent_pair[0] if is_dark else accent_pair[1]
+
+        self.setStyleSheet("background: transparent;")
+        self.name_label.setStyleSheet(f"color: {t['text_primary']};")
+        self.desc_label.setStyleSheet(f"color: {t['text_secondary']};")
+
+        # Icon: accent-tinted background with accent-colored symbol
+        if is_dark:
+            self.icon_label.setStyleSheet(
+                f"background: rgba({self._hex_to_rgb(accent)}, 0.14); "
+                f"border-radius: 10px; color: {accent};"
+            )
+        else:
+            self.icon_label.setStyleSheet(
+                f"background: rgba({self._hex_to_rgb(accent)}, 0.10); "
+                f"border-radius: 10px; color: {accent};"
+            )
+
+    @staticmethod
+    def _hex_to_rgb(hex_color):
+        h = hex_color.lstrip('#')
+        return f"{int(h[0:2],16)}, {int(h[2:4],16)}, {int(h[4:6],16)}"
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def sizeHint(self):
+        return QSize(660, 54)
+
+
 class StandardItemWidget(QWidget):
     def __init__(self, text, icon_name=None, font=None, color=None, parent=None):
         super().__init__(parent)
