@@ -50,16 +50,20 @@ _SAFE_MATH_NS = {"__builtins__": {}, **{k: v for k, v in _math.__dict__.items() 
 def _detect_calc(text: str):
     """Return (result_str, equation_str) if *text* is a pure math expression, else None."""
     t = text.strip()
-    if not t or ' ' not in t and len(t) < 2:
+    if not t or (' ' not in t and len(t) < 2):
         return None
     if not re.search(r'\d', t):
         return None
     if not re.search(r'[\+\-\*\/\^\%]', t):
         return None
-    if not _CALC_EXPR_RE.match(t):
+        
+    # Treat comma as a decimal separator
+    t_norm = t.replace(',', '.')
+    
+    if not _CALC_EXPR_RE.match(t_norm):
         return None
     try:
-        result = eval(t.replace('^', '**'), _SAFE_MATH_NS, {})  # nosec – fully sandboxed
+        result = eval(t_norm.replace('^', '**'), _SAFE_MATH_NS, {})  # nosec – fully sandboxed
         if not isinstance(result, (int, float)):
             return None
         if isinstance(result, float) and (result != result or result in (float('inf'), float('-inf'))):
@@ -68,6 +72,10 @@ def _detect_calc(text: str):
             val_str = str(int(result))
         else:
             val_str = f"{result:.10g}"
+            
+        # Optional: return value formatted with comma if input used comma? 
+        # For uniformity, returning dot is usually fine, or standard format.
+        # Let's just return the standard format computed above.
         return (val_str, f"{t} = {val_str}")
     except Exception:
         return None

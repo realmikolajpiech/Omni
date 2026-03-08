@@ -22,7 +22,7 @@ except ImportError:
             layout.setSpacing(2)
             self.result_label = QLabel(str(result))
             self.result_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.result_label.setFont(QFont("Manrope", 22, QFont.Weight.Bold))
+            self.result_label.setFont(QFont("Instrument Serif", 32, QFont.Weight.Normal))
             self.eq_label = QLabel(str(equation))
             self.eq_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.eq_label.setStyleSheet("color: #888888; font-size: 12px;")
@@ -1693,11 +1693,11 @@ class CalcActionWidget(QWidget):
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("""
-            background-color: #FF8C00;
-            color: #FFFFFF; 
+            background-color: transparent;
+            color: #888888; 
             font-size: 14px; 
             font-weight: bold;
-            border-radius: 10px;
+            border: none;
         """)
         
         self.action_label = QLabel("CALCULATION")
@@ -1731,15 +1731,15 @@ class CalcActionWidget(QWidget):
         
         # Card Style
         if is_dark:
-            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255, 140, 0, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
-            border = "rgba(255, 140, 0, 0.2)"
-            icon_color = "#FF8C00"
-            action_color = "#FF8C00"
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.1)"
+            icon_color = "#FFFFFF"
+            action_color = "#AAAAAA"
         else:
-            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(255, 150, 0, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
-            border = "rgba(255, 150, 0, 0.2)"
-            icon_color = "#E67300"
-            action_color = "#E67300"
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(0, 0, 0, 0.1)"
+            icon_color = "#111111"
+            action_color = "#666666"
         
         self.card.setStyleSheet(f"""
             QWidget#ActionCard {{
@@ -1752,7 +1752,8 @@ class CalcActionWidget(QWidget):
         self.icon_label.setStyleSheet(f"""
             background-color: transparent; 
             color: {icon_color}; 
-            font-size: 10px; 
+            font-size: 16px; 
+            font-weight: bold;
             border: none;
         """)
         
