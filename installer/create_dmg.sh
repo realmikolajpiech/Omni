@@ -102,6 +102,7 @@ hdiutil create \
     -srcfolder "$STAGING_DIR" \
     -ov \
     -format UDRW \
+    -fs HFS+ \
     -size "${DMG_MB}m" \
     "$TEMP_DMG"
 
@@ -109,11 +110,15 @@ hdiutil create \
 echo ""
 echo "==> Mounting for styling…"
 
+# Detach any stale volume with the same name so we mount as /Volumes/Omni
+hdiutil detach "/Volumes/$OUTPUT_NAME" -quiet 2>/dev/null || true
+sleep 1
+
 MOUNT_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$TEMP_DMG")
 MOUNT_DIR=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | awk -F'\t' '{print $NF}' | tail -1)
+DISK_NAME=$(basename "$MOUNT_DIR")
 echo "    Mounted at: $MOUNT_DIR"
 
-# Give Finder a moment to register the volume
 sleep 2
 
 # Hide macOS-generated metadata folders
@@ -122,19 +127,16 @@ sleep 2
 echo "==> Styling Finder window via AppleScript…"
 /usr/bin/osascript << APPLESCRIPT
 tell application "Finder"
-    tell disk "$OUTPUT_NAME"
+    tell disk "$DISK_NAME"
         open
 
-        -- Icon view, no chrome
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
         set sidebar width of container window to 0
 
-        -- Window geometry (screen coords)
         set the bounds of container window to {$WIN_X, $WIN_Y, $WIN_RIGHT, $WIN_BOTTOM}
 
-        -- Icon view options
         set opts to the icon view options of container window
         set arrangement of opts to not arranged
         set icon size of opts to $ICON_SIZE
@@ -142,36 +144,35 @@ tell application "Finder"
         set shows item info of opts to false
         set label position of opts to bottom
 
-        -- Background image (absolute POSIX path → HFS alias)
         set background picture of opts to (POSIX file "$MOUNT_DIR/.background/background.png") as alias
 
-        -- Icon positions
         set position of item "Omni.app"      of container window to {$APP_X,  $APP_Y}
         set position of item "Applications"  of container window to {$APPS_X, $APPS_Y}
 
-        -- Commit
         update without registering applications
-        delay 3
+        delay 5
         close
     end tell
 end tell
 APPLESCRIPT
 
-# Second pass — open/close again to ensure .DS_Store is fully flushed
-sleep 1
+sleep 2
 /usr/bin/osascript << APPLESCRIPT2
 tell application "Finder"
-    tell disk "$OUTPUT_NAME"
+    tell disk "$DISK_NAME"
         open
         update without registering applications
-        delay 2
+        delay 3
         close
     end tell
 end tell
 APPLESCRIPT2
 
 echo "==> Syncing and unmounting…"
+sleep 2
 sync
+sync
+sleep 2
 hdiutil detach "$MOUNT_DIR" -quiet
 
 # ── Step 5: Convert to compressed read-only DMG ───────────────────────────────

@@ -56,7 +56,9 @@ WARN       = "#FBBF24"
 ERROR      = "#F87171"
 RADIUS     = 20
 
-INSTALL_DIR = Path.home() / "Library" / "Application Support" / "Omni"
+INSTALL_DIR      = Path.home() / "Library" / "Application Support" / "Omni"
+INSTALL_MARKER   = INSTALL_DIR / ".installed"       # written after install step
+SETUP_MARKER     = INSTALL_DIR / ".setup_complete"  # written after full wizard
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "com.omni.app.plist"
 CONFIG_DIR   = Path.home() / ".config" / "omni"
 
@@ -696,6 +698,24 @@ class InstallWorker(QThread):
 
         self.progress.emit(0, "Starting…")
 
+        # Quick pre-flight checks
+        import urllib.request
+        free_gb = shutil.disk_usage(Path.home()).free / 1e9
+        if free_gb < 10:
+            self.finished_err.emit(
+                f"Not enough disk space ({free_gb:.1f} GB free). "
+                f"Omni needs about 10 GB. Free up some space and try again."
+            )
+            return
+        try:
+            urllib.request.urlopen("https://github.com", timeout=5)
+        except Exception:
+            self.finished_err.emit(
+                "No internet connection. Omni needs to download "
+                "dependencies during installation. Check your connection and try again."
+            )
+            return
+
         self.progress.emit(5, "Checking Homebrew…")
         _brew_found = (
             shutil.which("brew", path=env.get("PATH"))
@@ -876,7 +896,15 @@ class InstallWorker(QThread):
         self.progress.emit(96, "Finalising…")
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         settings_file = CONFIG_DIR / "settings.json"
-        if not settings_file.exists():
+        if settings_file.exists():
+            # Reset onboarding flag so the onboarding wizard shows on first launch
+            try:
+                existing = json.loads(settings_file.read_text())
+                existing.pop("onboarding_shown", None)
+                settings_file.write_text(json.dumps(existing, indent=2))
+            except Exception:
+                pass
+        else:
             settings_file.write_text(json.dumps({"theme": "dark", "hotkey": "cmd+option", "autostart": False, "voice_enabled": True}, indent=2))
 
         env_file = CONFIG_DIR / ".env"
@@ -893,6 +921,7 @@ class InstallWorker(QThread):
             if additions:
                 env_file.write_text(existing.rstrip() + "\n" + "\n".join(additions) + "\n")
 
+        INSTALL_MARKER.touch()
         self.progress.emit(100, "Done.")
         self.finished_ok.emit()
 
@@ -916,8 +945,11 @@ class IndexWorker(QThread):
     def _cleanup(self):
         for proc in (self._index_proc, self._brain_proc):
             if proc and proc.poll() is None:
-                try: proc.terminate()
-                except Exception: pass
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
     def run(self):
         import re, time, urllib.request
@@ -1080,9 +1112,10 @@ class InstallPage(QWidget):
 class IndexingPage(QWidget):
     indexing_done = pyqtSignal()
 
-    def __init__(self, on_next):
+    def __init__(self, on_next, on_skip=None):
         super().__init__()
         self.on_next = on_next
+        self.on_skip_cb = on_skip or on_next
         self.worker  = None
 
         v = QVBoxLayout(self)
@@ -1124,7 +1157,7 @@ class IndexingPage(QWidget):
 
         self.skip_btn = QPushButton("Skip for now")
         self.skip_btn.setObjectName("secondary")
-        self.skip_btn.setFixedSize(120, 38)
+        self.skip_btn.setFixedSize(140, 38)
         self.skip_btn.clicked.connect(self._on_skip)
 
         self.next_btn = QPushButton("Continue →")
@@ -1172,7 +1205,7 @@ class IndexingPage(QWidget):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(3000)
-        self.on_next()
+        self.on_skip_cb()
 
 
 # ── Permission status badge ─────────────────────────────────────────────────────
@@ -1491,17 +1524,20 @@ class PermissionsPage(QWidget):
     def _check_permissions(self):
         self._ax_badge.set_granted(self._check_ax())
         self._fda_badge.set_granted(self._check_fda_native())
-        if self._file_access_triggered:
-            self._files_badge.set_granted(self._check_file_access())
+        # Always check folder access — show granted state even if user never clicked
+        self._files_badge.set_granted(self._check_file_access())
 
 
 
 # ── Done page ──────────────────────────────────────────────────────────────────
 
 class DonePage(QWidget):
+    launch_signal = pyqtSignal()
+
     def __init__(self, on_launch):
         super().__init__()
         self._on_launch = on_launch
+        self.launch_signal.connect(self._launch)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(52, 52, 52, 0)
@@ -1530,80 +1566,32 @@ class DonePage(QWidget):
         v.addSpacing(6)
 
         sub = make_label(
-            "Everything is set up. Press Cmd+Option from any app to open Omni.\n"
-            "It will start automatically at login if you enable it below.",
+            "Omni is ready. Press Cmd+Option from any app to open it.",
             size=13, color=TEXT_SEC
         )
         sub.setWordWrap(True)
         v.addWidget(sub)
-        v.addSpacing(28)
 
-        # Autostart card
-        auto_card = Card()
-        auto_card.setFixedHeight(52)
-        ac_row = QHBoxLayout(auto_card)
-        ac_row.setContentsMargins(16, 0, 16, 0)
-        ac_lbl = make_label("Start Omni automatically at login", size=13, weight=500)
-        self.autostart_chk = QCheckBox()
-        self.autostart_chk.setChecked(False)
-        self.autostart_chk.stateChanged.connect(self._toggle_autostart)
-        ac_row.addWidget(ac_lbl, 1)
-        ac_row.addWidget(self.autostart_chk)
-        v.addWidget(auto_card)
-
-        v.addSpacing(16)
-
-        # Three quick facts
-        tips_card = Card()
-        tips_v = QVBoxLayout(tips_card)
-        tips_v.setContentsMargins(16, 14, 16, 14)
-        tips_v.setSpacing(0)
-
-        for i, (key, val) in enumerate([
-            ("Hotkey",   "Cmd+Option anywhere"),
-            ("Settings", "~/.config/omni/settings.json"),
-            ("API keys", "~/.config/omni/.env"),
-        ]):
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 8, 0, 8)
-            k = make_label(key, size=12, color=TEXT_SEC, weight=600)
-            k.setFixedWidth(76)
-            val_lbl = make_label(val, size=12, color=TEXT_PRI)
-            row.addWidget(k)
-            row.addWidget(val_lbl)
-            tips_v.addLayout(row)
-            if i < 2:
-                tips_v.addWidget(Divider())
-
-        v.addWidget(tips_card)
         v.addStretch(1)
         v.addWidget(Divider())
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 16, 0, 20)
 
-        quit_btn = QPushButton("Quit")
-        quit_btn.setObjectName("secondary")
-        quit_btn.setFixedSize(96, 38)
-        quit_btn.clicked.connect(QApplication.quit)
-
         launch_btn = QPushButton("Launch Omni →")
         launch_btn.setObjectName("primary")
         launch_btn.setFixedSize(148, 38)
         launch_btn.clicked.connect(self._launch)
 
-        footer.addWidget(quit_btn)
         footer.addStretch()
         footer.addWidget(launch_btn)
         v.addLayout(footer)
 
-    def _toggle_autostart(self, state):
-        if state == Qt.CheckState.Checked.value:
-            self._install_launch_agent()
-        else:
-            try:
-                if LAUNCH_AGENT.exists(): LAUNCH_AGENT.unlink()
-            except Exception: pass
+    def auto_launch(self):
+        """Called when this page becomes visible — install login item and launch."""
+        self._install_launch_agent()
+        # Delay so the page renders and any killed brain process fully releases port 5555
+        QTimer.singleShot(1500, self.launch_signal.emit)
 
     def _install_launch_agent(self):
         plist_src = resource("resources/LaunchAgent.plist")
@@ -1780,7 +1768,7 @@ class OmniInstallerWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # Step indicator at top
-        self.dots = StepDots(6, self.central)
+        self.dots = StepDots(5, self.central)
         self.dots.setContentsMargins(0, 10, 0, 0)
         main_layout.addWidget(self.dots)
 
@@ -1788,14 +1776,14 @@ class OmniInstallerWindow(QMainWindow):
         main_layout.addWidget(self.stack, 1)
 
         self.page_welcome  = WelcomePage(on_next=lambda: self.go_to(1))
-        self.page_syscheck = SystemCheckPage(on_next=lambda: self.go_to(2), on_back=lambda: self.go_to(0))
-        self.page_install  = InstallPage(on_next=lambda: self.go_to(3), on_back=lambda: self.go_to(1))
-        self.page_perms    = PermissionsPage(on_next=lambda: self.go_to(4), on_back=lambda: self.go_to(2))
-        self.page_index    = IndexingPage(on_next=lambda: self.go_to(5))
+        self.page_install  = InstallPage(on_next=lambda: self.go_to(2), on_back=lambda: self.go_to(0))
+        self.page_perms    = PermissionsPage(on_next=lambda: self.go_to(3), on_back=lambda: self.go_to(1))
+        self.page_index    = IndexingPage(on_next=lambda: self.go_to(4),
+                                                on_skip=lambda: self.go_to(4, auto_launch=False))
         self.page_done     = DonePage(on_launch=self._launch_omni)
 
         for page in (
-            self.page_welcome, self.page_syscheck, self.page_install,
+            self.page_welcome, self.page_install,
             self.page_perms, self.page_index, self.page_done,
         ):
             self.stack.addWidget(page)
@@ -1926,22 +1914,30 @@ class OmniInstallerWindow(QMainWindow):
             return
         QTimer.singleShot(100, self.apply_blur)
 
-    def go_to(self, idx):
-        if idx == 2 and self.stack.currentIndex() == 1:
+    def go_to(self, idx, auto_launch=True):
+        if idx == 1 and self.stack.currentIndex() == 0:
             self.page_install.start_install()
             self.start_border_animation()
-        elif idx == 3:
+        elif idx == 2:
             self.page_perms.start_polling()
             self.stop_border_animation()
-        elif idx == 4 and self.stack.currentIndex() == 3:
+        elif idx == 3 and self.stack.currentIndex() == 2:
             self.page_index.start_indexing()
             self.start_border_animation()
+        elif idx == 4:
+            self.stop_border_animation()
+            self.stack.setCurrentIndex(idx)
+            self.dots.set_step(idx)
+            if auto_launch:
+                self.page_done.auto_launch()
+            return
         else:
             self.stop_border_animation()
         self.stack.setCurrentIndex(idx)
         self.dots.set_step(idx)
 
     def _launch_omni(self):
+        SETUP_MARKER.touch()
         # Hide the wizard, then keep com.omni.app alive as the parent process
         # while the Omni app runs.  macOS TCC traces the "responsible app" by
         # walking up the parent chain — python3 must have com.omni.app as an
@@ -1951,7 +1947,15 @@ class OmniInstallerWindow(QMainWindow):
         self.hide()
         run_sh = INSTALL_DIR / "run.sh"
         try:
-            proc = subprocess.Popen(["/bin/bash", str(run_sh)])
+            child_env = {
+                k: v for k, v in os.environ.items()
+                if not k.startswith(("DYLD_", "QT_", "_MEIPASS"))
+            }
+            proc = subprocess.Popen(
+                ["/bin/bash", str(run_sh)],
+                cwd=str(INSTALL_DIR),
+                env=child_env,
+            )
             # Background thread blocks until Omni quits, then exits the wizard.
             def _wait():
                 try:
@@ -1980,11 +1984,13 @@ class OmniInstallerWindow(QMainWindow):
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def _setup_complete() -> bool:
-    """Return True if Omni has already been installed into INSTALL_DIR."""
-    return (
-        (INSTALL_DIR / "venv" / "bin" / "python3").exists()
-        and (INSTALL_DIR / "run.sh").exists()
-    )
+    """Return True only if the full onboarding wizard has finished."""
+    return SETUP_MARKER.exists()
+
+
+def _install_done() -> bool:
+    """Return True if the install step finished (but wizard may be incomplete)."""
+    return INSTALL_MARKER.exists()
 
 
 def main():
@@ -2007,9 +2013,36 @@ def main():
     # the "responsible app" up the parent chain — without a live com.omni.app
     # ancestor, global hotkeys (Accessibility permission) break at runtime.
     if _setup_complete():
+        # Sync source files from the bundle so the installed version
+        # always matches what was shipped, without touching the venv.
+        try:
+            src_root = omni_src()
+            for item in src_root.iterdir():
+                if item.name == "venv":
+                    continue
+                dest = INSTALL_DIR / item.name
+                if item.is_dir():
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(item, dest)
+                else:
+                    shutil.copy2(item, dest)
+        except Exception:
+            pass
+
         run_sh = INSTALL_DIR / "run.sh"
         try:
-            proc = subprocess.Popen(["/bin/bash", str(run_sh)])
+            # Strip PyInstaller's DYLD_*/QT_* env vars so the child
+            # process uses only the venv's Qt, avoiding duplicate-Qt crash.
+            child_env = {
+                k: v for k, v in os.environ.items()
+                if not k.startswith(("DYLD_", "QT_", "_MEIPASS"))
+            }
+            proc = subprocess.Popen(
+                ["/bin/bash", str(run_sh)],
+                cwd=str(INSTALL_DIR),
+                env=child_env,
+            )
             proc.wait()   # block; exits when user quits Omni
         except Exception:
             pass
@@ -2036,6 +2069,10 @@ def main():
     app.setStyleSheet(qss_base())
 
     win = OmniInstallerWindow()
+    # If the install step already finished (e.g. app was restarted for
+    # permissions), resume at the permissions page instead of starting over.
+    if _install_done():
+        win.go_to(2)  # permissions page
     win.show()
     sys.exit(app.exec())
 
