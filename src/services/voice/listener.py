@@ -76,10 +76,13 @@ SILENCE_THRESHOLD = 0.003  # slightly higher so brief inter-syllable dips don't 
 SILENCE_DURATION = 1.8   # seconds of sustained silence before triggering transcription
 UDP_PORT = 5557
 
-# Wake word trigger: require N frames above threshold within a sliding window
-# (not necessarily consecutive — natural speech scores fluctuate frame-to-frame)
-OWW_TRIGGER_FRAMES = 2       # how many frames must be above threshold
-OWW_TRIGGER_WINDOW = 4       # within this many recent frames
+# Wake word trigger: two-tier detection
+# Tier 1 (high confidence): single frame above primary threshold → instant trigger
+# Tier 2 (lower confidence): multiple frames above secondary threshold → accumulated trigger
+OWW_TRIGGER_FRAMES = 1       # how many frames must be above primary threshold
+OWW_TRIGGER_WINDOW = 6       # sliding window size (6 × 80ms = 480ms)
+OWW_SECONDARY_THRESHOLD_RATIO = 0.6  # secondary threshold = primary × this ratio
+OWW_SECONDARY_TRIGGER_FRAMES = 3    # frames needed at secondary (lower) threshold
 OWW_COOLDOWN_SECONDS = 3.0   # ignore re-triggers for this long after a detection
 
 logging.basicConfig(
@@ -446,13 +449,21 @@ class VoiceService:
                 time.sleep(2)
 
     def handle_idle(self, audio_data: np.ndarray):
-        """Wake word detection using openWakeWord."""
+        """Wake word detection using openWakeWord with two-tier sensitivity."""
         if not self.oww_model or not self._oww_key:
             return
 
         try:
+            # Normalize audio volume to compensate for quiet mics / varying gain
+            peak = np.max(np.abs(audio_data))
+            if peak > 0.001:
+                # Normalize to ~70% of full range — avoids clipping while boosting quiet input
+                audio_normalized = audio_data * (0.7 / peak)
+            else:
+                audio_normalized = audio_data
+
             # openWakeWord expects int16 PCM audio (as shown in all official examples)
-            audio_int16 = (audio_data * 32767.0).clip(-32768, 32767).astype(np.int16)
+            audio_int16 = (audio_normalized * 32767.0).clip(-32768, 32767).astype(np.int16)
             prediction = self.oww_model.predict(audio_int16)
             score = prediction.get(self._oww_key, 0.0)
 
@@ -462,22 +473,31 @@ class VoiceService:
                 self._oww_last_log_time = now
                 logger.info(f"[WakeWord] current score: {score:.4f} (threshold={OWW_DETECTION_THRESHOLD})")
 
-            # Sliding window: track recent scores and count how many exceed threshold
+            # Sliding window: track recent scores
             self._oww_score_window.append(score)
             if len(self._oww_score_window) > OWW_TRIGGER_WINDOW:
                 self._oww_score_window.pop(0)
 
-            hits = sum(1 for s in self._oww_score_window if s >= OWW_DETECTION_THRESHOLD)
+            # Two-tier detection:
+            # Tier 1: primary threshold — high confidence, needs fewer hits
+            primary_hits = sum(1 for s in self._oww_score_window if s >= OWW_DETECTION_THRESHOLD)
+            # Tier 2: secondary (lower) threshold — lower confidence, needs more hits
+            secondary_threshold = OWW_DETECTION_THRESHOLD * OWW_SECONDARY_THRESHOLD_RATIO
+            secondary_hits = sum(1 for s in self._oww_score_window if s >= secondary_threshold)
 
-            if score >= OWW_DETECTION_THRESHOLD:
-                logger.info(f"[WakeWord] above threshold: {score:.3f} (hits {hits}/{OWW_TRIGGER_FRAMES} in last {OWW_TRIGGER_WINDOW} frames)")
+            triggered = (primary_hits >= OWW_TRIGGER_FRAMES or
+                         secondary_hits >= OWW_SECONDARY_TRIGGER_FRAMES)
 
-            if hits >= OWW_TRIGGER_FRAMES:
+            if score >= secondary_threshold:
+                logger.info(f"[WakeWord] score: {score:.3f} | primary {primary_hits}/{OWW_TRIGGER_FRAMES} | secondary {secondary_hits}/{OWW_SECONDARY_TRIGGER_FRAMES}")
+
+            if triggered:
                 # Cooldown: don't re-trigger too quickly after a recent detection
                 if now - self._oww_last_trigger_time < OWW_COOLDOWN_SECONDS:
                     return
 
-                logger.info(f"Wake Word Detected! (score={score:.3f}, hits={hits})")
+                tier = "primary" if primary_hits >= OWW_TRIGGER_FRAMES else "secondary"
+                logger.info(f"Wake Word Detected! ({tier}, score={score:.3f}, primary_hits={primary_hits}, secondary_hits={secondary_hits})")
                 self._oww_last_trigger_time = now
                 self._oww_score_window = []
                 self._oww_trigger_count = 0
