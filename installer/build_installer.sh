@@ -2,12 +2,15 @@
 set -e
 
 # build_installer.sh — One-shot build: PyInstaller + DMG packaging
-# Usage: cd installer && ./build_installer.sh [--no-notarize]
+# Usage: cd installer && ./build_installer.sh [--no-notarize] [--no-sign]
 #   --no-notarize   Build and sign the DMG but skip Apple notarization/stapling
+#   --no-sign       Skip all code signing (implies --no-notarize)
 
 NO_NOTARIZE=0
+NO_SIGN=0
 for arg in "$@"; do
     [ "$arg" = "--no-notarize" ] && NO_NOTARIZE=1
+    [ "$arg" = "--no-sign" ] && { NO_SIGN=1; NO_NOTARIZE=1; }
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -50,11 +53,7 @@ echo "==> PyInstaller complete. App at: dist/Omni.app"
 echo ""
 echo "==> Creating DMG..."
 chmod +x "$SCRIPT_DIR/create_dmg.sh"
-if [ "$NO_NOTARIZE" = "1" ]; then
-    "$SCRIPT_DIR/create_dmg.sh" "Omni" --no-notarize
-else
-    "$SCRIPT_DIR/create_dmg.sh" "Omni"
-fi
+"$SCRIPT_DIR/create_dmg.sh" "Omni" "$@"
 
 echo ""
 echo "========================================="

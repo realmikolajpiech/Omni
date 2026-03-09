@@ -11,8 +11,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_NAME="${1:-Omni}"
 NO_NOTARIZE=0
+NO_SIGN=0
 for arg in "$@"; do
     [ "$arg" = "--no-notarize" ] && NO_NOTARIZE=1
+    [ "$arg" = "--no-sign" ] && { NO_SIGN=1; NO_NOTARIZE=1; }
 done
 OUTPUT_DMG="${SCRIPT_DIR}/${OUTPUT_NAME}.dmg"
 APP_PATH="${SCRIPT_DIR}/dist/Omni.app"
@@ -53,22 +55,27 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 # ── Step 1: Sign .app ─────────────────────────────────────────────────────────
-echo ""
-echo "==> Signing .app bundle…"
+if [ "$NO_SIGN" -eq 1 ]; then
+    echo ""
+    echo "==> Skipping .app signing (--no-sign)."
+else
+    echo ""
+    echo "==> Signing .app bundle…"
 
-find "$APP_PATH" \( -name "*.dylib" -o -name "*.so" -o -name "*.framework" \) \
-    | while read -r f; do
-        codesign --force --verify --sign "$SIGN_ID" --options runtime "$f" 2>/dev/null || true
-    done
+    find "$APP_PATH" \( -name "*.dylib" -o -name "*.so" -o -name "*.framework" \) \
+        | while read -r f; do
+            codesign --force --verify --sign "$SIGN_ID" --options runtime "$f" 2>/dev/null || true
+        done
 
-codesign --force --verify --verbose \
-    --sign "$SIGN_ID" \
-    --options runtime \
-    --entitlements "$ENTITLEMENTS" \
-    --deep \
-    "$APP_PATH"
+    codesign --force --verify --verbose \
+        --sign "$SIGN_ID" \
+        --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        --deep \
+        "$APP_PATH"
 
-echo "==> Signed."
+    echo "==> Signed."
+fi
 
 # ── Step 2: Staging directory ─────────────────────────────────────────────────
 echo ""
@@ -189,10 +196,15 @@ rm -f "$TEMP_DMG"
 rm -rf "$STAGING_DIR"
 
 # ── Step 6: Sign the DMG ──────────────────────────────────────────────────────
-echo ""
-echo "==> Signing DMG…"
-codesign --force --verify --sign "$SIGN_ID" "$OUTPUT_DMG"
-echo "==> DMG signed."
+if [ "$NO_SIGN" -eq 1 ]; then
+    echo ""
+    echo "==> Skipping DMG signing (--no-sign)."
+else
+    echo ""
+    echo "==> Signing DMG…"
+    codesign --force --verify --sign "$SIGN_ID" "$OUTPUT_DMG"
+    echo "==> DMG signed."
+fi
 
 # ── Step 7: Notarize + Staple (skipped with --no-notarize) ───────────────────
 if [ "$NO_NOTARIZE" = "1" ]; then

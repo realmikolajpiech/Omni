@@ -10,6 +10,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+*.spec
 
 # Personal data
 personal.mv2

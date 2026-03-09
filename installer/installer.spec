@@ -59,7 +59,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     target_arch=None,
-    codesign_identity="Developer ID Application: Daniel Piech (D3S4G4R6GM)",
+    codesign_identity=None,
     entitlements_file=os.path.join(SPEC_DIR, "resources", "entitlements.plist"),
 )
 
