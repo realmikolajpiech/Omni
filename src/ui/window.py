@@ -867,9 +867,21 @@ class OmniWindow(QWidget):
         if hasattr(self, 'anim'): self.anim.stop()
         if hasattr(self, 'anim_group'): self.anim_group.stop()
         if hasattr(self, 'anim_close_group'): self.anim_close_group.stop()
-        
+
         self._is_closing = False # Reset closing flag in case we interrupted a close animation
         self.is_entry_animating = False  # Reset so adjust_window_height is not blocked
+
+        # Stop voice listening if active (e.g. Escape during "Hey Omni" listening)
+        self.send_udp_command("SET_MODE:PAUSED")
+        self.mic_widget.set_active(False)
+        self.voice_triggered_query = False
+        self.logo_label.stop_spinning()
+
+        # Stop TTS if playing
+        if self.is_tts_playing:
+            if self.tts_worker and self.tts_worker.isRunning():
+                self.tts_worker.force_stop()
+            self.is_tts_playing = False
 
         self.is_history_mode = False
         self.is_command_palette = False
@@ -1556,9 +1568,17 @@ class OmniWindow(QWidget):
 
     def animate_close(self):
         if self._is_closing: return
-        
+
         # Always switch back to IDLE (Wake Word) mode when closing
         self.send_udp_command("SET_MODE:IDLE")
+        self.mic_widget.set_active(False)
+        self.voice_triggered_query = False
+
+        # Stop TTS immediately on close
+        if self.is_tts_playing:
+            if self.tts_worker and self.tts_worker.isRunning():
+                self.tts_worker.force_stop()
+            self.is_tts_playing = False
 
         # Instantly reset the gradient border so it doesn't flash on next open
         self.frame.mode_anim.stop()
