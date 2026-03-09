@@ -1739,18 +1739,30 @@ class PermissionsPage(QWidget):
     # File access is probed with listdir() as before.
 
     def _check_ax(self) -> bool:
-        """Return True if com.omni.app has Accessibility permission.
+        """Return True if this process has Accessibility permission.
 
-        AXIsProcessTrustedWithOptions() only checks the *calling* process, which
-        is the installer — a different TCC identity from the installed Omni.app.
-        Instead, query the TCC SQLite database directly for com.omni.app.
+        Primary: AXIsProcessTrustedWithOptions() — checks the calling process.
+        Works when the installer is bundled as Omni.app (same bundle ID).
+        Fallback: query TCC SQLite database directly for com.omni.app
+        (may fail on modern macOS where TCC.db is protected).
         """
+        # Primary: check current process directly
+        try:
+            _appserv = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            _appserv.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+            _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+            if bool(_appserv.AXIsProcessTrustedWithOptions(None)):
+                return True
+        except Exception:
+            pass
+        # Fallback: query TCC database (may fail on macOS 13+ due to SIP)
         import sqlite3
         tcc_db = os.path.expanduser(
             "~/Library/Application Support/com.apple.TCC/TCC.db"
         )
         try:
-            # Open read-only / immutable so we don't disturb the live DB.
             with sqlite3.connect(f"file:{tcc_db}?immutable=1", uri=True) as conn:
                 cur = conn.cursor()
                 cur.execute(
@@ -1759,18 +1771,7 @@ class PermissionsPage(QWidget):
                     "AND client='com.omni.app'",
                 )
                 row = cur.fetchone()
-                # auth_value 2 = kTCCAuthorizationStatusAuthorized (macOS 12+)
                 return row is not None and row[0] == 2
-        except Exception:
-            pass
-        # Fallback: check the current process (works when installer IS Omni.app)
-        try:
-            _appserv = ctypes.cdll.LoadLibrary(
-                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
-            )
-            _appserv.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-            _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-            return bool(_appserv.AXIsProcessTrustedWithOptions(None))
         except Exception:
             return False
 
