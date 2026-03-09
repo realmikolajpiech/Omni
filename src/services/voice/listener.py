@@ -19,6 +19,12 @@ if _venv_site and _venv_site not in sys.path:
     sys.path.insert(0, _venv_site)
 del _glob, _venv_site
 
+try:
+    import setproctitle
+    setproctitle.setproctitle("Omni Helper (Voice)")
+except ImportError:
+    pass
+
 import sounddevice as sd
 import soundfile as sf
 import numpy as np

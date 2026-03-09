@@ -1207,7 +1207,7 @@ class IndexingPage(QWidget):
     def _on_skip(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
-            self.worker.wait(3000)
+            # Don't block the UI thread — worker will stop on its own
         self.on_skip_cb()
 
 
@@ -1434,8 +1434,44 @@ class PermissionsPage(QWidget):
     # ── Open Accessibility ───────────────────────────────────────────────────────
 
     def _open_accessibility(self):
-        # We ARE com.omni.app (the PyInstaller bundle has bundle ID com.omni.app),
-        # so just opening the pane is enough — macOS will show Omni there.
+        # Trigger AXIsProcessTrustedWithOptions(prompt=YES) so that macOS
+        # registers this process (com.omni.app) in the Accessibility list.
+        # Without this call the app never appears in System Settings and the
+        # user cannot grant the permission, so _check_ax() would always return
+        # False even after the user opens the pane.
+        try:
+            import ctypes.util
+            libobjc = ctypes.CDLL(ctypes.util.find_library("objc"))
+            libobjc.objc_getClass.restype   = ctypes.c_void_p
+            libobjc.objc_getClass.argtypes  = [ctypes.c_char_p]
+            libobjc.sel_registerName.restype  = ctypes.c_void_p
+            libobjc.sel_registerName.argtypes = [ctypes.c_char_p]
+            msg = libobjc.objc_msgSend
+
+            msg.restype  = ctypes.c_void_p
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+            yes = msg(libobjc.objc_getClass(b"NSNumber"),
+                      libobjc.sel_registerName(b"numberWithBool:"), True)
+
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+            key = msg(libobjc.objc_getClass(b"NSString"),
+                      libobjc.sel_registerName(b"stringWithUTF8String:"),
+                      b"AXTrustedCheckOptionPrompt")
+
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                            ctypes.c_void_p, ctypes.c_void_p]
+            opts = msg(libobjc.objc_getClass(b"NSDictionary"),
+                       libobjc.sel_registerName(b"dictionaryWithObject:forKey:"),
+                       yes, key)
+
+            _appserv = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            _appserv.AXIsProcessTrustedWithOptions.restype  = ctypes.c_bool
+            _appserv.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+            _appserv.AXIsProcessTrustedWithOptions(opts)
+        except Exception:
+            pass
         subprocess.Popen([
             "open",
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -1594,26 +1630,34 @@ class DonePage(QWidget):
     def auto_launch(self):
         """Called when this page becomes visible — install login item and launch."""
         self._install_launch_agent()
-        # Delay so the page renders and any killed brain process fully releases port 5555
-        QTimer.singleShot(1500, self.launch_signal.emit)
+        # Small delay so the page renders before launching
+        QTimer.singleShot(300, self.launch_signal.emit)
 
     def _install_launch_agent(self):
-        plist_src = resource("resources/LaunchAgent.plist")
+        run_sh = str(INSTALL_DIR / "run.sh")
         try:
             LAUNCH_AGENT.parent.mkdir(parents=True, exist_ok=True)
-            if os.path.exists(plist_src):
-                shutil.copy2(plist_src, str(LAUNCH_AGENT))
-            else:
-                LAUNCH_AGENT.write_text("""<?xml version="1.0" encoding="UTF-8"?>
+            # Unload any existing agent first (ignore errors if not loaded)
+            subprocess.run(
+                ["launchctl", "unload", str(LAUNCH_AGENT)],
+                capture_output=True,
+            )
+            LAUNCH_AGENT.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>com.omni.app</string>
 <key>ProgramArguments</key><array>
-<string>/Applications/Omni.app/Contents/MacOS/Omni</string>
+<string>/bin/bash</string>
+<string>{run_sh}</string>
 </array>
+<key>WorkingDirectory</key><string>{str(INSTALL_DIR)}</string>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><false/>
 </dict></plist>""")
+            subprocess.run(
+                ["launchctl", "load", str(LAUNCH_AGENT)],
+                capture_output=True,
+            )
         except Exception as e:
             print(f"LaunchAgent error: {e}")
 
@@ -1958,9 +2002,11 @@ class OmniInstallerWindow(QMainWindow):
                 pass
         run_sh = INSTALL_DIR / "run.sh"
         try:
+            # Strip PyInstaller env vars so the venv Python isn't confused by
+            # frozen PYTHONHOME/PYTHONPATH pointing at the bundle's stdlib.
             child_env = {
                 k: v for k, v in os.environ.items()
-                if not k.startswith(("DYLD_", "QT_", "_MEIPASS"))
+                if not k.startswith(("DYLD_", "QT_", "_MEIPASS", "PYTHON"))
             }
             proc = subprocess.Popen(
                 ["/bin/bash", str(run_sh)],
@@ -2043,11 +2089,11 @@ def main():
 
         run_sh = INSTALL_DIR / "run.sh"
         try:
-            # Strip PyInstaller's DYLD_*/QT_* env vars so the child
-            # process uses only the venv's Qt, avoiding duplicate-Qt crash.
+            # Strip PyInstaller's DYLD_*/QT_*/PYTHON* env vars so the child
+            # process uses only the venv's Qt/Python, avoiding conflicts.
             child_env = {
                 k: v for k, v in os.environ.items()
-                if not k.startswith(("DYLD_", "QT_", "_MEIPASS"))
+                if not k.startswith(("DYLD_", "QT_", "_MEIPASS", "PYTHON"))
             }
             proc = subprocess.Popen(
                 ["/bin/bash", str(run_sh)],

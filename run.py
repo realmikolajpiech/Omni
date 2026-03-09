@@ -27,6 +27,12 @@ def run_flask():
 def main():
     setup_logging("launcher")
 
+    try:
+        import setproctitle
+        setproctitle.setproctitle("Omni")
+    except ImportError:
+        pass
+
     # Check arguments
     mode = "all"
     extra_args = []
@@ -37,6 +43,11 @@ def main():
             extra_args.append(arg)
 
     if mode == "brain":
+        try:
+            import setproctitle
+            setproctitle.setproctitle("Omni Helper (Brain)")
+        except ImportError:
+            pass
         print("Starting Brain Service ONLY...")
         run_flask()
         return
@@ -49,6 +60,9 @@ def main():
 
     # Default "all" mode — launch brain as a separate process so its
     # heavy embedding/model work doesn't share the GIL with the Qt UI thread.
+    # Start the UI immediately without waiting — onboarding doesn't need the
+    # brain, and the window handles "brain not ready" gracefully (requests fail
+    # silently until it comes up).
     if not is_brain_running():
         print("Starting Brain Service (subprocess)...")
         logs_dir = os.path.join(os.path.dirname(__file__), "logs")
@@ -58,13 +72,6 @@ def main():
             stdout=open(os.path.join(logs_dir, "brain_setup.log"), "a"),
             stderr=subprocess.STDOUT,
         )
-
-        # Wait up to 15 s for the brain to be ready before starting the UI.
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            if is_brain_running():
-                break
-            time.sleep(0.2)
     else:
         print("Brain Service already running.")
         brain_proc = None

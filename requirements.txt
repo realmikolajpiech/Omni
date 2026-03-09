@@ -45,3 +45,4 @@ BlurWindow; sys_platform == 'win32'
 pyobjc; sys_platform == 'darwin'
 
 qrcode
+setproctitle
