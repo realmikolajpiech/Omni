@@ -290,12 +290,24 @@ class VoiceService:
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                     "X-Omni-Secret": OMNI_SECRET,
                     "X-Device-ID": DEVICE_ID,
+                    "User-Agent": "Omni/1.0",
                 },
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 text = resp.read().decode().strip()
-            return text if text else None
+            if not text:
+                return None
+            # Filter Whisper hallucinations on silence/noise
+            _hallucinations = {
+                "thank you.", "thanks for watching.", "thanks for watching!",
+                "you", "bye.", "bye!", "the end.", "subtitle",
+                "subtitles by the amara.org community",
+            }
+            if text.strip().lower() in _hallucinations:
+                logger.info(f"Filtered Whisper hallucination: {text!r}")
+                return None
+            return text
         except Exception as e:
             logger.error(f"Groq transcription error: {e}")
             return None

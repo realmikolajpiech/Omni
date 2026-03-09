@@ -15,6 +15,7 @@ import stat
 import tempfile
 import threading
 import ctypes
+import ctypes.util
 from pathlib import Path
 from typing import Callable
 
@@ -1292,18 +1293,35 @@ class PermissionsPage(QWidget):
 
     def __init__(self, on_next, on_back):
         super().__init__()
-        v = QVBoxLayout(self)
-        v.setContentsMargins(52, 36, 52, 0)
-        v.setSpacing(0)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(52, 36, 52, 0)
+        outer.setSpacing(0)
 
         h, sub = page_header(
             "Grant permissions",
-            "Three quick permissions — Omni needs them to work properly."
+            "A few quick permissions — Omni needs them to work properly."
         )
-        v.addWidget(h)
-        v.addSpacing(4)
-        v.addWidget(sub)
-        v.addSpacing(14)
+        outer.addWidget(h)
+        outer.addSpacing(4)
+        outer.addWidget(sub)
+        outer.addSpacing(14)
+
+        # Scrollable area for permission cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }"
+                             "QScrollBar:vertical { width: 4px; background: transparent; }"
+                             "QScrollBar::handle:vertical { background: rgba(255,255,255,0.15); border-radius: 2px; }"
+                             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(scroll_content)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        scroll.setWidget(scroll_content)
+        outer.addWidget(scroll, 1)
 
         # ── Accessibility card ──────────────────────────────────────────────────
         ax_card  = Card()
@@ -1393,8 +1411,69 @@ class PermissionsPage(QWidget):
         files_v.addWidget(self._files_btn)
         v.addWidget(files_card)
 
-        v.addStretch(1)
-        v.addWidget(Divider())
+        v.addSpacing(8)
+
+        # ── Microphone card ───────────────────────────────────────────────────
+        mic_card = Card()
+        mic_v    = QVBoxLayout(mic_card)
+        mic_v.setContentsMargins(20, 14, 20, 14)
+        mic_v.setSpacing(8)
+
+        mic_top = QHBoxLayout()
+        mic_top.setSpacing(0)
+        mic_txt = QVBoxLayout()
+        mic_txt.setSpacing(2)
+        mic_txt.addWidget(make_label("Microphone", size=13, weight=600))
+        mic_desc = make_label(
+            "Required for voice commands and \"Hey Omni\" activation.",
+            size=12, color=TEXT_SEC)
+        mic_txt.addWidget(mic_desc)
+        self._mic_badge = _PermBadge()
+        mic_top.addLayout(mic_txt, 1)
+        mic_top.addWidget(self._mic_badge, 0,
+                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        mic_v.addLayout(mic_top)
+
+        mic_btn = QPushButton("Grant Microphone Access →")
+        mic_btn.setObjectName("secondary")
+        mic_btn.setFixedHeight(34)
+        mic_btn.clicked.connect(self._request_microphone)
+        mic_v.addWidget(mic_btn)
+        v.addWidget(mic_card)
+
+        v.addSpacing(8)
+
+        # ── Speech Recognition card ───────────────────────────────────────────
+        sr_card = Card()
+        sr_v    = QVBoxLayout(sr_card)
+        sr_v.setContentsMargins(20, 14, 20, 14)
+        sr_v.setSpacing(8)
+
+        sr_top = QHBoxLayout()
+        sr_top.setSpacing(0)
+        sr_txt = QVBoxLayout()
+        sr_txt.setSpacing(2)
+        sr_txt.addWidget(make_label("Speech Recognition", size=13, weight=600))
+        sr_desc = make_label(
+            "Lets Omni transcribe your voice into text on-device.",
+            size=12, color=TEXT_SEC)
+        sr_txt.addWidget(sr_desc)
+        self._sr_badge = _PermBadge()
+        sr_top.addLayout(sr_txt, 1)
+        sr_top.addWidget(self._sr_badge, 0,
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        sr_v.addLayout(sr_top)
+
+        sr_btn = QPushButton("Grant Speech Recognition →")
+        sr_btn.setObjectName("secondary")
+        sr_btn.setFixedHeight(34)
+        sr_btn.clicked.connect(self._request_speech_recognition)
+        sr_v.addWidget(sr_btn)
+        v.addWidget(sr_card)
+
+        v.addSpacing(8)
+
+        outer.addWidget(Divider())
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 14, 0, 18)
@@ -1412,7 +1491,7 @@ class PermissionsPage(QWidget):
         footer.addWidget(back_btn)
         footer.addStretch()
         footer.addWidget(next_btn)
-        v.addLayout(footer)
+        outer.addLayout(footer)
 
         self._file_access_done.connect(self._on_file_access_done)
         self._file_access_triggered = False
@@ -1519,6 +1598,129 @@ class PermissionsPage(QWidget):
         self._files_btn.setEnabled(True)
         self._files_btn.setText("Grant Folder Access →")
 
+    # ── Microphone ──────────────────────────────────────────────────────────────
+
+    def _request_microphone(self):
+        """Trigger macOS TCC microphone prompt and open settings."""
+        threading.Thread(target=self._probe_microphone, daemon=True).start()
+        subprocess.Popen([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ])
+
+    def _probe_microphone(self):
+        """Open a brief audio stream to trigger the TCC microphone prompt."""
+        try:
+            import sounddevice as sd
+            with sd.InputStream(samplerate=16000, blocksize=1280, channels=1):
+                import time
+                time.sleep(0.2)
+        except Exception:
+            pass
+
+    def _check_microphone(self) -> bool:
+        """Return True if microphone permission is granted."""
+        try:
+            from AVFoundation import AVCaptureDevice
+            # authorizationStatusForMediaType: 0=notDetermined, 1=restricted, 2=denied, 3=authorized
+            status = AVCaptureDevice.authorizationStatusForMediaType_("soun")
+            return status == 3
+        except Exception:
+            pass
+        # Fallback: try via ctypes
+        try:
+            libobjc = ctypes.CDLL(ctypes.util.find_library("objc"))
+            libobjc.objc_getClass.restype  = ctypes.c_void_p
+            libobjc.objc_getClass.argtypes = [ctypes.c_char_p]
+            libobjc.sel_registerName.restype  = ctypes.c_void_p
+            libobjc.sel_registerName.argtypes = [ctypes.c_char_p]
+            msg = libobjc.objc_msgSend
+
+            # NSString *mediaType = @"soun" (AVMediaTypeAudio internal value)
+            msg.restype  = ctypes.c_void_p
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+            media_type = msg(
+                libobjc.objc_getClass(b"NSString"),
+                libobjc.sel_registerName(b"stringWithUTF8String:"),
+                b"soun")
+
+            # [AVCaptureDevice authorizationStatusForMediaType:]
+            msg.restype  = ctypes.c_long
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            status = msg(
+                libobjc.objc_getClass(b"AVCaptureDevice"),
+                libobjc.sel_registerName(b"authorizationStatusForMediaType:"),
+                media_type)
+            return status == 3
+        except Exception:
+            return False
+
+    # ── Speech Recognition ──────────────────────────────────────────────────────
+
+    def _request_speech_recognition(self):
+        """Trigger macOS TCC speech recognition prompt and open settings."""
+        threading.Thread(target=self._probe_speech_recognition, daemon=True).start()
+        subprocess.Popen([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+        ])
+
+    def _probe_speech_recognition(self):
+        """Run the streaming_asr binary briefly to trigger TCC speech prompt."""
+        try:
+            # Locate the streaming_asr binary relative to the installed source
+            for base in (
+                Path(__file__).resolve().parent,                          # installer dir
+                Path.home() / ".config" / "omni" / "src" / "services" / "voice",  # installed
+            ):
+                asr = base / "src" / "services" / "voice" / "streaming_asr"
+                if not asr.is_file():
+                    asr = base / "streaming_asr"
+                if asr.is_file() and os.access(str(asr), os.X_OK):
+                    proc = subprocess.Popen(
+                        [str(asr), "--lang", "en-US"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    proc.stdin.close()
+                    try:
+                        proc.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return
+        except Exception:
+            pass
+
+    def _check_speech_recognition(self) -> bool:
+        """Return True if speech recognition permission is granted."""
+        try:
+            from Speech import SFSpeechRecognizer
+            status = SFSpeechRecognizer.authorizationStatus()
+            return status == 3  # .authorized
+        except Exception:
+            pass
+        # Fallback: try via ctypes
+        try:
+            libobjc = ctypes.CDLL(ctypes.util.find_library("objc"))
+            libobjc.objc_getClass.restype  = ctypes.c_void_p
+            libobjc.objc_getClass.argtypes = [ctypes.c_char_p]
+            libobjc.sel_registerName.restype  = ctypes.c_void_p
+            libobjc.sel_registerName.argtypes = [ctypes.c_char_p]
+            msg = libobjc.objc_msgSend
+
+            # [SFSpeechRecognizer authorizationStatus]
+            speech_fw = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/Speech.framework/Speech"
+            )
+            msg.restype  = ctypes.c_long
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            status = msg(
+                libobjc.objc_getClass(b"SFSpeechRecognizer"),
+                libobjc.sel_registerName(b"authorizationStatus"))
+            return status == 3
+        except Exception:
+            return False
+
     # ── Permission checks ───────────────────────────────────────────────────────
     # AX and FDA are checked via ctypes — we ARE com.omni.app (the PyInstaller
     # bundle carries bundle ID com.omni.app), so TCC attributes these calls to
@@ -1566,6 +1768,8 @@ class PermissionsPage(QWidget):
         self._fda_badge.set_granted(self._check_fda_native())
         # Always check folder access — show granted state even if user never clicked
         self._files_badge.set_granted(self._check_file_access())
+        self._mic_badge.set_granted(self._check_microphone())
+        self._sr_badge.set_granted(self._check_speech_recognition())
 
 
 

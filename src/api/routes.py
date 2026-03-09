@@ -1223,8 +1223,90 @@ def check_fast_regex_actions(query: str):
 
     return []
 
-    # 1.76 Translate Fast Path — short phrase with non-ASCII letters (clearly foreign)
-    def _looks_foreign(text: str) -> bool:
+
+
+@api_bp.route('/action', methods=['POST'])
+def action_endpoint():
+    import uuid
+    request_id = str(uuid.uuid4())
+
+    with model_manager.fast_queue_lock:
+        old_request_id = model_manager.current_fast_request_id
+        model_manager.current_fast_request_id = request_id
+        if old_request_id is not None:
+            logging.info(f"Cancelling old fast request {old_request_id}, starting new request {request_id}")
+
+    if model_manager.abort_fast_event.is_set():
+        logging.info(f"Action endpoint {request_id}: Abort event already set, skipping action request")
+        return jsonify({"actions": [], "chips": []})
+
+    model_manager.abort_fast_event.clear()
+    model_manager.ensure_fast_model()
+
+    try:
+        req = request.get_json(force=True)
+    except Exception:
+        return jsonify({"actions": [], "chips": []}), 400
+
+    query = req.get('query', "").strip()
+    if not query:
+        return jsonify({"actions": [], "chips": []})
+
+    logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
+    endpoint_start_time = time.time()
+
+    # 1. Common shortcuts
+    if query.lower() in COMMON_SHORTCUTS:
+        url = COMMON_SHORTCUTS[query.lower()]
+        act = {
+            "type": "link",
+            "url": url,
+            "title": url.replace("https://", "").replace("www.", "").split('/')[0].title(),
+            "description": "Direct Shortcut"
+        }
+        logging.info(f"Shortcut match: {url}")
+        return jsonify({"action": act, "actions": [act], "chips": []})
+
+    # 1.5 System Settings (instant - no LLM needed)
+    try:
+        from src.services.system.macos_settings import detect_settings_command
+        settings_act = detect_settings_command(query)
+        if settings_act:
+            logging.info(f"[settings] Fast-path action detected: {settings_act['setting']}")
+            return jsonify({"actions": [settings_act], "action": settings_act, "chips": []})
+    except Exception as _e:
+        logging.warning(f"[settings] detect_settings_command failed: {_e}")
+
+    # 1.6 Computer Control Hard Override
+    cc_keywords = ["click", "type", "scroll", "press", "copy", "paste", "move mouse", "drag", "select"]
+    if any(k in query.lower() for k in cc_keywords):
+        logging.info("Computer Control keyword detected. Skipping Fast Model.")
+        return jsonify({"actions": [], "chips": []})
+
+    # 1.6b File Conversion Hard Override
+    convert_keywords = ["convert", "konwertuj", "przekonwertuj", "zamien format", "zmien format",
+                        "export to", "eksportuj", "change format", "save as"]
+    ql = query.lower()
+    if any(k in ql for k in convert_keywords):
+        file_ext_pattern = r"\.(mp[34g]|avi|mov|mkv|webm|wav|ogg|flac|m4a|aac|png|jpe?g|webp|bmp|tiff?|gif|pdf|docx?|xlsx?|csv|html?|md|rtf|ico)\b"
+        format_keywords = ["to mp", "to wav", "to ogg", "to flac", "to png", "to jpg", "to jpeg",
+                           "to pdf", "to docx", "to html", "to gif", "to avi", "to mkv", "to webm",
+                           "to mov", "to csv", "to xlsx", "to txt", "to bmp", "to webp", "to tiff",
+                           "to ico", "to m4a", "to aac", "to rtf", "to md",
+                           "na mp", "na wav", "na ogg", "na flac", "na png", "na jpg", "na jpeg",
+                           "na pdf", "na docx", "na html", "na gif", "na avi", "na mkv", "na webm",
+                           "na mov", "na csv", "na xlsx", "na txt", "na bmp", "na webp", "na tiff"]
+        if re.search(file_ext_pattern, ql) or any(k in ql for k in format_keywords):
+            logging.info("File conversion keyword detected. Skipping Fast Model, routing to Main Model tool calling.")
+            return jsonify({"actions": [], "chips": []})
+
+    # 1.7 Regex Shortcuts (Speed Optimization)
+    fast_acts = check_fast_regex_actions(query)
+    if fast_acts:
+        return jsonify({"actions": fast_acts, "action": fast_acts[0], "chips": []})
+
+    # 1.76 Translate Fast Path - short phrase with non-ASCII letters (clearly foreign)
+    def _looks_foreign(text):
         words = text.strip().split()
         return 1 <= len(words) <= 4 and any(ord(c) > 127 and c.isalpha() for c in text)
 
@@ -1273,27 +1355,17 @@ def check_fast_regex_actions(query: str):
             except Exception as _te:
                 logging.warning(f"Translate fast path: {_te}")
 
-    # 1.8 SEARCH FIRST (Workflow Optimization)
-    # Perform general search immediately to provide context for the LLM.
-    # This avoids the "LLM guesses -> LLM says SEARCH -> Backend searches" round trip.
+    # 1.8 Skip LLM if no internet
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
-    
-    # Skip LLM inference entirely if there's no internet connection
     if not _is_connected():
         logging.info("No internet connection, skipping fast model inference")
         return jsonify({"actions": [], "chips": []})
 
-    # Pre-emptive search REMOVED to save time (was taking ~2.8s).
-    # The LLM will use the `web_search` tool if it needs information.
-    # We only initialize an empty context or minimal context if needed.
     search_context = ""
     search_results = []
-    
-    logging.info(f"Search Context prepared ({len(search_context)} chars)")
     logging.info(f"[TIMING] Pre-emptive search + context prep took: {time.time() - endpoint_start_time:.3f}s")
 
     # 2. LLM Inference
-    # Better prompt with more examples for different command types
     base_system_prompt = """You are an intelligent action classifier.
 Analyze the user query to decide the best action.
 You are NOT an assistant. You do NOT answer questions. You ONLY output commands.
@@ -1309,7 +1381,7 @@ Every non-think line MUST start with a valid command prefix.
 Never output PERSON with an empty description.
 Never output trailing '|' without text after it.
 
-- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED and MUST be 1-2 full sentences with specific context like role, organization, school/company/location when present in results. If you cannot provide this, output SEARCH:query instead.)
+- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED.)
 - PLACE:Name (results confirm location/city/school/institution)
 - OPEN:url (results show specific official website)
 - TRANSLATE:source_text|from_lang|to_lang|translated_text
@@ -1324,34 +1396,15 @@ Never output trailing '|' without text after it.
 - PASSWORD:length
 - QRCODE:data
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"...","value":...}
-
-Examples:
-<think>User asks about Mikolaj Piech. I don't know him. I will call web_search("Mikolaj Piech").
-(Tool returns bio)
-Now I know he is an app developer.</think>
-PERSON:Mikołaj Piech|He is an app developer from Poland...
-
-<think>User said "amor". Likely translation.</think>
-TRANSLATE:amor|es|pl|miłość
-
-<think>User asks about "zstib". Search shows "Zespół Szkół Technicznych i Branżowych w Brzesku" and website "zstib.edu.pl".
-This is a school (PLACE) and has a website (OPEN).</think>
-PLACE:ZSTiB Brzesko
-OPEN:https://zstib.edu.pl
-
-<think>User said "pornhub". This is a website. I should open it.</think>
-OPEN:https://www.pornhub.com
 """
-    
-    # Phase 1: Allow tools
+
     system_prompt = base_system_prompt.replace(
         "{tool_instruction}",
         "Think first: only call `web_search` if you truly need external, real-world info (unknown person/place/fact/event).\n"
-        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings, or any query you can confidently handle without external web information. Just output the command."
+        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings."
     )
-    
-    user_prompt = f"Query: {query}\n\n{search_context}"
 
+    user_prompt = f"Query: {query}\n\n{search_context}"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
@@ -1364,12 +1417,7 @@ OPEN:https://www.pornhub.com
             "description": "Search the web for information about people, places, companies, or facts.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
+                "properties": {"query": {"type": "string", "description": "The search query"}},
                 "required": ["query"]
             }
         }
@@ -1380,11 +1428,9 @@ OPEN:https://www.pornhub.com
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"{step_name}: request {request_id} superseded before lock.")
             return None
-
         if not model_manager.fast_lock.acquire(timeout=5.0):
             logging.error(f"{step_name}: failed to acquire fast_lock after 5 seconds.")
             return None
-
         try:
             if model_manager.current_fast_request_id != request_id:
                 logging.info(f"{step_name}: request {request_id} cancelled before inference.")
@@ -1394,14 +1440,9 @@ OPEN:https://www.pornhub.com
                 return None
             if reset_model and hasattr(model_manager.fast_model, 'reset'):
                 model_manager.fast_model.reset()
-
             out = model_manager.fast_model.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                request_id=request_id,
-                tools=tools,
-                tool_choice=tool_choice
+                messages=messages, max_tokens=max_tokens, temperature=temperature,
+                request_id=request_id, tools=tools, tool_choice=tool_choice
             )
             if out is None:
                 logging.info(f"{step_name}: completion aborted/empty for request {request_id}.")
@@ -1418,12 +1459,8 @@ OPEN:https://www.pornhub.com
         start_t = time.time()
 
         out = _safe_fast_completion(
-            messages=messages,
-            max_tokens=256,
-            temperature=0.0,
-            step_name="Action intent",
-            reset_model=True,
-            tools=[web_search_tool]
+            messages=messages, max_tokens=256, temperature=0.0,
+            step_name="Action intent", reset_model=True, tools=[web_search_tool]
         )
         if out is None:
             return jsonify({"actions": [], "chips": []})
@@ -1432,8 +1469,6 @@ OPEN:https://www.pornhub.com
         if out['choices'][0]['message'].get('tool_calls'):
             logging.info(f"[TIMING] Phase 1 decided to use tools at: {time.time() - endpoint_start_time:.3f}s")
             tool_calls = out['choices'][0]['message']['tool_calls']
-            # If model wants a web search, return immediately with a skeleton action.
-            # The UI will call /action_pending with pending_id to fetch the final action.
             q_tool = query
             try:
                 for tc in tool_calls:
@@ -1443,17 +1478,11 @@ OPEN:https://www.pornhub.com
                         break
             except Exception:
                 q_tool = query
-
             _pending_actions_put(request_id, {"query": query, "tool_query": q_tool})
-            pending_act = {
-                "type": "action_pending",
-                "pending_id": request_id,
-                "title": "Searching the web",
-                "subtitle": q_tool,
-            }
+            pending_act = {"type": "action_pending", "pending_id": request_id,
+                           "title": "Searching the web", "subtitle": q_tool}
             return jsonify({"actions": [pending_act], "action": pending_act, "chips": []})
 
-        # Check if this request was cancelled during inference
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"Request {request_id} was cancelled during inference")
             return jsonify({"actions": [], "chips": []})
@@ -1463,32 +1492,21 @@ OPEN:https://www.pornhub.com
         tok_count = out.get('usage', {}).get('completion_tokens', 0)
         tps = tok_count / dur if dur > 0 else 0
         logging.info(f"FastModel (Action): {tok_count} tokens in {dur:.2f}s ({tps:.2f} t/s)")
-        logging.info(f"[TIMING] Fast Model total inference time (end-to-end): {time.time() - endpoint_start_time:.3f}s")
+        logging.info(f"[TIMING] Fast Model total inference time: {time.time() - endpoint_start_time:.3f}s")
         result_text = out['choices'][0]['message']['content'].strip()
         logging.info(f"Raw Fast Model Output: {result_text!r}")
 
-        # Remove thinking blocks from Qwen (Handle unclosed tags too)
-        # If the result is ONLY thinking (no output), we might want to peek inside or just fail
         cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
-        
-        # If cleaning removed everything, but we had content, maybe the model forgot to close the tag
-        # or put the answer inside. Recover commands from the raw text if cleaned is empty.
         if not cleaned_text and result_text:
             logging.warning("Regex stripped everything. Checking raw text for commands...")
-            # Simple check: if raw text has commands, use raw text (stripping only the tag markers if possible)
             if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
-                 cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
-        
+                cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
         result_text = cleaned_text
 
         actions, chips = _parse_fast_action_output(
-            result_text=result_text,
-            query=query,
-            request_id=request_id,
-            endpoint_start_time=endpoint_start_time,
-            search_context=search_context,
-            search_results=search_results,
-            safe_fast_completion=_safe_fast_completion,
+            result_text=result_text, query=query, request_id=request_id,
+            endpoint_start_time=endpoint_start_time, search_context=search_context,
+            search_results=search_results, safe_fast_completion=_safe_fast_completion,
         )
         logging.info(f"[TIMING] Total action_endpoint time: {time.time() - endpoint_start_time:.3f}s")
         return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
