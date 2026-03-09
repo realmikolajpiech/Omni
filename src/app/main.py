@@ -2,7 +2,6 @@ import sys
 import os
 import logging
 import signal
-import keyboard
 import subprocess
 import atexit
 import glob
@@ -474,6 +473,7 @@ def main():
             logging.error(f"Failed to setup native macOS hotkeys: {e}")
             # Fallback to keyboard module if pynput fails
             try:
+                import keyboard
                 keyboard.add_hotkey('alt+space', toggle_omni, suppress=True)
             except Exception as e2:
                 logging.error(f"Fallback keyboard hotkey also failed: {e2}")
@@ -481,6 +481,7 @@ def main():
     else:
         # Windows / Linux: Use keyboard module
         try:
+            import keyboard
             # Add backup hotkey for testing
             keyboard.add_hotkey('ctrl+space', toggle_omni, suppress=True)
             logging.info("Global hotkey 'ctrl+space' registered via keyboard module")

@@ -1728,7 +1728,31 @@ class PermissionsPage(QWidget):
     # File access is probed with listdir() as before.
 
     def _check_ax(self) -> bool:
-        """Return True if Omni (com.omni.app) has Accessibility permission."""
+        """Return True if com.omni.app has Accessibility permission.
+
+        AXIsProcessTrustedWithOptions() only checks the *calling* process, which
+        is the installer — a different TCC identity from the installed Omni.app.
+        Instead, query the TCC SQLite database directly for com.omni.app.
+        """
+        import sqlite3
+        tcc_db = os.path.expanduser(
+            "~/Library/Application Support/com.apple.TCC/TCC.db"
+        )
+        try:
+            # Open read-only / immutable so we don't disturb the live DB.
+            with sqlite3.connect(f"file:{tcc_db}?immutable=1", uri=True) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT auth_value FROM access "
+                    "WHERE service='kTCCServiceAccessibility' "
+                    "AND client='com.omni.app'",
+                )
+                row = cur.fetchone()
+                # auth_value 2 = kTCCAuthorizationStatusAuthorized (macOS 12+)
+                return row is not None and row[0] == 2
+        except Exception:
+            pass
+        # Fallback: check the current process (works when installer IS Omni.app)
         try:
             _appserv = ctypes.cdll.LoadLibrary(
                 "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
