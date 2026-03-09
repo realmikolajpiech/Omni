@@ -9,6 +9,7 @@ class IPCWorker(QThread):
     query_requested = pyqtSignal(str)
     status_update = pyqtSignal(str)
     partial_update = pyqtSignal(str)
+    show_requested = pyqtSignal()
 
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -20,7 +21,9 @@ class IPCWorker(QThread):
             while True:
                 client, addr = server.accept()
                 data = client.recv(4096)
-                if data == b"TOGGLE":
+                if data == b"SHOW":
+                    self.show_requested.emit()
+                elif data == b"TOGGLE":
                     self.toggle_requested.emit("voice")
                 elif data == b"TOGGLE_MANUAL":
                      self.toggle_requested.emit("manual")
@@ -67,7 +70,10 @@ def start_ipc_listener(window_instance):
     # Connect the signal to a slot that toggles the window
     # We assume window_instance has a toggle_visibility_safe method
     ipc_thread.toggle_requested.connect(window_instance.toggle_visibility_safe)
-    
+
+    if hasattr(window_instance, 'handle_ipc_show'):
+        ipc_thread.show_requested.connect(window_instance.handle_ipc_show)
+
     # Check if window_instance has handle_ipc_query
     if hasattr(window_instance, 'handle_ipc_query'):
         ipc_thread.query_requested.connect(window_instance.handle_ipc_query)

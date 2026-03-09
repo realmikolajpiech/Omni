@@ -137,6 +137,8 @@ def main():
     timer.timeout.connect(lambda: None)
     timer.start(100)
 
+    hidden_mode = "--hidden" in sys.argv
+
     window = OmniWindow()
 
     # ── Onboarding (shown once on first launch) ───────────────────────────────
@@ -159,10 +161,24 @@ def main():
         dlg.finished.connect(lambda _: setattr(window, '_onboarding_dlg', None))
         dlg.finished.connect(lambda _: _show_main_window())
         window._onboarding_dlg = dlg  # keep alive
-        dlg.show()
+
+        if hidden_mode:
+            # Pre-launched by installer — wait for IPC SHOW before revealing.
+            def handle_ipc_show():
+                dlg.show()
+            window.handle_ipc_show = handle_ipc_show
+        else:
+            dlg.show()
     else:
-        window.show()
-        window.center()
+        if hidden_mode:
+            # Reinstall scenario — show window on IPC SHOW
+            def handle_ipc_show():
+                window.show()
+                window.center()
+            window.handle_ipc_show = handle_ipc_show
+        else:
+            window.show()
+            window.center()
 
     # ── Background update check ───────────────────────────────────────────────
     from PyQt6.QtCore import QObject, pyqtSignal as _Signal

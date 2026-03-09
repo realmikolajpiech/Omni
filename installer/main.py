@@ -897,6 +897,19 @@ class InstallWorker(QThread):
         self.progress.emit(90, "Downloading voice activation models…")
         self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models()"], env=env)
 
+        self.progress.emit(93, "Compiling speech recognition engine…")
+        if sys.platform == "darwin":
+            swift_src = INSTALL_DIR / "src" / "services" / "voice" / "streaming_asr.swift"
+            swift_bin = INSTALL_DIR / "src" / "services" / "voice" / "streaming_asr"
+            swiftc = shutil.which("swiftc")
+            if swift_src.exists() and swiftc:
+                rc, _, _ = self._run_cmd([
+                    swiftc, "-O", "-o", str(swift_bin), str(swift_src),
+                    "-framework", "Speech", "-framework", "AVFoundation",
+                ], env=env)
+                if rc == 0 and swift_bin.exists():
+                    swift_bin.chmod(swift_bin.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
         self.progress.emit(96, "Finalising…")
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         settings_file = CONFIG_DIR / "settings.json"
@@ -1668,14 +1681,12 @@ class PermissionsPage(QWidget):
     def _probe_speech_recognition(self):
         """Run the streaming_asr binary briefly to trigger TCC speech prompt."""
         try:
-            # Locate the streaming_asr binary relative to the installed source
+            # Locate the streaming_asr binary — check dev source tree then installed location
             for base in (
-                Path(__file__).resolve().parent,                          # installer dir
-                Path.home() / ".config" / "omni" / "src" / "services" / "voice",  # installed
+                Path(__file__).resolve().parent.parent,  # project root (dev mode)
+                INSTALL_DIR,                              # installed location
             ):
                 asr = base / "src" / "services" / "voice" / "streaming_asr"
-                if not asr.is_file():
-                    asr = base / "streaming_asr"
                 if asr.is_file() and os.access(str(asr), os.X_OK):
                     proc = subprocess.Popen(
                         [str(asr), "--lang", "en-US"],
@@ -2033,6 +2044,8 @@ class OmniInstallerWindow(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._drag_pos = None
+        self._omni_proc = None   # pre-launched Omni process
+        self._child_env = None   # env used to launch it
 
         # ── Central frame — paints its own background + aurora border ─────────
         self.central = _InstallerFrame(self)
@@ -2204,6 +2217,7 @@ class OmniInstallerWindow(QMainWindow):
             self.stop_border_animation()
             self.stack.setCurrentIndex(idx)
             self.dots.set_step(idx)
+            self._prelaunch_omni()
             if auto_launch:
                 self.page_done.auto_launch()
             return
@@ -2212,14 +2226,41 @@ class OmniInstallerWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         self.dots.set_step(idx)
 
-    def _launch_omni(self):
+    def _build_child_env(self):
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith(("DYLD_", "QT_", "_MEIPASS", "PYTHON"))
+        }
+        env.update({
+            "TRANSFORMERS_VERBOSITY": "error",
+            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+            "PYTHONUTF8": "1",
+        })
+        return env
+
+    def _prelaunch_omni(self):
+        """Start Omni hidden in the background as soon as the done page is shown.
+        By the time the user clicks 'Launch Omni' the process is already warmed up."""
+        if self._omni_proc is not None:
+            return  # already launched
+        python_cmd = INSTALL_DIR / "venv" / "bin" / "python3"
+        run_py = INSTALL_DIR / "run.py"
         SETUP_MARKER.touch()
+        self._child_env = self._build_child_env()
+        try:
+            self._omni_proc = subprocess.Popen(
+                [str(python_cmd), str(run_py), "--hidden"],
+                cwd=str(INSTALL_DIR),
+                env=self._child_env,
+            )
+        except Exception:
+            self._omni_proc = None
+
+    def _launch_omni(self):
         # Hide the wizard, then keep com.omni.app alive as the parent process
         # while the Omni app runs.  macOS TCC traces the "responsible app" by
         # walking up the parent chain — python3 must have com.omni.app as an
         # ancestor, or global hotkeys (Accessibility permission) won't work.
-        # subprocess.Popen uses posix_spawn (Cocoa-safe, unlike os.fork after
-        # Cocoa init) and still gives us a direct parent-child relationship.
         self.hide()
         # Remove the installer from the Dock while it stays alive as a parent
         if sys.platform == "darwin":
@@ -2228,29 +2269,72 @@ class OmniInstallerWindow(QMainWindow):
                 NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
             except Exception:
                 pass
-        run_sh = INSTALL_DIR / "run.sh"
-        try:
-            # Strip PyInstaller env vars so the venv Python isn't confused by
-            # frozen PYTHONHOME/PYTHONPATH pointing at the bundle's stdlib.
-            child_env = {
-                k: v for k, v in os.environ.items()
-                if not k.startswith(("DYLD_", "QT_", "_MEIPASS", "PYTHON"))
-            }
-            proc = subprocess.Popen(
-                ["/bin/bash", str(run_sh)],
-                cwd=str(INSTALL_DIR),
-                env=child_env,
-            )
-            # Background thread blocks until Omni quits, then exits the wizard.
-            def _wait():
+
+        if self._omni_proc is None:
+            # Fallback: pre-launch didn't happen, start normally
+            self._prelaunch_omni()
+
+        proc = self._omni_proc
+        child_env = self._child_env or self._build_child_env()
+        python_cmd = INSTALL_DIR / "venv" / "bin" / "python3"
+
+        # Tell the already-running hidden Omni to reveal its onboarding dialog.
+        # Retry for up to 30 s in case the process is still warming up.
+        def _send_show():
+            import socket as _socket
+            import time as _time
+            for _ in range(60):
                 try:
-                    proc.wait()
+                    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                    s.settimeout(1)
+                    s.connect(('127.0.0.1', 5556))
+                    s.sendall(b"SHOW")
+                    s.close()
+                    return
+                except Exception:
+                    _time.sleep(0.5)
+        threading.Thread(target=_send_show, daemon=True).start()
+
+        # Start background services
+        def _start_services():
+            import time as _time
+            _time.sleep(3)
+            logs_dir = INSTALL_DIR / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            try:
+                subprocess.Popen(
+                    [str(python_cmd), "src/services/search/watcher.py"],
+                    cwd=str(INSTALL_DIR),
+                    env=child_env,
+                    stdout=open(str(logs_dir / "watcher.log"), "a"),
+                    stderr=subprocess.STDOUT,
+                )
+            except Exception:
+                pass
+            if sys.platform == "darwin":
+                try:
+                    voice_env = {**child_env, "OMNI_LISTENER_LAUNCHED": "1"}
+                    subprocess.Popen(
+                        [str(python_cmd), "src/services/voice/listener.py"],
+                        cwd=str(INSTALL_DIR),
+                        env=voice_env,
+                        stdout=open(str(logs_dir / "listener.log"), "a"),
+                        stderr=subprocess.STDOUT,
+                    )
                 except Exception:
                     pass
-                QApplication.quit()
-            threading.Thread(target=_wait, daemon=True).start()
-        except Exception:
+
+        threading.Thread(target=_start_services, daemon=True).start()
+
+        # Background thread blocks until Omni quits, then exits the wizard.
+        def _wait():
+            try:
+                if proc:
+                    proc.wait()
+            except Exception:
+                pass
             QApplication.quit()
+        threading.Thread(target=_wait, daemon=True).start()
 
     # ── Drag to move ─────────────────────────────────────────────────────────
 

@@ -57,36 +57,6 @@ lsof -ti :5555 | xargs kill -9 2>/dev/null || true
 # Give OS time to release the port
 sleep 0.8
 
-if [ -d "searxng_local" ] && [ -f "searxng/start_searxng.py" ]; then
-    echo "Ensuring local SearXNG is running..."
-
-    $PYTHON_CMD -c "import flask_babel" >/dev/null 2>&1 || $PYTHON_CMD -m pip install -r searxng_local/requirements.txt
-
-    SEARXNG_STATUS="$(curl -s -m 1 -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/search?q=ping&format=json" -H "User-Agent: OmniOS/1.0" || true)"
-    if [ "$SEARXNG_STATUS" != "200" ]; then
-        mkdir -p logs
-        nohup $PYTHON_CMD searxng/start_searxng.py > logs/searxng.log 2>&1 &
-        STARTED=0
-        i=0
-        while [ $i -lt 10 ]; do
-            sleep 0.5
-            SEARXNG_STATUS="$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/search?q=ping&format=json" -H "User-Agent: OmniOS/1.0" || true)"
-            if [ "$SEARXNG_STATUS" = "200" ]; then
-                STARTED=1
-                break
-            fi
-            i=$((i + 1))
-        done
-        if [ "$STARTED" = "1" ]; then
-            echo "Local SearXNG started."
-        else
-            echo "Warning: Local SearXNG did not start (see logs/searxng.log)."
-        fi
-    else
-        echo "Local SearXNG already running."
-    fi
-fi
-
 # Environment Variables
 export TRANSFORMERS_VERBOSITY=error
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
