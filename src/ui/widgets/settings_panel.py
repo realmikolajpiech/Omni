@@ -2390,9 +2390,8 @@ class SettingsPanel(QWidget):
             return
         if isinstance(stats, int):
             # Legacy: plain count passed (cached from old settings_store entry)
-            stats = {"referral_count": stats, "confirmed_count": 0, "active_count": 0, "free_months_due": 0}
+            stats = {"confirmed_count": 0, "active_count": 0, "free_months_due": 0}
 
-        total     = stats.get("referral_count",  0)
         confirmed = stats.get("confirmed_count", 0)
         active    = stats.get("active_count",    0)
         months    = stats.get("free_months_due", 0)
@@ -2402,8 +2401,6 @@ class SettingsPanel(QWidget):
         self._ref_copy_btn.setEnabled(True)
 
         # Stat labels
-        if hasattr(self, "_ref_stat_total"):
-            self._ref_stat_total.setText(str(total) if total else "—")
         if hasattr(self, "_ref_stat_confirmed"):
             self._ref_stat_confirmed.setText(str(confirmed) if confirmed else "—")
         if hasattr(self, "_ref_stat_active"):
