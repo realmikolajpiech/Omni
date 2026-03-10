@@ -278,9 +278,10 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
         window.setWindowOpacity(0.0)
 
         def _show_main_window():
-            window.setWindowOpacity(1.0)
+            window.setWindowOpacity(0.0)
             window.show()
             window.center()
+            window.animate_entry()
 
         dlg = OnboardingDialog()
         dlg.accepted.connect(lambda: _settings.set("onboarding_shown", True))

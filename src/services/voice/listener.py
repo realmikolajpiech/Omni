@@ -122,6 +122,7 @@ class VoiceService:
         self._oww_score_window = []   # sliding window of recent scores
         self._oww_last_trigger_time = 0.0  # cooldown timer
         self._oww_last_log_time = 0.0  # for periodic score logging
+        self._manual_listening = False  # True when user manually activated mic
 
         self.setup_models()
         self.setup_udp()
@@ -371,12 +372,17 @@ class VoiceService:
                     audio_to_transcribe = None
                     if self.audio_buffer:
                         audio_to_transcribe = np.concatenate(self.audio_buffer)
+                    self._manual_listening = False
                     self.set_mode("PAUSED")
                     if audio_to_transcribe is not None and len(audio_to_transcribe) > 0:
                         self._transcribe_and_send(audio_to_transcribe)
+                    else:
+                        logger.warning("COMMIT_AUDIO: buffer was empty — no audio captured.")
                 elif msg == "SET_MODE:IDLE":
+                    self._manual_listening = False
                     self.set_mode("IDLE")
                 elif msg == "SET_MODE:LISTENING":
+                    self._manual_listening = True
                     self.set_mode("LISTENING")
                     self.play_cue(active=True)
                 elif msg == "SET_MODE:PAUSED":
@@ -488,8 +494,8 @@ class VoiceService:
                         elif mode == "LISTENING":
                             self.handle_listening(audio_data)
                         elif mode == "PAUSED":
-                            # Wake word also in PAUSED so "Alexa" works with window open (same-chat follow-up)
-                            self.handle_idle(audio_data)
+                            # Wake word in PAUSED = follow-up while window is open
+                            self.handle_idle(audio_data, paused_mode=True)
 
             except Exception as e:
                 logger.error(f"Audio Stream Error: {e}")
@@ -499,7 +505,7 @@ class VoiceService:
                 logger.info("Restarting audio stream in 2 seconds...")
                 time.sleep(2)
 
-    def handle_idle(self, audio_data: np.ndarray):
+    def handle_idle(self, audio_data: np.ndarray, paused_mode: bool = False):
         """Wake word detection using openWakeWord with two-tier sensitivity."""
         if not self.oww_model or not self._oww_key:
             return
@@ -552,9 +558,15 @@ class VoiceService:
                 self._oww_last_trigger_time = now
                 self._oww_score_window = []
                 self._oww_trigger_count = 0
+                self._manual_listening = False
                 self.set_mode("LISTENING")
                 self.play_cue(active=True)
-                self.send_ipc(b"TOGGLE")
+                if paused_mode:
+                    # Window already visible — just activate mic for follow-up, don't toggle
+                    pass
+                else:
+                    # Window hidden — show it
+                    self.send_ipc(b"TOGGLE")
 
         except Exception as e:
             logger.error(f"Wake word detection error: {e}")
@@ -579,10 +591,12 @@ class VoiceService:
             if self.is_speaking:
                 self.silence_frames += 1
             else:
-                # Keep only the last 1 second of pre-speech buffer
-                max_pre_speech_blocks = int(1.0 * SAMPLE_RATE / BLOCK_SIZE)
-                if len(self.audio_buffer) > max_pre_speech_blocks:
-                    self.audio_buffer = self.audio_buffer[-max_pre_speech_blocks:]
+                # When user manually activated the mic, keep all audio (don't trim).
+                # For wake-word-activated listening, keep up to 3s of pre-speech context.
+                if not self._manual_listening:
+                    max_pre_speech_blocks = int(3.0 * SAMPLE_RATE / BLOCK_SIZE)
+                    if len(self.audio_buffer) > max_pre_speech_blocks:
+                        self.audio_buffer = self.audio_buffer[-max_pre_speech_blocks:]
 
         # 3. End-of-utterance detection
         if self.is_speaking and self.silence_frames > self.max_silence_frames:
