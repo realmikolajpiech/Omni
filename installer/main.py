@@ -2214,6 +2214,7 @@ class OmniInstallerWindow(QMainWindow):
         elif idx == 3 and self.stack.currentIndex() == 2:
             self.page_index.start_indexing()
             self.start_border_animation()
+            self._prelaunch_omni()  # warm up Omni during indexing so Done page is instant
         elif idx == 4:
             self.stop_border_animation()
             self.stack.setCurrentIndex(idx)

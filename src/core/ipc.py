@@ -71,8 +71,10 @@ def start_ipc_listener(window_instance):
     # We assume window_instance has a toggle_visibility_safe method
     ipc_thread.toggle_requested.connect(window_instance.toggle_visibility_safe)
 
-    if hasattr(window_instance, 'handle_ipc_show'):
-        ipc_thread.show_requested.connect(window_instance.handle_ipc_show)
+    def _dispatch_show():
+        if hasattr(window_instance, 'handle_ipc_show'):
+            window_instance.handle_ipc_show()
+    ipc_thread.show_requested.connect(_dispatch_show)
 
     # Check if window_instance has handle_ipc_query
     if hasattr(window_instance, 'handle_ipc_query'):
