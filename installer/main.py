@@ -1894,10 +1894,11 @@ class DonePage(QWidget):
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><false/>
 </dict></plist>""")
-            subprocess.run(
-                ["launchctl", "load", str(LAUNCH_AGENT)],
-                capture_output=True,
-            )
+            # Do NOT call launchctl load here — that would execute run.sh
+            # immediately (due to RunAtLoad=true), which kills the pre-launched
+            # hidden Omni process before onboarding can appear.
+            # macOS automatically picks up agents from ~/Library/LaunchAgents/
+            # at the next login, so the plist is all we need for auto-start.
         except Exception as e:
             print(f"LaunchAgent error: {e}")
 
@@ -2273,8 +2274,9 @@ class OmniInstallerWindow(QMainWindow):
             except Exception:
                 pass
 
-        if self._omni_proc is None:
-            # Fallback: pre-launch didn't happen, start normally
+        if self._omni_proc is None or self._omni_proc.poll() is not None:
+            # Fallback: pre-launch didn't happen or the process has since died
+            self._omni_proc = None
             self._prelaunch_omni()
 
         proc = self._omni_proc

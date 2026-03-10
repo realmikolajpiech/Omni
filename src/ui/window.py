@@ -193,7 +193,7 @@ class OmniWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("omni-search")
         self.setWindowIcon(QIcon(LOGO_PATH))
-        self.resize(DEFAULT_WIDTH, 160) # Slightly larger initial size
+        self.resize(DEFAULT_WIDTH, 160)
         
         self.anim = QPropertyAnimation(self, b"geometry")
         self.anim.setDuration(450)
@@ -208,13 +208,12 @@ class OmniWindow(QWidget):
         self.frame.setObjectName("MainFrame")
         self.frame.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         
-        self._is_closing = False # Flag to track animation state
+        self._is_closing = False 
 
         frame_layout = QVBoxLayout(self.frame)
         frame_layout.setContentsMargins(0, 0, 0, 0)
         frame_layout.setSpacing(0)
 
-        # Content Frame (Inner)
         self.content_frame = QWidget()
         self.content_frame.setObjectName("ContentFrame")
         self.content_frame.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)

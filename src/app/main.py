@@ -179,8 +179,18 @@ def main():
                     except Exception:
                         pass
 
+        def _show_onboarding():
+            dlg.show()
+            dlg.raise_()
+            if sys.platform == "darwin":
+                try:
+                    from AppKit import NSApplication
+                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                except Exception:
+                    pass
+
         _listener = _ShowListener()
-        _listener.show_signal.connect(dlg.show)
+        _listener.show_signal.connect(_show_onboarding)
         _listener.start()
 
         # Pre-import heavy modules in background while user reads onboarding.
