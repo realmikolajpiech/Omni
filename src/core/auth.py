@@ -377,6 +377,27 @@ def exchange_magic_link(url: str, on_done) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def send_password_reset(email: str) -> tuple[bool, str]:
+    """Send a Supabase password-recovery email that redirects to the setup page."""
+    import urllib.parse
+    try:
+        redirect = urllib.parse.quote("https://heyomni.app/setup", safe="")
+        payload = json.dumps({"email": email.strip()}).encode()
+        req = urllib.request.Request(
+            f"{SUPABASE_URL}/auth/v1/recover?redirect_to={redirect}",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "apikey":       SUPABASE_ANON_KEY,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=12):
+            pass
+        return True, "Check your email for a password reset link."
+    except Exception as e:
+        return False, f"Could not send reset email: {e}"
+
+
 def update_password(new_password: str) -> tuple[bool, str]:
     """Update the password for the currently signed-in user."""
     token = get_access_token()

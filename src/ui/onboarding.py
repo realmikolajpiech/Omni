@@ -1266,12 +1266,11 @@ class OnboardingDialog(QDialog):
         email = user.get("email") or None
         interval = getattr(self, "_interval", "yearly")
         referred_by = settings_store.get("used_referral_code") or None
-        # Also pick up any code typed into the referral input on the paywall
+        # The typed field always wins — if it's empty the user intentionally cleared it
         if hasattr(self, "_referral_code_edit"):
             typed = self._referral_code_edit.text().strip()
-            if typed:
-                referred_by = typed
-                settings_store.set("used_referral_code", typed)
+            referred_by = typed if typed else None
+            settings_store.set("used_referral_code", typed if typed else "")
 
         def _run():
             import webbrowser

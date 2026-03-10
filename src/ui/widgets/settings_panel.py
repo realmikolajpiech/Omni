@@ -353,6 +353,64 @@ def _font(family: str, size: int, bold: bool = False, italic: bool = False) -> Q
     return f
 
 
+def _make_google_icon(size: int = 18) -> QIcon:
+    """Render the Google 'G' logo into a QIcon (uses QtSvg if available)."""
+    from PyQt6.QtCore import QByteArray
+    from PyQt6.QtGui import QPixmap
+    _SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">
+      <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844
+               c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908
+               c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+      <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258
+               c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711
+               H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+      <path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167
+               .282-1.707V4.961H.957C.347 6.175 0 7.548 0 9s.348 2.825
+               .957 4.039l3.007-2.332z" fill="#FBBC05"/>
+      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58
+               C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017
+               .957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"
+            fill="#EA4335"/>
+    </svg>"""
+    try:
+        from PyQt6.QtSvg import QSvgRenderer
+        renderer = QSvgRenderer(QByteArray(_SVG))
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        renderer.render(p)
+        p.end()
+        return QIcon(px)
+    except Exception:
+        pass
+    # Fallback: plain blue circle with white "G"
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QBrush(QColor("#4285F4")))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(0, 0, size, size)
+    p.setPen(QColor("white"))
+    f = QFont("Arial", size * 6 // 10)
+    f.setWeight(QFont.Weight.Bold)
+    p.setFont(f)
+    from PyQt6.QtCore import QRect
+    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "G")
+    p.end()
+    return QIcon(px)
+
+
+_GOOGLE_BTN_SS = (
+    "QPushButton { background: #ffffff; border: 1px solid #dadce0; border-radius: 10px; "
+    "color: #3c4043; font-family: 'Manrope'; font-size: 13px; font-weight: 500; "
+    "padding: 0 16px; text-align: center; } "
+    "QPushButton:hover { background: #f8f9fa; border-color: #c6c9cc; } "
+    "QPushButton:pressed { background: #f1f3f4; } "
+    "QPushButton:disabled { color: #9aa0a6; background: #f8f9fa; }"
+)
+
+
 # ---------------------------------------------------------------------------
 # Usage Bar
 # ---------------------------------------------------------------------------
@@ -1243,8 +1301,6 @@ class SettingsPanel(QWidget):
             d.setStyleSheet("background: rgba(255,255,255,0.09); border: none;")
             return d
 
-        stats_h.addWidget(_stat_col("Total invites",  "_ref_stat_total"),     1)
-        stats_h.addWidget(_stat_divider())
         stats_h.addWidget(_stat_col("Confirmed Pro",  "_ref_stat_confirmed"), 1)
         stats_h.addWidget(_stat_divider())
         stats_h.addWidget(_stat_col("Active",         "_ref_stat_active"),    1)
@@ -1642,11 +1698,13 @@ class SettingsPanel(QWidget):
         ac.addSpacing(14)
 
         self.auth_email_edit = self._edit("Email")
+        self.auth_email_edit.textChanged.connect(lambda: self._set_auth_error(""))
         ac.addWidget(self.auth_email_edit)
 
         ac.addSpacing(8)
 
         self.auth_pass_edit = self._edit("Password", password=True)
+        self.auth_pass_edit.textChanged.connect(lambda: self._set_auth_error(""))
         self.auth_pass_edit.returnPressed.connect(self._do_sign_in)
         ac.addWidget(self.auth_pass_edit)
 
@@ -1673,6 +1731,24 @@ class SettingsPanel(QWidget):
         btn_row.addStretch()
         ac.addLayout(btn_row)
 
+        self.auth_error_lbl = QLabel("")
+        self.auth_error_lbl.setFont(_font("Manrope", 10))
+        self.auth_error_lbl.setStyleSheet("color: #f87171; background: transparent;")
+        self.auth_error_lbl.setWordWrap(True)
+        self.auth_error_lbl.setVisible(False)
+        ac.addWidget(self.auth_error_lbl)
+
+        self.forgot_pw_btn = QPushButton("Forgot password?")
+        self.forgot_pw_btn.setFlat(True)
+        self.forgot_pw_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forgot_pw_btn.setStyleSheet(
+            "QPushButton { color: rgba(255,255,255,0.38); background: transparent; border: none; "
+            "font-family: Manrope; font-size: 10px; text-align: left; padding: 0; } "
+            "QPushButton:hover { color: rgba(255,255,255,0.65); }"
+        )
+        self.forgot_pw_btn.clicked.connect(self._do_forgot_password)
+        ac.addWidget(self.forgot_pw_btn)
+
         ac.addSpacing(12)
 
         sep_row = QHBoxLayout()
@@ -1690,10 +1766,12 @@ class SettingsPanel(QWidget):
 
         ac.addSpacing(10)
 
-        self.google_btn = QPushButton("Continue with Google")
-        self.google_btn.setObjectName("OAuthBtn")
-        self.google_btn.setFixedHeight(38)
+        self.google_btn = QPushButton("  Continue with Google")
+        self.google_btn.setFixedHeight(40)
+        self.google_btn.setIcon(_make_google_icon(18))
+        self.google_btn.setIconSize(QSize(18, 18))
         self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.google_btn.setStyleSheet(_GOOGLE_BTN_SS)
         self.google_btn.clicked.connect(lambda: self._do_oauth("google"))
         ac.addWidget(self.google_btn)
 
@@ -1925,10 +2003,12 @@ class SettingsPanel(QWidget):
         self.set_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_password_btn.clicked.connect(self._do_set_password)
 
-        self.link_google_btn = QPushButton("Connect Google")
-        self.link_google_btn.setObjectName("OAuthBtn")
+        self.link_google_btn = QPushButton("  Connect Google")
         self.link_google_btn.setFixedHeight(36)
+        self.link_google_btn.setIcon(_make_google_icon(16))
+        self.link_google_btn.setIconSize(QSize(16, 16))
         self.link_google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.link_google_btn.setStyleSheet(_GOOGLE_BTN_SS)
         self.link_google_btn.clicked.connect(lambda: self._do_oauth("google"))
 
         secure_btns.addWidget(self.set_password_btn)
@@ -2165,10 +2245,16 @@ class SettingsPanel(QWidget):
 
             # 1. Fast path: already stored in Omni app Supabase (has full stats)
             code, stats = self._fetch_referral_from_app_sb(user_id, access_token)
+            if stats is None:
+                # Network/auth error — don't fall through and risk corrupting server data;
+                # the cached code was already shown by the fast-path above.
+                return
             if code:
                 settings_store.save_settings({"referral_code": code})
                 self._dispatch.emit(lambda c=code, s=stats: self._apply_referral_ui(c, s))
                 return
+
+            # stats == {} means server responded with no row yet — safe to create one.
 
             # 2. User was on the website waitlist — sync their existing code
             ws_code, ws_count, _ = self._read_waitlist_code(email)
@@ -2231,12 +2317,18 @@ class SettingsPanel(QWidget):
         return hashlib.md5(str(random.random()).encode()).hexdigest()[:8]
 
     def _fetch_referral_from_app_sb(self, user_id: str, access_token: str):
-        """Read referral data from the Omni app's Supabase referral_codes table."""
+        """Read referral data from the Omni app's Supabase referral_codes table.
+
+        Returns:
+            (code, stats_dict) — row found
+            (None, {})         — server responded but no row exists yet
+            (None, None)       — network/parse error; caller should NOT fall through
+        """
         import urllib.request
         import urllib.parse
         import json as _json
         if not user_id or not access_token:
-            return None, 0
+            return None, None
         try:
             params = urllib.parse.urlencode({
                 "user_id": f"eq.{user_id}",
@@ -2253,15 +2345,16 @@ class SettingsPanel(QWidget):
                 rows = _json.loads(resp.read())
             if rows:
                 r = rows[0]
-                return r.get("referral_code", ""), {
+                return r.get("referral_code") or "", {
                     "referral_count":  r.get("referral_count",  0),
                     "confirmed_count": r.get("confirmed_count", 0),
                     "active_count":    r.get("active_count",    0),
                     "free_months_due": r.get("free_months_due", 0),
                 }
+            # Server responded OK — user just has no row yet
+            return None, {}
         except Exception:
-            pass
-        return None, 0
+            return None, None
 
     def _save_referral_to_app_sb(self, user_id: str, access_token: str, code: str, count: int):
         """Upsert referral code into the Omni app's Supabase referral_codes table."""
@@ -2574,11 +2667,46 @@ class SettingsPanel(QWidget):
         else:
             self.sign_in_btn.setText("Sign In")
 
+    def _do_forgot_password(self):
+        email = self.auth_email_edit.text().strip()
+        if not email:
+            self._set_auth_error("Enter your email address first.")
+            return
+        self._set_auth_error("")
+        self.forgot_pw_btn.setEnabled(False)
+        self.forgot_pw_btn.setText("Sending…")
+
+        import threading
+        def _run():
+            ok, msg = auth.send_password_reset(email)
+            def _done():
+                self.forgot_pw_btn.setEnabled(True)
+                self.forgot_pw_btn.setText("Forgot password?")
+                if ok:
+                    self._set_auth_error("")
+                    self._account_status(msg)
+                else:
+                    self._set_auth_error(msg)
+            self._dispatch.emit(_done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _set_auth_error(self, msg: str):
+        """Show an error inline in the login form, just below the buttons."""
+        if not hasattr(self, "auth_error_lbl"):
+            return
+        if msg:
+            self.auth_error_lbl.setText(msg)
+            self.auth_error_lbl.setVisible(True)
+        else:
+            self.auth_error_lbl.setText("")
+            self.auth_error_lbl.setVisible(False)
+
     def _do_sign_in(self):
         email = self.auth_email_edit.text().strip()
         pw    = self.auth_pass_edit.text()
         if not email or not pw:
             return
+        self._set_auth_error("")
         self._set_auth_busy(True)
 
         import threading
@@ -2588,10 +2716,11 @@ class SettingsPanel(QWidget):
                 self._set_auth_busy(False)
                 if ok:
                     self.auth_pass_edit.clear()
+                    self._set_auth_error("")
                     self.refresh_account()
                     subscription.refresh_status(callback=lambda s: self._dispatch.emit(lambda: self._update_account_ui(s)))
                 else:
-                    self._account_status(msg, error=True)
+                    self._set_auth_error(msg)
             self._dispatch.emit(_done)
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2600,6 +2729,7 @@ class SettingsPanel(QWidget):
         pw    = self.auth_pass_edit.text()
         if not email or not pw:
             return
+        self._set_auth_error("")
         self._set_auth_busy(True)
 
         import threading
@@ -2607,9 +2737,12 @@ class SettingsPanel(QWidget):
             ok, msg = auth.sign_up(email, pw)
             def _done():
                 self._set_auth_busy(False)
-                self._account_status(msg, error=not ok)
-                if ok and auth.is_logged_in():
-                    self.refresh_account()
+                if ok:
+                    self._set_auth_error("")
+                    if auth.is_logged_in():
+                        self.refresh_account()
+                else:
+                    self._set_auth_error(msg)
             self._dispatch.emit(_done)
         threading.Thread(target=_run, daemon=True).start()
 
