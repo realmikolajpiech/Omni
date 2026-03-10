@@ -87,5 +87,10 @@ app = BUNDLE(
         "LSMinimumSystemVersion": "12.0",
         "NSPrincipalClass": "NSApplication",
         "NSAppleScriptEnabled": False,
+        # Privacy usage descriptions — required on macOS 14+ or the OS crashes
+        # the process with SIGABRT the moment any privacy API is accessed.
+        "NSMicrophoneUsageDescription": "Omni uses the microphone to listen for the \"Hey Omni\" wake word and to transcribe voice commands.",
+        "NSSpeechRecognitionUsageDescription": "Omni uses speech recognition to convert your voice commands into text.",
+        "NSAppleEventsUsageDescription": "Omni uses Apple Events to automate tasks on your Mac.",
     },
 )

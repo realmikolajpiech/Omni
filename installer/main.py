@@ -1426,66 +1426,6 @@ class PermissionsPage(QWidget):
 
         v.addSpacing(8)
 
-        # ── Microphone card ───────────────────────────────────────────────────
-        mic_card = Card()
-        mic_v    = QVBoxLayout(mic_card)
-        mic_v.setContentsMargins(20, 14, 20, 14)
-        mic_v.setSpacing(8)
-
-        mic_top = QHBoxLayout()
-        mic_top.setSpacing(0)
-        mic_txt = QVBoxLayout()
-        mic_txt.setSpacing(2)
-        mic_txt.addWidget(make_label("Microphone", size=13, weight=600))
-        mic_desc = make_label(
-            "Required for voice commands and \"Hey Omni\" activation.",
-            size=12, color=TEXT_SEC)
-        mic_txt.addWidget(mic_desc)
-        self._mic_badge = _PermBadge()
-        mic_top.addLayout(mic_txt, 1)
-        mic_top.addWidget(self._mic_badge, 0,
-                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        mic_v.addLayout(mic_top)
-
-        mic_btn = QPushButton("Grant Microphone Access →")
-        mic_btn.setObjectName("secondary")
-        mic_btn.setFixedHeight(34)
-        mic_btn.clicked.connect(self._request_microphone)
-        mic_v.addWidget(mic_btn)
-        v.addWidget(mic_card)
-
-        v.addSpacing(8)
-
-        # ── Speech Recognition card ───────────────────────────────────────────
-        sr_card = Card()
-        sr_v    = QVBoxLayout(sr_card)
-        sr_v.setContentsMargins(20, 14, 20, 14)
-        sr_v.setSpacing(8)
-
-        sr_top = QHBoxLayout()
-        sr_top.setSpacing(0)
-        sr_txt = QVBoxLayout()
-        sr_txt.setSpacing(2)
-        sr_txt.addWidget(make_label("Speech Recognition", size=13, weight=600))
-        sr_desc = make_label(
-            "Lets Omni transcribe your voice into text on-device.",
-            size=12, color=TEXT_SEC)
-        sr_txt.addWidget(sr_desc)
-        self._sr_badge = _PermBadge()
-        sr_top.addLayout(sr_txt, 1)
-        sr_top.addWidget(self._sr_badge, 0,
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        sr_v.addLayout(sr_top)
-
-        sr_btn = QPushButton("Grant Speech Recognition →")
-        sr_btn.setObjectName("secondary")
-        sr_btn.setFixedHeight(34)
-        sr_btn.clicked.connect(self._request_speech_recognition)
-        sr_v.addWidget(sr_btn)
-        v.addWidget(sr_card)
-
-        v.addSpacing(8)
-
         outer.addWidget(Divider())
 
         footer = QHBoxLayout()
@@ -1622,14 +1562,57 @@ class PermissionsPage(QWidget):
         ])
 
     def _probe_microphone(self):
-        """Open a brief audio stream to trigger the TCC microphone prompt."""
+        """Request TCC microphone permission via the proper AVFoundation API.
+
+        On macOS 14+ (Sonoma) / 15+ (Sequoia), simply opening a PortAudio stream
+        no longer triggers the TCC dialog — it silently returns silent audio.
+        We must call AVCaptureDevice.requestAccessForMediaType:completionHandler:
+        which is the only API guaranteed to show the system permission dialog.
+
+        After granting permission to the app bundle (com.omni.app), we also run
+        a quick probe from the venv python3 while Omni.app is still the responsible
+        app in the process tree, so the runtime listener binary inherits the grant.
+        """
+        import time
+
+        # 1. Use the proper AVFoundation API to trigger the TCC dialog.
+        try:
+            from AVFoundation import AVCaptureDevice
+            status = AVCaptureDevice.authorizationStatusForMediaType_("soun")
+            if status == 0:  # notDetermined — request now (shows dialog)
+                _done = threading.Event()
+                def _cb(granted):
+                    _done.set()
+                AVCaptureDevice.requestAccessForMediaType_completionHandler_("soun", _cb)
+                _done.wait(timeout=30)
+        except Exception:
+            pass
+
+        # 2. Fallback: open a sounddevice stream (covers older macOS / missing PyObjC).
         try:
             import sounddevice as sd
             with sd.InputStream(samplerate=16000, blocksize=1280, channels=1):
-                import time
-                time.sleep(0.2)
+                time.sleep(0.3)
         except Exception:
             pass
+
+        # 3. Run the same probe from the venv's python3 so that binary also
+        #    gets mic access while com.omni.app is still its responsible app.
+        python_venv = INSTALL_DIR / "venv" / "bin" / "python3"
+        if python_venv.exists():
+            try:
+                subprocess.run(
+                    [str(python_venv), "-c",
+                     "import sounddevice as sd, time\n"
+                     "try:\n"
+                     "    s = sd.InputStream(samplerate=16000, blocksize=1280, channels=1)\n"
+                     "    s.start(); time.sleep(0.3); s.stop()\n"
+                     "except Exception: pass"],
+                    timeout=8,
+                    cwd=str(INSTALL_DIR),
+                )
+            except Exception:
+                pass
 
     def _check_microphone(self) -> bool:
         """Return True if microphone permission is granted."""
@@ -1743,8 +1726,9 @@ class PermissionsPage(QWidget):
 
         Primary: AXIsProcessTrustedWithOptions() — checks the calling process.
         Works when the installer is bundled as Omni.app (same bundle ID).
-        Fallback: query TCC SQLite database directly for com.omni.app
-        (may fail on modern macOS where TCC.db is protected).
+        Fallback: query TCC SQLite databases for com.omni.app.
+        Accessibility entries are in the system-wide TCC.db (world-readable),
+        not the user TCC.db (which requires FDA to read).
         """
         # Primary: check current process directly
         try:
@@ -1752,38 +1736,71 @@ class PermissionsPage(QWidget):
                 "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
             )
             _appserv.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-            _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-            if bool(_appserv.AXIsProcessTrustedWithOptions(None)):
+            _appserv.AXIsProcessTrustedWithOptions.restype = ctypes.c_int
+            if _appserv.AXIsProcessTrustedWithOptions(None) != 0:
                 return True
         except Exception:
             pass
-        # Fallback: query TCC database (may fail on macOS 13+ due to SIP)
+        # Fallback: query TCC databases.
+        # Accessibility permissions live in the system-wide database which is
+        # readable without FDA. Check it first, then the user database.
         import sqlite3
-        tcc_db = os.path.expanduser(
-            "~/Library/Application Support/com.apple.TCC/TCC.db"
-        )
-        try:
-            with sqlite3.connect(f"file:{tcc_db}?immutable=1", uri=True) as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT auth_value FROM access "
-                    "WHERE service='kTCCServiceAccessibility' "
-                    "AND client='com.omni.app'",
-                )
-                row = cur.fetchone()
-                return row is not None and row[0] == 2
-        except Exception:
-            return False
+        tcc_dbs = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            os.path.expanduser("~/Library/Application Support/com.apple.TCC/TCC.db"),
+        ]
+        for tcc_db in tcc_dbs:
+            try:
+                with sqlite3.connect(f"file:{tcc_db}?immutable=1", uri=True) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT auth_value FROM access "
+                        "WHERE service='kTCCServiceAccessibility' "
+                        "AND client='com.omni.app'",
+                    )
+                    row = cur.fetchone()
+                    if row is not None and row[0] == 2:
+                        return True
+            except Exception:
+                pass
+        return False
 
     def _check_fda_native(self) -> bool:
-        """Return True if Omni (com.omni.app) has Full Disk Access."""
+        """Return True if Omni (com.omni.app) has Full Disk Access.
+
+        Primary: query the system-wide TCC.db (world-readable) for
+        kTCCServiceSystemPolicyAllFiles — this works without FDA.
+        Fallback: probe ~/Library/Mail directly (requires FDA to succeed).
+        """
+        import sqlite3
+        # System-wide TCC.db is readable without special permissions and
+        # stores Full Disk Access grants made via System Settings.
+        tcc_dbs = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            os.path.expanduser("~/Library/Application Support/com.apple.TCC/TCC.db"),
+        ]
+        for tcc_db in tcc_dbs:
+            try:
+                with sqlite3.connect(f"file:{tcc_db}?immutable=1", uri=True) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT auth_value FROM access "
+                        "WHERE service='kTCCServiceSystemPolicyAllFiles' "
+                        "AND client='com.omni.app'",
+                    )
+                    row = cur.fetchone()
+                    if row is not None and row[0] == 2:
+                        return True
+            except Exception:
+                pass
+        # Fallback: directly probe a FDA-protected path
         try:
             os.listdir(os.path.expanduser("~/Library/Mail"))
             return True
         except PermissionError:
             return False
         except OSError:
-            # ENOENT or similar — TCC allowed the call, folder just doesn't exist
+            # ENOENT — TCC allowed the call, folder just doesn't exist
             return True
 
     def _check_file_access(self) -> bool:
@@ -1804,8 +1821,6 @@ class PermissionsPage(QWidget):
         self._fda_badge.set_granted(self._check_fda_native())
         # Always check folder access — show granted state even if user never clicked
         self._files_badge.set_granted(self._check_file_access())
-        self._mic_badge.set_granted(self._check_microphone())
-        self._sr_badge.set_granted(self._check_speech_recognition())
 
 
 
@@ -2251,6 +2266,9 @@ class OmniInstallerWindow(QMainWindow):
         run_py = INSTALL_DIR / "run.py"
         SETUP_MARKER.touch()
         self._child_env = self._build_child_env()
+        # Tell main.py NOT to spawn its own voice listener — _start_services()
+        # will launch the single listener with proper logging once Omni is up.
+        self._child_env["OMNI_LISTENER_LAUNCHED"] = "1"
         try:
             self._omni_proc = subprocess.Popen(
                 [str(python_cmd), str(run_py), "--hidden"],
@@ -2368,17 +2386,34 @@ def _install_done() -> bool:
 
 
 def main():
-    # Subclass QApplication to suppress macOS "reopen" events.
+    # Subclass QApplication to handle macOS "reopen" events.
     # When pip/venv spawns Python subprocesses, macOS sends
     # applicationShouldHandleReopen to the running Qt app, which
-    # Qt handles by creating a new top-level window.  We swallow it.
+    # Qt handles by creating a new top-level window.  We swallow it
+    # during installation, and forward to Omni once we're in waiting mode.
     class _App(QApplication):
         def event(self, e):
             if e.type() in (
                 QEvent.Type.ApplicationActivate,
                 QEvent.Type.ApplicationActivated,
             ):
-                return True  # suppress — window already visible
+                # If the installer window is hidden (we're waiting for Omni to exit),
+                # forward the activation as a toggle so Omni shows its window.
+                installer_visible = any(
+                    isinstance(w, OmniInstallerWindow) and w.isVisible()
+                    for w in QApplication.topLevelWidgets()
+                )
+                if not installer_visible:
+                    import socket as _sock
+                    try:
+                        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                        s.settimeout(0.5)
+                        s.connect(('127.0.0.1', 5556))
+                        s.sendall(b"TOGGLE_MANUAL")
+                        s.close()
+                    except Exception:
+                        pass
+                return True
             return super().event(e)
 
     # ── Routing: if already installed, supervise the main app and exit when done ─
@@ -2403,6 +2438,41 @@ def main():
                     shutil.copy2(item, dest)
         except Exception:
             pass
+
+        # Ensure microphone TCC permission is granted to this bundle (com.omni.app)
+        # and to the venv python3 before the voice listener starts.  This fixes the
+        # case where the user never completed the permissions page or macOS revoked
+        # the grant after an update.  We probe silently — no dialog is shown if the
+        # permission is already authorized.
+        if sys.platform == "darwin":
+            try:
+                from AVFoundation import AVCaptureDevice
+                status = AVCaptureDevice.authorizationStatusForMediaType_("soun")
+                if status == 0:  # notDetermined — request now (shows dialog once)
+                    _done = threading.Event()
+                    AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                        "soun", lambda _g: _done.set()
+                    )
+                    _done.wait(timeout=30)
+            except Exception:
+                pass
+            # Also probe from the venv python3 so that binary is registered in TCC
+            # under com.omni.app as the responsible app.
+            _venv_py = INSTALL_DIR / "venv" / "bin" / "python3"
+            if _venv_py.exists():
+                try:
+                    subprocess.run(
+                        [str(_venv_py), "-c",
+                         "import sounddevice as sd, time\n"
+                         "try:\n"
+                         "    s = sd.InputStream(samplerate=16000, blocksize=1280, channels=1)\n"
+                         "    s.start(); time.sleep(0.3); s.stop()\n"
+                         "except Exception: pass"],
+                        timeout=8,
+                        cwd=str(INSTALL_DIR),
+                    )
+                except Exception:
+                    pass
 
         run_sh = INSTALL_DIR / "run.sh"
         try:
