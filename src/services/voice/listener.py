@@ -335,10 +335,14 @@ class VoiceService:
     def setup_udp(self):
         try:
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Do NOT use SO_REUSEADDR — if another listener already holds the
+            # port we want the bind to fail so we detect the duplicate.
             self.udp_sock.bind(('127.0.0.1', UDP_PORT))
             self.udp_sock.setblocking(False)
             logger.info(f"UDP Control listening on {UDP_PORT}")
+        except OSError as e:
+            logger.warning(f"UDP port {UDP_PORT} already in use — another voice listener is running. Exiting.")
+            sys.exit(0)
         except Exception as e:
             logger.error(f"UDP Setup Error: {e}")
             self.udp_sock = None

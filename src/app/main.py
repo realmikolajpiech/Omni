@@ -198,14 +198,44 @@ def main():
                 pass  # best-effort; _init_omni will import them anyway
         _threading.Thread(target=_preload_imports, daemon=True).start()
 
+        # Start voice listener early so it warms up during onboarding.
+        # Any TOGGLE it sends during onboarding is harmlessly dropped by
+        # the temp IPC listener above.
+        _voice_proc = None
+        if os.environ.get("OMNI_LISTENER_LAUNCHED") != "1":
+            try:
+                _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                _voice_script = os.path.join(_project_root, "src", "services", "voice", "listener.py")
+                # Kill any stale voice listeners before starting a new one —
+                # multiple instances compete for the mic and UDP port.
+                if sys.platform == "darwin":
+                    subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _log_dir = os.path.join(_project_root, "logs")
+                os.makedirs(_log_dir, exist_ok=True)
+                _voice_log = open(os.path.join(_log_dir, "listener.log"), "w")
+                _voice_proc = subprocess.Popen(
+                    [sys.executable, _voice_script],
+                    cwd=_project_root,
+                    stdout=_voice_log, stderr=_voice_log,
+                    start_new_session=True,
+                )
+                logging.info("Voice Listener started early (during onboarding).")
+            except Exception as e:
+                logging.error(f"Failed to start voice listener early: {e}")
+
         def _after_onboarding(_result):
             _settings.set("onboarding_shown", True)
             # Stop temp listener so the real IPC in OmniWindow can bind
             _listener.requestInterruption()
             _listener.quit()
             _listener.wait(2000)
-            # Full init — onboarding is done so window shows immediately
-            _init_omni(app, timer, hidden_mode=False)
+            # Small delay so the OS fully releases the IPC port before
+            # OmniWindow's IPC listener tries to bind (otherwise ipc.py
+            # treats the OSError as "another instance" and calls os._exit).
+            QTimer.singleShot(150, lambda: _init_omni(
+                app, timer, hidden_mode=False, skip_ax_prompt=True,
+                early_voice_proc=_voice_proc))
 
         dlg.accepted.connect(lambda: _settings.set("onboarding_shown", True))
         dlg.finished.connect(_after_onboarding)
@@ -220,7 +250,7 @@ def main():
     sys.exit(app.exec())
 
 
-def _init_omni(app, timer, hidden_mode):
+def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=None):
     """Create OmniWindow, register hotkeys, and start all background services."""
     from PyQt6.QtCore import QTimer
     from src.ui.window import OmniWindow
@@ -470,7 +500,8 @@ def _init_omni(app, timer, hidden_mode):
                 except Exception as e:
                     logging.debug(f"[accessibility] {e}")
 
-            QTimer.singleShot(500, _request_ax_permission)
+            if not skip_ax_prompt:
+                QTimer.singleShot(500, _request_ax_permission)
 
             # macOS: Use Native NSEvent for reliable global hotkeys (requires Accessibility permissions)
             try:
@@ -592,21 +623,30 @@ def _init_omni(app, timer, hidden_mode):
     # Start Voice Listener
     # Native macOS ASR uses a compiled Swift binary (streaming_asr) that handles
     # TCC permissions natively. Falls back to Groq Whisper API if binary missing.
-    voice_process = None
+    voice_process = early_voice_proc  # reuse if started during onboarding
     try:
         _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         listener_script = os.path.join(_project_root, "src", "services", "voice", "listener.py")
-        logging.info(f"Starting Voice Listener: {listener_script}")
 
-        if os.environ.get("OMNI_LISTENER_LAUNCHED") != "1":
+        if voice_process is None and os.environ.get("OMNI_LISTENER_LAUNCHED") != "1":
+            logging.info(f"Starting Voice Listener: {listener_script}")
+            # Kill any stale voice listeners before starting a new one
+            if sys.platform == "darwin":
+                subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _log_dir = os.path.join(_project_root, "logs")
+            os.makedirs(_log_dir, exist_ok=True)
+            _voice_log = open(os.path.join(_log_dir, "listener.log"), "w")
             voice_process = subprocess.Popen(
                 [sys.executable, listener_script],
                 cwd=_project_root,
-                stdout=None,
-                stderr=None,
+                stdout=_voice_log,
+                stderr=_voice_log,
                 start_new_session=True
             )
             logging.info("Voice Listener started.")
+        elif voice_process is not None:
+            logging.info("Voice Listener already running (started during onboarding).")
 
         def kill_voice():
             if voice_process:

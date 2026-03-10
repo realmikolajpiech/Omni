@@ -2211,6 +2211,7 @@ class OmniInstallerWindow(QMainWindow):
         elif idx == 2:
             self.page_perms.start_polling()
             self.stop_border_animation()
+            self._prelaunch_omni()  # warm up Omni while user grants permissions
         elif idx == 3 and self.stack.currentIndex() == 2:
             self.page_index.start_indexing()
             self.start_border_animation()
