@@ -1116,84 +1116,46 @@ class OmniWindow(QWidget):
         return self._asr_dispatcher
 
     def handle_transcribe_file(self, wav_path: str):
-        """Transcribe a WAV file using macOS SFSpeechRecognizer (runs in main GUI process).
+        """Transcribe a WAV file using Groq Whisper API (whisper-large-v3).
 
-        Called via IPC from the voice listener subprocess. Transcription happens here
-        because this process is the proper Python.app with TCC identity for speech recognition.
+        Whisper handles multilingual audio (Polish, English, etc.) with auto language
+        detection when transcription_language is set to "auto".
         """
         import threading, os
 
-        # Create/fetch dispatcher on the main thread NOW, before the worker starts
         dispatcher = self._get_asr_dispatcher()
 
         def _worker():
             text = None
             try:
-                import Speech
-                from Foundation import NSURL, NSLocale
+                from groq import Groq
+                from src.core.config import GROQ_API_KEY
+                import src.core.settings_store as _ss
 
-                locale_id = "en-US"
-                try:
-                    import src.core.settings_store as _ss
-                    lc = _ss.get("transcription_language", "auto")
-                    _lang_map = {"en":"en-US","pl":"pl-PL","de":"de-DE","fr":"fr-FR",
-                                 "es":"es-ES","it":"it-IT","pt":"pt-PT","ja":"ja-JP",
-                                 "zh":"zh-CN","uk":"uk-UA","ru":"ru-RU"}
-                    if lc and lc != "auto" and lc in _lang_map:
-                        locale_id = _lang_map[lc]
-                except Exception:
-                    pass
+                lc = _ss.get("transcription_language", "auto")
+                # Whisper uses ISO-639-1 codes directly; None = auto-detect
+                lang = None if (not lc or lc == "auto") else lc
 
-                recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(
-                    NSLocale.localeWithLocaleIdentifier_(locale_id)
-                )
-                if not recognizer or not recognizer.isAvailable():
-                    recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(
-                        NSLocale.localeWithLocaleIdentifier_("en-US")
+                wav_size = os.path.getsize(wav_path) if os.path.exists(wav_path) else 0
+                logging.info(f"[ASR] Groq Whisper transcribing {wav_path} ({wav_size} bytes), lang={lang or 'auto'}")
+
+                client = Groq(api_key=GROQ_API_KEY)
+                with open(wav_path, "rb") as f:
+                    kwargs = dict(
+                        file=(os.path.basename(wav_path), f.read()),
+                        model="whisper-large-v3-turbo",
+                        response_format="text",
+                        temperature=0.0,
                     )
+                    if lang:
+                        kwargs["language"] = lang
+                    result = client.audio.transcriptions.create(**kwargs)
 
-                if recognizer and recognizer.isAvailable():
-                    import os as _os
-                    wav_size = _os.path.getsize(wav_path) if _os.path.exists(wav_path) else 0
-                    logging.info(f"[ASR] Transcribing {wav_path} ({wav_size} bytes)")
+                text = str(result).strip() if result else None
+                logging.info(f"[ASR] Groq result: {text!r}")
 
-                    url = NSURL.fileURLWithPath_(wav_path)
-                    request = Speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
-                    # Do NOT set requiresOnDeviceRecognition — let Apple pick the best
-                    # available model (on-device 16kHz WAV support is limited)
-                    try:
-                        request.setAddsPunctuation_(True)
-                    except AttributeError:
-                        pass
-
-                    done = threading.Event()
-                    result_holder = [None]
-
-                    def _cb(result, error):
-                        if error:
-                            code = getattr(error, 'code', lambda: -1)()
-                            # 1101/1110 = no speech detected — expected for short/quiet clips
-                            if code not in (1101, 1110):
-                                logging.warning(f"[ASR] {error}")
-                            else:
-                                logging.info(f"[ASR] No speech in audio (code={code})")
-                            done.set()
-                            return
-                        if result:
-                            t = str(result.bestTranscription().formattedString())
-                            if t:
-                                result_holder[0] = t
-                                logging.info(f"[ASR] partial: {t!r}")
-                            if result.isFinal():
-                                done.set()
-
-                    recognizer.recognitionTaskWithRequest_resultHandler_(request, _cb)
-                    done.wait(timeout=30)
-                    text = result_holder[0]
-                else:
-                    logging.error("[ASR] SFSpeechRecognizer not available.")
             except Exception as e:
-                logging.error(f"[ASR] Transcription error: {e}")
+                logging.error(f"[ASR] Groq Whisper error: {e}")
             finally:
                 try:
                     os.unlink(wav_path)
