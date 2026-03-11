@@ -84,7 +84,10 @@ let audioFormat = AVAudioFormat(
 
 let request = SFSpeechAudioBufferRecognitionRequest()
 request.shouldReportPartialResults = true
-request.requiresOnDeviceRecognition = true  // Stay fully offline
+// Use on-device only if --offline flag is passed; otherwise let Apple pick the best available model
+if args.contains("--offline") {
+    request.requiresOnDeviceRecognition = true
+}
 
 // For macOS 13+ we can add punctuation
 if #available(macOS 13, *) {

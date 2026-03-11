@@ -10,6 +10,7 @@ class IPCWorker(QThread):
     status_update = pyqtSignal(str)
     partial_update = pyqtSignal(str)
     show_requested = pyqtSignal()
+    transcribe_file_requested = pyqtSignal(str)  # path to WAV file
 
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -39,6 +40,12 @@ class IPCWorker(QThread):
                         self.partial_update.emit(text)
                     except Exception as e:
                         logging.error(f"IPC Partial Decode Error: {e}")
+                elif data.startswith(b"TRANSCRIBE_FILE:"):
+                    try:
+                        path = data[16:].decode('utf-8').strip()
+                        self.transcribe_file_requested.emit(path)
+                    except Exception as e:
+                        logging.error(f"IPC TranscribeFile Decode Error: {e}")
                 elif data.startswith(b"STATUS:"):
                     try:
                         status = data[7:].decode('utf-8')
@@ -85,5 +92,8 @@ def start_ipc_listener(window_instance):
 
     if hasattr(window_instance, 'handle_partial_text'):
         ipc_thread.partial_update.connect(window_instance.handle_partial_text)
-        
+
+    if hasattr(window_instance, 'handle_transcribe_file'):
+        ipc_thread.transcribe_file_requested.connect(window_instance.handle_transcribe_file)
+
     ipc_thread.start()

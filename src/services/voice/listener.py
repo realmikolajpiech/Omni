@@ -38,26 +38,7 @@ except ImportError:
     scipy = None
 from typing import Optional
 
-# Path to the compiled Swift streaming ASR binary
-_SWIFT_ASR_BINARY = os.path.join(os.path.dirname(__file__), "streaming_asr")
-NATIVE_ASR_AVAILABLE = os.path.isfile(_SWIFT_ASR_BINARY) and os.access(_SWIFT_ASR_BINARY, os.X_OK)
 
-# Short language code → macOS locale identifier
-_LANG_TO_LOCALE = {
-    "en": "en-US",
-    "pl": "pl-PL",
-    "de": "de-DE",
-    "fr": "fr-FR",
-    "es": "es-ES",
-    "it": "it-IT",
-    "pt": "pt-PT",
-    "ja": "ja-JP",
-    "zh": "zh-CN",
-    "uk": "uk-UA",
-    "ru": "ru-RU",
-    "ar": "ar-SA",
-    "nl": "nl-NL",
-}
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
@@ -66,22 +47,18 @@ try:
     from src.core.config import (
         IPC_PORT,
         OWW_WAKE_WORD_MODEL, OWW_CUSTOM_MODEL_PATH, OWW_DETECTION_THRESHOLD,
-        BACKEND_URL, OMNI_SECRET, DEVICE_ID,
     )
 except ImportError:
     IPC_PORT = 5556
     OWW_WAKE_WORD_MODEL = "Hey_Omni"
     OWW_CUSTOM_MODEL_PATH = ""
     OWW_DETECTION_THRESHOLD = 0.5
-    BACKEND_URL = "https://omni-backend.heyomni.workers.dev"
-    OMNI_SECRET = ""
-    DEVICE_ID = ""
 
 # --- CONFIGURATION ---
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 1280          # 80ms - optimal chunk size for openWakeWord
-SILENCE_THRESHOLD = 0.003  # slightly higher so brief inter-syllable dips don't trigger silence
-SILENCE_DURATION = 1.8   # seconds of sustained silence before triggering transcription
+SILENCE_THRESHOLD = 0.002  # lower = more tolerant of quiet consonants (s/f/th)
+SILENCE_DURATION = 2.2   # seconds of sustained silence before triggering transcription
 UDP_PORT = 5557
 
 # Wake word trigger: two-tier detection
@@ -110,7 +87,6 @@ class VoiceService:
         self.audio_queue = queue.Queue()
         self.oww_model = None
         self._oww_key = None   # actual prediction key returned by the model
-        self.groq_client = None
         self.audio_buffer = []
         self.is_speaking = False
         self.silence_frames = 0
@@ -128,11 +104,6 @@ class VoiceService:
         self.setup_udp()
 
     def setup_models(self):
-        """Initialize openWakeWord and set up Groq fallback."""
-        if NATIVE_ASR_AVAILABLE:
-            logger.info(f"Native streaming ASR available: {_SWIFT_ASR_BINARY}")
-        else:
-            logger.warning(f"Native ASR binary not found at {_SWIFT_ASR_BINARY} — will use Groq fallback.")
 
         # 1. openWakeWord
         try:
@@ -168,170 +139,71 @@ class VoiceService:
             self.oww_model = None
             self._oww_key = None
 
-        # 2. Groq Whisper via backend proxy (fallback when native ASR is unavailable)
-        if OMNI_SECRET:
-            self.groq_client = True  # marker — we use requests-based proxy
-            logger.info("Groq Whisper fallback transcription ready (via backend proxy).")
-        else:
-            self.groq_client = None
-            logger.info("OMNI_SECRET not set — Groq transcription fallback disabled.")
 
-    def _get_locale_id(self) -> str:
-        """Read language preference from settings and return macOS locale ID."""
-        try:
-            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
-            import src.core.settings_store as settings_store
-            lang_code = settings_store.get("transcription_language", "auto")
-        except Exception:
-            lang_code = "auto"
-        if lang_code == "auto" or lang_code not in _LANG_TO_LOCALE:
-            import locale as _locale
-            system_locale = _locale.getdefaultlocale()[0] or "en_US"
-            return system_locale.replace("_", "-")
-        return _LANG_TO_LOCALE[lang_code]
+    def _preprocess_audio(self, audio_data: np.ndarray) -> Optional[np.ndarray]:
+        """Trim silence and normalize amplitude for Apple's SFSpeechRecognizer.
 
-    def transcribe_audio_native(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
-        """Transcribe audio using the Swift streaming_asr binary with real-time partial results.
-
-        Pipes raw 16-bit PCM audio to the Swift process via stdin. Reads JSON lines
-        from stdout for partial/final results. Sends PARTIAL: IPC messages so the UI
-        updates the input field in real-time.
+        Returns None if the audio is too short/quiet to be speech.
         """
-        if not NATIVE_ASR_AVAILABLE:
+        if len(audio_data) == 0:
             return None
 
-        locale_id = self._get_locale_id()
-        try:
-            proc = subprocess.Popen(
-                [_SWIFT_ASR_BINARY, "--lang", locale_id],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except Exception as e:
-            logger.error(f"Failed to launch streaming_asr: {e}")
+        # 1. Trim leading and trailing silence — excess silence confuses the recognizer
+        frame_size = BLOCK_SIZE
+        frames = [audio_data[i:i + frame_size] for i in range(0, len(audio_data), frame_size)]
+        energies = [np.sqrt(np.mean(f ** 2)) for f in frames]
+
+        speech_frames = [i for i, e in enumerate(energies) if e > SILENCE_THRESHOLD]
+        if not speech_frames:
             return None
 
-        final_text = None
-        try:
-            # Convert float32 audio to int16 PCM bytes
-            pcm_int16 = (audio_data * 32767.0).clip(-32768, 32767).astype(np.int16)
-            audio_bytes = pcm_int16.tobytes()
+        # Keep 0.2s padding on each side so first/last phonemes aren't cut
+        pad = max(1, int(0.2 * SAMPLE_RATE / frame_size))
+        start_frame = max(0, speech_frames[0] - pad)
+        end_frame = min(len(frames), speech_frames[-1] + pad + 1)
+        trimmed = audio_data[start_frame * frame_size: end_frame * frame_size]
 
-            # Write all audio then close stdin to signal EOF
-            proc.stdin.write(audio_bytes)
-            proc.stdin.close()
-
-            # Read JSON lines from stdout
-            for raw_line in proc.stdout:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning(f"streaming_asr non-JSON: {line}")
-                    continue
-
-                msg_type = msg.get("type", "")
-                text = msg.get("text", "")
-
-                if msg_type == "partial" and text:
-                    logger.info(f"[ASR partial] {text}")
-                    self.send_ipc(f"PARTIAL:{text}".encode("utf-8"))
-                elif msg_type == "final":
-                    final_text = text
-                    logger.info(f"[ASR final] {text}")
-                elif msg_type == "error":
-                    logger.warning(f"[ASR error] {text}")
-                elif msg_type == "end":
-                    break
-
-            proc.wait(timeout=5.0)
-        except Exception as e:
-            logger.error(f"streaming_asr error: {e}")
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-        return final_text
-
-    def transcribe_audio_groq(self, audio_data: np.ndarray, sample_rate: int) -> Optional[str]:
-        """Transcribe audio using Groq Whisper API via backend proxy."""
-        if not self.groq_client:
+        # 2. Reject if less than 0.3s of speech remains (probably just noise)
+        if len(trimmed) < int(0.3 * SAMPLE_RATE):
+            logger.info("Audio too short after trimming — likely noise, skipping transcription.")
             return None
-        try:
-            import io as _io
-            import urllib.request
-            import urllib.error
 
-            buf = _io.BytesIO()
-            sf.write(buf, audio_data, sample_rate, format='wav')
-            wav_bytes = buf.getvalue()
+        # 3. Normalize amplitude — consistent input level improves recognition accuracy
+        peak = np.max(np.abs(trimmed))
+        if peak > 0.001:
+            # Cap boost at 20× to avoid amplifying pure noise recordings
+            gain = min(0.8 / peak, 20.0)
+            trimmed = (trimmed * gain).clip(-1.0, 1.0)
 
-            # Build multipart/form-data manually (no external deps)
-            boundary = "----OmniAudioBoundary"
-            body = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="model"\r\n\r\n'
-                f"whisper-large-v3-turbo\r\n"
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="response_format"\r\n\r\n'
-                f"text\r\n"
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
-                f"Content-Type: audio/wav\r\n\r\n"
-            ).encode() + wav_bytes + f"\r\n--{boundary}--\r\n".encode()
-
-            req = urllib.request.Request(
-                f"{BACKEND_URL}/v1/audio/transcriptions",
-                data=body,
-                headers={
-                    "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    "X-Omni-Secret": OMNI_SECRET,
-                    "X-Device-ID": DEVICE_ID,
-                    "User-Agent": "Omni/1.0",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode().strip()
-            if not text:
-                return None
-            # Filter Whisper hallucinations on silence/noise
-            _hallucinations = {
-                "thank you.", "thanks for watching.", "thanks for watching!",
-                "you", "bye.", "bye!", "the end.", "subtitle",
-                "subtitles by the amara.org community",
-            }
-            if text.strip().lower() in _hallucinations:
-                logger.info(f"Filtered Whisper hallucination: {text!r}")
-                return None
-            return text
-        except Exception as e:
-            logger.error(f"Groq transcription error: {e}")
-            return None
+        logger.info(f"Audio preprocessed: {len(trimmed) / SAMPLE_RATE:.1f}s speech "
+                    f"(trimmed from {len(audio_data) / SAMPLE_RATE:.1f}s)")
+        return trimmed.astype(np.float32)
 
     def _transcribe_and_send(self, audio_data: np.ndarray):
-        """Run transcription in a background thread and send result via IPC."""
-        def _worker():
-            duration = len(audio_data) / SAMPLE_RATE
-            logger.info(f"Transcribing {duration:.1f}s of audio...")
-            text = None
-            # Try native macOS ASR first
-            if NATIVE_ASR_AVAILABLE:
-                text = self.transcribe_audio_native(audio_data, SAMPLE_RATE)
-            # Fall back to Groq Whisper
-            if not text and self.groq_client:
-                logger.info("Falling back to Groq Whisper transcription...")
-                text = self.transcribe_audio_groq(audio_data, SAMPLE_RATE)
-            if text and text.strip():
-                logger.info(f"Transcription: {text!r}")
-                self.send_ipc(f"QUERY:VOICE:{text.strip()}".encode('utf-8'))
-            else:
-                logger.warning("Transcription returned no text.")
-        threading.Thread(target=_worker, daemon=True).start()
+        """Save audio to a temp WAV and ask the main window process to transcribe it.
+
+        Transcription happens in the main GUI process (Python.app with proper TCC identity),
+        not here in the listener subprocess.
+        """
+        processed = self._preprocess_audio(audio_data)
+        if processed is None:
+            logger.warning("Audio preprocessing rejected — no speech detected.")
+            self.send_ipc(b"STATUS:IDLE")
+            return
+
+        duration = len(processed) / SAMPLE_RATE
+        logger.info(f"Sending {duration:.1f}s of audio to main process for transcription...")
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, prefix="omni_voice_") as f:
+                tmp_path = f.name
+            sf.write(tmp_path, processed, SAMPLE_RATE, subtype='PCM_16')
+            self.send_ipc(b"STATUS:TRANSCRIBING")
+            self.send_ipc(f"TRANSCRIBE_FILE:{tmp_path}".encode("utf-8"))
+            logger.info(f"Sent TRANSCRIBE_FILE:{tmp_path}")
+        except Exception as e:
+            logger.error(f"Failed to save/send audio: {e}")
+            self.send_ipc(b"STATUS:IDLE")
 
     def setup_udp(self):
         try:
@@ -578,7 +450,7 @@ class VoiceService:
         # 2. Energy-based VAD with rolling average
         energy = np.sqrt(np.mean(audio_data ** 2))
         self.energy_history.append(energy)
-        if len(self.energy_history) > 6:  # ~480ms smoothing — bridges inter-syllable pauses
+        if len(self.energy_history) > 10:  # ~800ms smoothing — bridges inter-syllable pauses
             self.energy_history.pop(0)
         avg_energy = sum(self.energy_history) / len(self.energy_history)
 

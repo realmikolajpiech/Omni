@@ -1070,12 +1070,152 @@ class OmniWindow(QWidget):
         if status == "LISTENING":
             self.mic_widget.set_active(True)
             self.input_field.setPlaceholderText("Listening...")
+        elif status == "TRANSCRIBING":
+            self.mic_widget.set_active(False)
+            self.input_field.setPlaceholderText("Transcribing...")
+            self._start_transcribing_dots()
         elif status == "PAUSED":
+            self._stop_transcribing_dots()
             self.mic_widget.set_active(False)
             self.input_field.setPlaceholderText(self._idle_placeholder())
         elif status == "IDLE":
+            self._stop_transcribing_dots()
             self.mic_widget.set_active(False)
             self.input_field.setPlaceholderText(self._idle_placeholder())
+
+    def _start_transcribing_dots(self):
+        """Animate the placeholder text: Transcribing → Transcribing. → Transcribing.. → Transcribing..."""
+        if not hasattr(self, '_transcribing_timer'):
+            from PyQt6.QtCore import QTimer
+            self._transcribing_timer = QTimer(self)
+            self._transcribing_timer.setInterval(400)
+            self._transcribing_timer.timeout.connect(self._tick_transcribing_dots)
+            self._transcribing_dot_count = 0
+        self._transcribing_dot_count = 0
+        self._transcribing_timer.start()
+
+    def _tick_transcribing_dots(self):
+        self._transcribing_dot_count = (self._transcribing_dot_count + 1) % 4
+        dots = "." * self._transcribing_dot_count
+        self.input_field.setPlaceholderText(f"Transcribing{dots}")
+
+    def _stop_transcribing_dots(self):
+        if hasattr(self, '_transcribing_timer'):
+            self._transcribing_timer.stop()
+
+    def _get_asr_dispatcher(self):
+        """Lazy-init a QObject dispatcher for cross-thread transcription callbacks."""
+        if not hasattr(self, '_asr_dispatcher'):
+            from PyQt6.QtCore import QObject, pyqtSignal
+
+            class _Dispatcher(QObject):
+                done = pyqtSignal(str)
+
+            self._asr_dispatcher = _Dispatcher(self)
+            self._asr_dispatcher.done.connect(self._on_transcription_done)
+        return self._asr_dispatcher
+
+    def handle_transcribe_file(self, wav_path: str):
+        """Transcribe a WAV file using macOS SFSpeechRecognizer (runs in main GUI process).
+
+        Called via IPC from the voice listener subprocess. Transcription happens here
+        because this process is the proper Python.app with TCC identity for speech recognition.
+        """
+        import threading, os
+
+        # Create/fetch dispatcher on the main thread NOW, before the worker starts
+        dispatcher = self._get_asr_dispatcher()
+
+        def _worker():
+            text = None
+            try:
+                import Speech
+                from Foundation import NSURL, NSLocale
+
+                locale_id = "en-US"
+                try:
+                    import src.core.settings_store as _ss
+                    lc = _ss.get("transcription_language", "auto")
+                    _lang_map = {"en":"en-US","pl":"pl-PL","de":"de-DE","fr":"fr-FR",
+                                 "es":"es-ES","it":"it-IT","pt":"pt-PT","ja":"ja-JP",
+                                 "zh":"zh-CN","uk":"uk-UA","ru":"ru-RU"}
+                    if lc and lc != "auto" and lc in _lang_map:
+                        locale_id = _lang_map[lc]
+                except Exception:
+                    pass
+
+                recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(
+                    NSLocale.localeWithLocaleIdentifier_(locale_id)
+                )
+                if not recognizer or not recognizer.isAvailable():
+                    recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(
+                        NSLocale.localeWithLocaleIdentifier_("en-US")
+                    )
+
+                if recognizer and recognizer.isAvailable():
+                    import os as _os
+                    wav_size = _os.path.getsize(wav_path) if _os.path.exists(wav_path) else 0
+                    logging.info(f"[ASR] Transcribing {wav_path} ({wav_size} bytes)")
+
+                    url = NSURL.fileURLWithPath_(wav_path)
+                    request = Speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+                    # Do NOT set requiresOnDeviceRecognition — let Apple pick the best
+                    # available model (on-device 16kHz WAV support is limited)
+                    try:
+                        request.setAddsPunctuation_(True)
+                    except AttributeError:
+                        pass
+
+                    done = threading.Event()
+                    result_holder = [None]
+
+                    def _cb(result, error):
+                        if error:
+                            code = getattr(error, 'code', lambda: -1)()
+                            # 1101/1110 = no speech detected — expected for short/quiet clips
+                            if code not in (1101, 1110):
+                                logging.warning(f"[ASR] {error}")
+                            else:
+                                logging.info(f"[ASR] No speech in audio (code={code})")
+                            done.set()
+                            return
+                        if result:
+                            t = str(result.bestTranscription().formattedString())
+                            if t:
+                                result_holder[0] = t
+                                logging.info(f"[ASR] partial: {t!r}")
+                            if result.isFinal():
+                                done.set()
+
+                    recognizer.recognitionTaskWithRequest_resultHandler_(request, _cb)
+                    done.wait(timeout=30)
+                    text = result_holder[0]
+                else:
+                    logging.error("[ASR] SFSpeechRecognizer not available.")
+            except Exception as e:
+                logging.error(f"[ASR] Transcription error: {e}")
+            finally:
+                try:
+                    os.unlink(wav_path)
+                except Exception:
+                    pass
+
+            if text and text.strip():
+                logging.info(f"[ASR] Transcription: {text!r}")
+                dispatcher.done.emit(text.strip())
+            else:
+                logging.warning("[ASR] No transcription result.")
+                dispatcher.done.emit("")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_transcription_done(self, text: str):
+        """Called on the main thread when transcription completes."""
+        self._stop_transcribing_dots()
+        if text:
+            self.handle_ipc_query(f"VOICE:{text}")
+        else:
+            self.handle_voice_status("IDLE")
 
     def handle_partial_text(self, text):
         # Update input field with partial text without triggering search

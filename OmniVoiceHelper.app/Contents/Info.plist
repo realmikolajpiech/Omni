@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.omni.voicehelper</string>
+    <key>CFBundleName</key>
+    <string>Omni Voice Helper</string>
+    <key>CFBundleExecutable</key>
+    <string>OmniVoiceHelper</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Omni listens for your voice to answer questions hands-free.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Omni uses speech recognition to transcribe your voice commands.</string>
+</dict>
+</plist>
