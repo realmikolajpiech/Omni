@@ -80,7 +80,10 @@ def apply_update(zipball_url: str, on_progress=None):
     # ── 1. Download ───────────────────────────────────────────────────────────
     _prog(0, "Downloading update…")
     try:
-        req = urllib.request.Request(zipball_url, headers={"User-Agent": "Omni-Updater/1.0"})
+        req = urllib.request.Request(
+            zipball_url,
+            headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
+        )
         with urllib.request.urlopen(req, timeout=300) as resp:
             total      = int(resp.headers.get("Content-Length") or 0)
             downloaded = 0

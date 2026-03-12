@@ -96,6 +96,9 @@ export default {
     if (path === "/v1/release/latest" && method === "GET")
       return handleReleaseLatest(env);
 
+    if (path === "/v1/release/download" && method === "GET")
+      return handleReleaseDownload(request, env);
+
     // /v1/feedback is handled above (public endpoint).
 
     return resp({ error: "Not found" }, 404);
@@ -1362,10 +1365,40 @@ async function handleReleaseLatest(env) {
       return resp({ error: `GitHub API error: ${ghResp.status}` }, 502);
     }
     const data = await ghResp.json();
+    const tag = data.tag_name || "";
     return resp({
-      tag_name:    data.tag_name   || "",
-      zipball_url: data.zipball_url || "",
-      body:        data.body       || "",
+      tag_name:    tag,
+      zipball_url: tag ? `https://omni-backend.heyomni.workers.dev/v1/release/download?tag=${tag}` : "",
+      body:        data.body || "",
+    });
+  } catch (e) {
+    return resp({ error: String(e) }, 502);
+  }
+}
+
+async function handleReleaseDownload(request, env) {
+  const tag = new URL(request.url).searchParams.get("tag");
+  if (!tag) return resp({ error: "Missing tag parameter" }, 400);
+  const zipUrl = `https://api.github.com/repos/realmikolajpiech/Omni/zipball/${tag}`;
+  try {
+    const ghResp = await fetch(zipUrl, {
+      headers: {
+        "User-Agent": "Omni-Updater/1.0",
+        "Accept": "application/vnd.github+json",
+        ...(env.GITHUB_TOKEN ? { "Authorization": `Bearer ${env.GITHUB_TOKEN}` } : {}),
+      },
+      redirect: "follow",
+    });
+    if (!ghResp.ok) {
+      return resp({ error: `GitHub download error: ${ghResp.status}` }, 502);
+    }
+    return new Response(ghResp.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="omni-${tag}.zip"`,
+        ...(ghResp.headers.get("Content-Length") ? { "Content-Length": ghResp.headers.get("Content-Length") } : {}),
+      },
     });
   } catch (e) {
     return resp({ error: String(e) }, 502);
