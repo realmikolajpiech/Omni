@@ -1377,18 +1377,18 @@ async function handleFeedback(request, env) {
   try {
     body = await request.json();
   } catch {
-    return resp({ error: "Invalid JSON" }, 400);
+    return corsResp({ error: "Invalid JSON" }, 400);
   }
 
   const { type, title, description, message, email, user_id } = body;
   const resolvedDescription = description || message;
   if (!resolvedDescription) {
-    return resp({ error: "description or message is required" }, 400);
+    return corsResp({ error: "description or message is required" }, 400);
   }
 
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) {
     console.error("[feedback] missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
-    return resp({ error: "Server misconfigured" }, 500);
+    return corsResp({ error: "Server misconfigured" }, 500);
   }
 
   const payload = {
@@ -1413,10 +1413,10 @@ async function handleFeedback(request, env) {
   if (!res.ok) {
     const text = await res.text();
     console.error("[feedback] Supabase error:", res.status, text);
-    return resp({ error: `Failed to save feedback: ${res.status}` }, 502);
+    return corsResp({ error: `Failed to save feedback: ${res.status}` }, 502);
   }
 
-  return resp({ ok: true });
+  return corsResp({ ok: true });
 }
 
 function resp(body, status = 200) {
