@@ -1128,8 +1128,8 @@ class OmniWindow(QWidget):
         def _worker():
             text = None
             try:
-                from groq import Groq
-                from src.core.config import GROQ_API_KEY
+                from openai import OpenAI
+                from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID
                 import src.core.settings_store as _ss
 
                 lc = _ss.get("transcription_language", "auto")
@@ -1139,7 +1139,14 @@ class OmniWindow(QWidget):
                 wav_size = os.path.getsize(wav_path) if os.path.exists(wav_path) else 0
                 logging.info(f"[ASR] Groq Whisper transcribing {wav_path} ({wav_size} bytes), lang={lang or 'auto'}")
 
-                client = Groq(api_key=GROQ_API_KEY)
+                client = OpenAI(
+                    api_key="omni-proxy",
+                    base_url=BACKEND_URL + "/v1",
+                    default_headers={
+                        "X-Omni-Secret": OMNI_SECRET,
+                        "X-Device-ID":   DEVICE_ID,
+                    },
+                )
                 with open(wav_path, "rb") as f:
                     kwargs = dict(
                         file=(os.path.basename(wav_path), f.read()),
