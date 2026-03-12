@@ -64,6 +64,12 @@ export default {
       if (method === "POST")    return handlePublicCheckout(request, env);
     }
 
+    // Feedback — public endpoint, called from website and app.
+    if (path === "/v1/feedback") {
+      if (method === "OPTIONS") return corsResp(null, 204);
+      if (method === "POST")    return handleFeedback(request, env);
+    }
+
     // All other endpoints require the shared app secret.
     if (request.headers.get("X-Omni-Secret") !== env.OMNI_SECRET) {
       return resp({ error: "Unauthorized" }, 401);
@@ -86,6 +92,11 @@ export default {
 
     if (path === "/v1/billing/session_status" && method === "GET")
       return handleSessionStatus(request, env);
+
+    if (path === "/v1/release/latest" && method === "GET")
+      return handleReleaseLatest(env);
+
+    // /v1/feedback is handled above (public endpoint).
 
     return resp({ error: "Not found" }, 404);
   },
@@ -1334,6 +1345,79 @@ async function generateMagicLink(email, env) {
 }
 
 // ── Response helpers ──────────────────────────────────────────────────────────
+
+// ── Release proxy ─────────────────────────────────────────────────────────────
+
+async function handleReleaseLatest(env) {
+  const GITHUB_API = "https://api.github.com/repos/realmikolajpiech/Omni/releases/latest";
+  try {
+    const ghResp = await fetch(GITHUB_API, {
+      headers: {
+        "User-Agent": "Omni-Updater/1.0",
+        "Accept": "application/vnd.github+json",
+        ...(env.GITHUB_TOKEN ? { "Authorization": `Bearer ${env.GITHUB_TOKEN}` } : {}),
+      },
+    });
+    if (!ghResp.ok) {
+      return resp({ error: `GitHub API error: ${ghResp.status}` }, 502);
+    }
+    const data = await ghResp.json();
+    return resp({
+      tag_name:    data.tag_name   || "",
+      zipball_url: data.zipball_url || "",
+      body:        data.body       || "",
+    });
+  } catch (e) {
+    return resp({ error: String(e) }, 502);
+  }
+}
+
+async function handleFeedback(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return resp({ error: "Invalid JSON" }, 400);
+  }
+
+  const { type, title, description, message, email, user_id } = body;
+  const resolvedDescription = description || message;
+  if (!resolvedDescription) {
+    return resp({ error: "description or message is required" }, 400);
+  }
+
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) {
+    console.error("[feedback] missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+    return resp({ error: "Server misconfigured" }, 500);
+  }
+
+  const payload = {
+    type:        type        || "feature_request",
+    title:       title       || null,
+    description: resolvedDescription,
+    email:       email       || null,
+    user_id:     user_id     || null,
+  };
+
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/feedback`, {
+    method: "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      "apikey":        env.SUPABASE_SERVICE_KEY,
+      "Prefer":        "return=minimal",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[feedback] Supabase error:", res.status, text);
+    return resp({ error: `Failed to save feedback: ${res.status}` }, 502);
+  }
+
+  return resp({ ok: true });
+}
 
 function resp(body, status = 200) {
   return new Response(JSON.stringify(body), {

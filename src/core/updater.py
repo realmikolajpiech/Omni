@@ -10,27 +10,16 @@ Flow:
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path
 
-GITHUB_API    = "https://api.github.com/repos/realmikolajpiech/Omni/releases/latest"
-INSTALL_DIR   = Path.home() / "Library" / "Application Support" / "Omni"
-_USER_AGENT   = "Omni-Updater/1.0"
+from src.core.config import BACKEND_URL, OMNI_SECRET
 
-# Fine-grained PAT with read-only access to Contents + Releases.
-# Keep this out of source if the repo is ever made public.
-GITHUB_TOKEN  = os.environ.get("OMNI_GITHUB_TOKEN", "")
-
-
-def _auth_headers() -> dict:
-    h = {"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return h
+INSTALL_DIR = Path.home() / "Library" / "Application Support" / "Omni"
+_RELEASE_URL = f"{BACKEND_URL}/v1/release/latest"
 
 
 def _vtuple(tag: str) -> tuple:
@@ -43,13 +32,16 @@ def _vtuple(tag: str) -> tuple:
 
 def check_update(current_version: str):
     """
-    Query GitHub releases API.
+    Query the Omni worker for the latest GitHub release.
     Returns (latest_tag, zipball_url, changelog_body) if a newer release exists,
     otherwise (None, None, None).
     Network errors are swallowed and logged at DEBUG level.
     """
     try:
-        req = urllib.request.Request(GITHUB_API, headers=_auth_headers())
+        req = urllib.request.Request(
+            _RELEASE_URL,
+            headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
+        )
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
 

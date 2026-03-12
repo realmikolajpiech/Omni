@@ -29,6 +29,7 @@ id      = "a855aebfb1c84020b402e99cef0791e7"
 #   wrangler secret put SERPER_FAST_API_KEY
 #   wrangler secret put PAYMENT_WEBHOOK_SECRET
 #   wrangler secret put DODO_PAYMENTS_API_KEY
+#   wrangler secret put GITHUB_TOKEN
 #   wrangler secret put SUPABASE_URL            ← https://xxxx.supabase.co
 #   wrangler secret put SUPABASE_ANON_KEY       ← Settings → API → anon/publishable key
 #   wrangler secret put SUPABASE_SERVICE_KEY    ← Settings → API → service_role key

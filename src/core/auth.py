@@ -287,6 +287,13 @@ def sign_out():
         except Exception:
             pass
     _clear_session()
+    # Reset cached subscription plan so the upgrade box shows immediately
+    # after logout instead of keeping a stale "pro" plan from the old session.
+    try:
+        from src.core import subscription as _sub
+        _sub.reset()
+    except Exception:
+        pass
 
 
 def exchange_magic_link(url: str, on_done) -> None:

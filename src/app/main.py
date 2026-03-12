@@ -327,15 +327,22 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
 
     def _bg_update_check():
         from src.core.updater import check_update
-        try:
-            tag, url, body = check_update(APP_VERSION)
-            if tag:
-                _upd.found.emit(tag, url, body)
-        except Exception as e:
-            logging.debug(f"Update check error: {e}")
+        import threading as _threading
+        def _run():
+            try:
+                tag, url, body = check_update(APP_VERSION)
+                if tag:
+                    _upd.found.emit(tag, url, body)
+            except Exception as e:
+                logging.debug(f"Update check error: {e}")
+        _threading.Thread(target=_run, daemon=True).start()
 
-    import threading as _threading
-    _threading.Thread(target=_bg_update_check, daemon=True).start()
+    from PyQt6.QtCore import QTimer as _QTimer
+    _update_timer = _QTimer()
+    _update_timer.setInterval(4 * 60 * 60 * 1000)  # 4 hours
+    _update_timer.timeout.connect(_bg_update_check)
+    _update_timer.start()
+    _bg_update_check()  # also check immediately on startup
 
     # ── Auth: load saved session + start memory sync ──────────────────────
     from src.core import auth as _auth

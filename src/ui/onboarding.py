@@ -760,9 +760,7 @@ class OnboardingDialog(QDialog):
             }
             QLineEdit:focus { border-color: rgba(167,139,250,0.40); }
         """)
-        pc.addWidget(self._referral_code_edit)
-        pc.addSpacing(8)
-
+        # referral input hidden — referral system WIP
         pc.addLayout(toggle_row)
         pc.addSpacing(10)
 

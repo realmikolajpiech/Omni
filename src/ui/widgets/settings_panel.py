@@ -799,7 +799,7 @@ class SettingsPanel(QWidget):
         self._add_page("Trust", self._build_trust())
         self._add_page("Files", self._build_files())
         self._add_page("Account", self._build_account())
-        self._add_page("Referrals", self._build_referral())
+        self._referral_page = self._build_referral()  # hidden — referral system WIP
         self._add_page("Feedback", self._build_feedback())
 
         root.addWidget(self.sidebar)
@@ -1621,12 +1621,11 @@ class SettingsPanel(QWidget):
         self._set_feedback_status("")
 
         import threading, urllib.request, json as _json
-        from src.core.config import SUPABASE_URL, SUPABASE_ANON_KEY
+        from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID
 
-        token       = auth.get_access_token()
-        user        = auth.get_user() or {}
-        fb_type     = self._feedback_type
-        payload     = {"type": fb_type, "title": title, "body": body}
+        user    = auth.get_user() or {}
+        fb_type = self._feedback_type
+        payload = {"type": fb_type, "title": title, "description": body}
         if user.get("id"):
             payload["user_id"] = user["id"]
 
@@ -1634,11 +1633,15 @@ class SettingsPanel(QWidget):
             try:
                 headers = {
                     "Content-Type": "application/json",
-                    "apikey":       SUPABASE_ANON_KEY,
-                    "Authorization": f"Bearer {token}" if token else f"Bearer {SUPABASE_ANON_KEY}",
+                    "X-Omni-Secret": OMNI_SECRET,
+                    "X-Device-ID":   DEVICE_ID,
+                    "User-Agent":    "OmniApp/1.0",
                 }
+                token = auth.get_access_token()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
                 req = urllib.request.Request(
-                    f"{SUPABASE_URL}/rest/v1/feedback",
+                    f"{BACKEND_URL}/v1/feedback",
                     data=_json.dumps(payload).encode(),
                     headers=headers,
                     method="POST",
