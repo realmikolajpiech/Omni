@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 pkill -f "Omni" 2>/dev/null || true
 
 launchctl unload ~/Library/LaunchAgents/com.omni.app.plist 2>/dev/null ||

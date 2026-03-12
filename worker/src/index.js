@@ -1367,9 +1367,9 @@ async function handleReleaseLatest(env) {
     const data = await ghResp.json();
     const tag = data.tag_name || "";
     return resp({
-      tag_name:    tag,
-      zipball_url: tag ? `https://omni-backend.heyomni.workers.dev/v1/release/download?tag=${tag}` : "",
-      body:        data.body || "",
+      tag_name:     tag,
+      download_url: tag ? `https://omni-backend.heyomni.workers.dev/v1/release/download?tag=${tag}` : "",
+      body:         data.body || "",
     });
   } catch (e) {
     return resp({ error: String(e) }, 502);
@@ -1377,14 +1377,28 @@ async function handleReleaseLatest(env) {
 }
 
 async function handleReleaseDownload(request, env) {
-  const tag = new URL(request.url).searchParams.get("tag");
-  if (!tag) return resp({ error: "Missing tag parameter" }, 400);
-  const zipUrl = `https://api.github.com/repos/realmikolajpiech/Omni/zipball/${tag}`;
+  const params  = new URL(request.url).searchParams;
+  const tag     = params.get("tag");
+  const assetId = params.get("asset_id");
+
+  let ghUrl, accept, contentType;
+  if (assetId) {
+    ghUrl       = `https://api.github.com/repos/realmikolajpiech/Omni/releases/assets/${assetId}`;
+    accept      = "application/octet-stream";
+    contentType = "application/x-apple-diskimage";
+  } else if (tag) {
+    ghUrl       = `https://api.github.com/repos/realmikolajpiech/Omni/zipball/${tag}`;
+    accept      = "application/vnd.github+json";
+    contentType = "application/zip";
+  } else {
+    return resp({ error: "Missing tag or asset_id parameter" }, 400);
+  }
+
   try {
-    const ghResp = await fetch(zipUrl, {
+    const ghResp = await fetch(ghUrl, {
       headers: {
         "User-Agent": "Omni-Updater/1.0",
-        "Accept": "application/vnd.github+json",
+        "Accept": accept,
         ...(env.GITHUB_TOKEN ? { "Authorization": `Bearer ${env.GITHUB_TOKEN}` } : {}),
       },
       redirect: "follow",
@@ -1392,14 +1406,10 @@ async function handleReleaseDownload(request, env) {
     if (!ghResp.ok) {
       return resp({ error: `GitHub download error: ${ghResp.status}` }, 502);
     }
-    return new Response(ghResp.body, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="omni-${tag}.zip"`,
-        ...(ghResp.headers.get("Content-Length") ? { "Content-Length": ghResp.headers.get("Content-Length") } : {}),
-      },
-    });
+    const headers = { "Content-Type": contentType };
+    const cl = ghResp.headers.get("Content-Length");
+    if (cl) headers["Content-Length"] = cl;
+    return new Response(ghResp.body, { status: 200, headers });
   } catch (e) {
     return resp({ error: String(e) }, 502);
   }

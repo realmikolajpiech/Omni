@@ -1,7 +1,7 @@
 """Auto-update helper for Omni.
 
 Flow:
-  check_update(current)  → (tag, zipball_url, changelog) | (None, None, None)
+  check_update(current)  → (tag, download_url, changelog) | (None, None, None)
   apply_update(url, cb)  → downloads zip, writes a shell helper that rsync's
                            the new source over INSTALL_DIR and relaunches Omni,
                            then launches that helper detached.
@@ -34,7 +34,7 @@ def _vtuple(tag: str) -> tuple:
 def check_update(current_version: str):
     """
     Query the Omni worker for the latest GitHub release.
-    Returns (latest_tag, zipball_url, changelog_body) if a newer release exists,
+    Returns (latest_tag, download_url, changelog_body) if a newer release exists,
     otherwise (None, None, None).
     Network errors are swallowed and logged at DEBUG level.
     """
@@ -46,12 +46,12 @@ def check_update(current_version: str):
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
 
-        tag         = data.get("tag_name", "")
-        zipball_url = data.get("zipball_url", "")
-        body        = data.get("body", "No release notes available.")
+        tag          = data.get("tag_name", "")
+        download_url = data.get("download_url") or data.get("zipball_url", "")
+        body         = data.get("body", "No release notes available.")
 
-        if tag and zipball_url and _vtuple(tag) > _vtuple(current_version):
-            return tag, zipball_url, body
+        if tag and download_url and _vtuple(tag) > _vtuple(current_version):
+            return tag, download_url, body
 
     except Exception as e:
         logging.debug(f"[updater] check_update: {e}")
@@ -59,7 +59,7 @@ def check_update(current_version: str):
     return None, None, None
 
 
-def apply_update(zipball_url: str, on_progress=None):
+def apply_update(download_url: str, on_progress=None):
     """
     Download the GitHub release zip, extract it, write a shell helper that
     rsyncs the new source over INSTALL_DIR and relaunches Omni, then launches
@@ -81,7 +81,7 @@ def apply_update(zipball_url: str, on_progress=None):
     _prog(0, "Downloading update…")
     try:
         req = urllib.request.Request(
-            zipball_url,
+            download_url,
             headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
         )
         with urllib.request.urlopen(req, timeout=300) as resp:
@@ -131,6 +131,7 @@ rsync -a --delete \\
     --exclude='__pycache__/' \\
     "{source_dir}/" "{install_dir}/"
 open -a "/Applications/Omni.app"
+rm -rf "{tmp_dir}"
 """
     with open(script_path, "w") as f:
         f.write(script_body)
