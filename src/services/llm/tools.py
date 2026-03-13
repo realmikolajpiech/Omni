@@ -506,6 +506,75 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": (
+                "Create a reminder that fires as a macOS notification. "
+                "Use for: 'remind me in 1 hour to call Jessy', 'every 10 minutes check my email'. "
+                "For agentic/conditional reminders (e.g. 'notify me when Oskar emails me'), "
+                "set a recurring interval and a query that the AI will run each time — "
+                "include STOP_REMINDER in the query instructions so the AI knows when to stop."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Short human-readable title shown in the notification.",
+                    },
+                    "fire_at_iso": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime for when the reminder should first fire, e.g. '2026-03-13T15:30:00'.",
+                    },
+                    "interval_seconds": {
+                        "type": "integer",
+                        "description": "If > 0, the reminder repeats every this many seconds after firing. Omit or 0 for one-shot.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Optional AI query to run each time the reminder fires. "
+                            "The result is shown in the notification. "
+                            "For conditional reminders, instruct the AI to include STOP_REMINDER "
+                            "in its response when the condition is met so the reminder stops."
+                        ),
+                    },
+                },
+                "required": ["label", "fire_at_iso"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": "List all pending reminders the user has set.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_reminder",
+            "description": "Cancel and delete a pending reminder by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reminder_id": {
+                        "type": "string",
+                        "description": "The ID of the reminder to delete (from list_reminders).",
+                    }
+                },
+                "required": ["reminder_id"],
+            },
+        },
+    },
 ]
 
 
@@ -583,6 +652,17 @@ def execute_tool(name: str, arguments: dict) -> str:
                 arguments.get("output_format", ""),
                 arguments.get("output_path", ""),
             )
+        elif name == "set_reminder":
+            return _tool_set_reminder(
+                arguments.get("label", ""),
+                arguments.get("fire_at_iso", ""),
+                arguments.get("interval_seconds", 0),
+                arguments.get("query", ""),
+            )
+        elif name == "list_reminders":
+            return _tool_list_reminders()
+        elif name == "delete_reminder":
+            return _tool_delete_reminder(arguments.get("reminder_id", ""))
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -1449,3 +1529,52 @@ def _convert_ffmpeg(input_path: str, out: str, mode: str) -> str:
 
     size = os.path.getsize(out)
     return f"Converted: {out} ({_format_size(size)})"
+
+
+# ── Reminder tools ─────────────────────────────────────────────────────────────
+
+def _tool_set_reminder(label: str, fire_at_iso: str, interval_seconds: int = 0, query: str = "") -> str:
+    from src.services.reminders.reminder_service import add_reminder
+    from datetime import datetime
+    label = label.strip()
+    fire_at_iso = fire_at_iso.strip()
+    if not label or not fire_at_iso:
+        return "Error: label and fire_at_iso are required."
+    try:
+        fire_at = datetime.fromisoformat(fire_at_iso).timestamp()
+    except ValueError as e:
+        return f"Error: invalid ISO datetime '{fire_at_iso}': {e}"
+    rid = add_reminder(label, fire_at, int(interval_seconds or 0), query.strip())
+    return f"ok (id:{rid})"
+
+
+def _tool_list_reminders() -> str:
+    from src.services.reminders.reminder_service import list_reminders
+    from datetime import datetime
+    reminders = list_reminders()
+    if not reminders:
+        return "No pending reminders."
+    lines = []
+    for r in reminders:
+        when = datetime.fromtimestamp(r["fire_at"]).strftime("%Y-%m-%d %H:%M:%S")
+        parts = [f"[{r['id']}] {r['label']!r} — fires at {when}"]
+        if r.get("interval_seconds"):
+            parts.append(f"repeats every {r['interval_seconds']}s")
+        if r.get("query"):
+            q = r["query"]
+            if len(q) > 60:
+                q = q[:57] + "…"
+            parts.append(f"query: {q!r}")
+        lines.append(", ".join(parts))
+    return "\n".join(lines)
+
+
+def _tool_delete_reminder(reminder_id: str) -> str:
+    from src.services.reminders.reminder_service import delete_reminder
+    reminder_id = reminder_id.strip()
+    if not reminder_id:
+        return "Error: reminder_id is required."
+    ok = delete_reminder(reminder_id)
+    if ok:
+        return f"Reminder {reminder_id} cancelled."
+    return f"No reminder found with ID {reminder_id}."

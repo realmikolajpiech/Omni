@@ -35,8 +35,11 @@ _TOOL_META = {
     "create_file":   {"icon": "📝", "label": "Create file"},
     "edit_file":     {"icon": "✏️", "label": "Edit file"},
     "organize_folder": {"icon": "📁", "label": "Organize"},
-    "compress":      {"icon": "🗜️", "label": "Compress"},
-    "convert_file":  {"icon": "🔄", "label": "Convert file"},
+    "compress":        {"icon": "🗜️", "label": "Compress"},
+    "convert_file":    {"icon": "🔄", "label": "Convert file"},
+    "set_reminder":    {"icon": "⏰", "label": "Set reminder"},
+    "list_reminders":  {"icon": "⏰", "label": "Reminders"},
+    "delete_reminder": {"icon": "⏰", "label": "Cancel reminder"},
 }
 
 
@@ -138,6 +141,18 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
             path = result[len("Created:"):].strip()
             return f"saved to {path}"
         return "failed" if "Error" in result else result.strip()[:60]
+
+    if tool_name == "set_reminder":
+        return "scheduled" if result.startswith("ok") else result.strip()[:60]
+
+    if tool_name == "list_reminders":
+        if result == "No pending reminders.":
+            return "none"
+        n = result.count("\n") + 1
+        return f"{n} reminder{'s' if n != 1 else ''}"
+
+    if tool_name == "delete_reminder":
+        return "cancelled" if "cancelled" in result else "not found"
 
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"

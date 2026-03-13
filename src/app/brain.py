@@ -15,6 +15,10 @@ def create_app():
     setup_logging("brain")
     app = Flask(__name__)
     app.register_blueprint(api_bp)
+
+    from src.services.reminders.reminder_service import get_service as _get_reminder_svc
+    _get_reminder_svc().start()
+
     return app
 
 def load_models_background():

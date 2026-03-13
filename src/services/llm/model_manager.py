@@ -184,12 +184,16 @@ class GroqFastWrapper:
 
 
         try:
+            from src.core import auth as _auth
+            token = _auth.get_access_token()
+            auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=eff_temp,
                 stream=False,
+                extra_headers=auth_headers,
                 **extra
             )
         except Exception as e:
@@ -253,6 +257,10 @@ class XAIMainWrapper:
 
         start_time = time.time()
 
+        from src.core import auth as _auth
+        token = _auth.get_access_token()
+        auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
+
         if stream:
             try:
                 stream_response = self.client.chat.completions.create(
@@ -261,6 +269,7 @@ class XAIMainWrapper:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     stream=True,
+                    extra_headers=auth_headers,
                     **extra,
                 )
                 logging.info(f"[Main Model] Stream initiated in {time.time() - start_time:.4f}s")
@@ -276,6 +285,7 @@ class XAIMainWrapper:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 stream=False,
+                extra_headers=auth_headers,
                 **extra,
             )
             duration = time.time() - start_time
