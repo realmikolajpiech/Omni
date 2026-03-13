@@ -70,6 +70,12 @@ export default {
       if (method === "POST")    return handleFeedback(request, env);
     }
 
+    // DMG download — public endpoint, proxies latest release asset via GitHub token.
+    if (path === "/v1/release/dmg") {
+      if (method === "OPTIONS") return corsResp(null, 204);
+      if (method === "GET")     return handleReleaseDmg(env);
+    }
+
     // All other endpoints require the shared app secret.
     if (request.headers.get("X-Omni-Secret") !== env.OMNI_SECRET) {
       return resp({ error: "Unauthorized" }, 401);
@@ -1366,10 +1372,12 @@ async function handleReleaseLatest(env) {
     }
     const data = await ghResp.json();
     const tag = data.tag_name || "";
+    const hasDmg = Array.isArray(data.assets) && data.assets.some(a => a.name.endsWith(".dmg"));
     return resp({
-      tag_name:     tag,
-      download_url: tag ? `https://omni-backend.heyomni.workers.dev/v1/release/download?tag=${tag}` : "",
-      body:         data.body || "",
+      tag_name:    tag,
+      zipball_url: tag ? `https://omni-backend.heyomni.workers.dev/v1/release/download?tag=${tag}` : "",
+      dmg_url:     (tag && hasDmg) ? `https://omni-backend.heyomni.workers.dev/v1/release/dmg` : "",
+      body:        data.body || "",
     });
   } catch (e) {
     return resp({ error: String(e) }, 502);
@@ -1410,6 +1418,38 @@ async function handleReleaseDownload(request, env) {
     const cl = ghResp.headers.get("Content-Length");
     if (cl) headers["Content-Length"] = cl;
     return new Response(ghResp.body, { status: 200, headers });
+  } catch (e) {
+    return resp({ error: String(e) }, 502);
+  }
+}
+
+async function handleReleaseDmg(env) {
+  const GITHUB_API = "https://api.github.com/repos/realmikolajpiech/Omni/releases/latest";
+  const ghHeaders = {
+    "User-Agent": "Omni-Updater/1.0",
+    "Accept": "application/vnd.github+json",
+    ...(env.GITHUB_TOKEN ? { "Authorization": `Bearer ${env.GITHUB_TOKEN}` } : {}),
+  };
+
+  try {
+    const releaseResp = await fetch(GITHUB_API, { headers: ghHeaders });
+    if (!releaseResp.ok) return resp({ error: `GitHub API error: ${releaseResp.status}` }, 502);
+
+    const release = await releaseResp.json();
+    const asset = release.assets?.find(a => a.name.endsWith(".dmg"));
+    if (!asset) return resp({ error: "No .dmg asset found in latest release" }, 404);
+
+    // Fetch the asset URL with auth — GitHub redirects to a temporary S3 URL.
+    const assetResp = await fetch(asset.url, {
+      headers: { ...ghHeaders, "Accept": "application/octet-stream" },
+      redirect: "manual",
+    });
+
+    const location = assetResp.headers.get("Location");
+    if (!location) return resp({ error: "No redirect from GitHub asset" }, 502);
+
+    // Redirect the browser to the temporary S3 URL (no auth needed).
+    return new Response(null, { status: 302, headers: { "Location": location } });
   } catch (e) {
     return resp({ error: String(e) }, 502);
   }

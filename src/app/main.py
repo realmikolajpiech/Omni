@@ -339,7 +339,7 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
 
     from PyQt6.QtCore import QTimer as _QTimer
     _update_timer = _QTimer()
-    _update_timer.setInterval(4 * 60 * 60 * 1000)  # 4 hours
+    _update_timer.setInterval(60 * 60 * 1000)  # 1 hour
     _update_timer.timeout.connect(_bg_update_check)
     _update_timer.start()
     _bg_update_check()  # also check immediately on startup

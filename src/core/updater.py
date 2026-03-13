@@ -1,10 +1,9 @@
 """Auto-update helper for Omni.
 
 Flow:
-  check_update(current)  → (tag, download_url, changelog) | (None, None, None)
-  apply_update(url, cb)  → downloads zip, writes a shell helper that rsync's
-                           the new source over INSTALL_DIR and relaunches Omni,
-                           then launches that helper detached.
+  check_update(current)  → (tag, url, changelog) | (None, None, None)
+  apply_update(url, cb)  → For DMG URLs: download → mount → rsync app → unmount → relaunch.
+                           For ZIP URLs: download → extract → rsync source → relaunch.
   The caller is responsible for quitting the Qt app after apply_update returns.
 """
 
@@ -34,9 +33,10 @@ def _vtuple(tag: str) -> tuple:
 def check_update(current_version: str):
     """
     Query the Omni worker for the latest GitHub release.
-    Returns (latest_tag, download_url, changelog_body) if a newer release exists,
-    otherwise (None, None, None).
-    Network errors are swallowed and logged at DEBUG level.
+    Returns (latest_tag, update_url, changelog_body) if a newer release exists
+    and a DMG is available, otherwise (None, None, None).
+    If the release exists but the DMG hasn't been uploaded yet, returns
+    (None, None, None) so the hourly timer retries later.
     """
     try:
         req = urllib.request.Request(
@@ -46,12 +46,14 @@ def check_update(current_version: str):
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
 
-        tag          = data.get("tag_name", "")
-        download_url = data.get("download_url") or data.get("zipball_url", "")
-        body         = data.get("body", "No release notes available.")
+        tag     = data.get("tag_name", "")
+        dmg_url = data.get("dmg_url", "")
+        body    = data.get("body", "No release notes available.")
 
-        if tag and download_url and _vtuple(tag) > _vtuple(current_version):
-            return tag, download_url, body
+        # Only notify if a DMG is actually available — if the release was just
+        # created and the DMG hasn't been uploaded yet, skip and retry next hour.
+        if tag and dmg_url and _vtuple(tag) > _vtuple(current_version):
+            return tag, dmg_url, body
 
     except Exception as e:
         logging.debug(f"[updater] check_update: {e}")
@@ -59,46 +61,129 @@ def check_update(current_version: str):
     return None, None, None
 
 
-def apply_update(download_url: str, on_progress=None):
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _emit(on_progress, pct: int, msg: str):
+    logging.info(f"[updater] {pct}% — {msg}")
+    if on_progress:
+        on_progress(pct, msg)
+
+
+def _download(url: str, dest: str, on_progress, start_pct: int, end_pct: int):
+    """Download url → dest, reporting progress in [start_pct, end_pct]."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Omni-Updater/1.0"})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        total      = int(resp.headers.get("Content-Length") or 0)
+        downloaded = 0
+        last_pct   = start_pct
+        with open(dest, "wb") as f:
+            while chunk := resp.read(65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    new_pct = start_pct + int(downloaded / total * (end_pct - start_pct))
+                    if new_pct > last_pct:
+                        last_pct = new_pct
+                        _emit(on_progress, new_pct, "Downloading update…")
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
+def apply_update(url: str, on_progress=None):
     """
-    Download the GitHub release zip, extract it, write a shell helper that
-    rsyncs the new source over INSTALL_DIR and relaunches Omni, then launches
-    that helper detached.  The caller must quit the Qt application afterwards.
-
-    on_progress(pct: int, msg: str) — optional UI callback, called on the
-    calling thread (run this in a QThread to keep the UI responsive).
+    Download and apply the update in-place.
+      DMG URL  → mount, rsync .app → /Applications/Omni.app, unmount, relaunch.
+      ZIP URL  → extract, rsync source → INSTALL_DIR via shell helper, relaunch.
+    The caller must quit the Qt application afterwards.
     """
+    if "/release/dmg" in url or url.lower().endswith(".dmg"):
+        _apply_dmg(url, on_progress)
+    else:
+        _apply_zip(url, on_progress)
 
-    def _prog(pct, msg):
-        logging.info(f"[updater] {pct}% — {msg}")
-        if on_progress:
-            on_progress(pct, msg)
 
+# ── DMG strategy (macOS packaged app) ────────────────────────────────────────
+
+def _apply_dmg(url: str, on_progress=None):
+    tmp_dir     = tempfile.mkdtemp(prefix="omni_update_")
+    dmg_path    = os.path.join(tmp_dir, "omni_update.dmg")
+    mount_point = os.path.join(tmp_dir, "mount")
+    os.makedirs(mount_point)
+
+    # ── 1. Download ───────────────────────────────────────────────────────────
+    _emit(on_progress, 0, "Downloading update…")
+    try:
+        _download(url, dmg_path, on_progress, 0, 55)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError(f"Download failed: {e}")
+
+    # ── 2. Mount ──────────────────────────────────────────────────────────────
+    _emit(on_progress, 55, "Mounting disk image…")
+    try:
+        subprocess.run(
+            ["hdiutil", "attach", "-nobrowse", "-quiet",
+             "-mountpoint", mount_point, dmg_path],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError(f"Mount failed: {e.stderr.decode()}")
+
+    try:
+        # ── 3. Find .app in mounted volume ────────────────────────────────────
+        _emit(on_progress, 60, "Installing update…")
+        import glob as _glob
+        app_sources = _glob.glob(os.path.join(mount_point, "*.app"))
+        if not app_sources:
+            raise RuntimeError("No .app bundle found in disk image")
+        app_source = app_sources[0]
+
+        # ── 4. Rsync .app → /Applications/Omni.app ───────────────────────────
+        result = subprocess.run(
+            ["rsync", "-a", "--delete",
+             f"{app_source}/", "/Applications/Omni.app/"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Copy failed: {result.stderr.decode()}")
+
+    finally:
+        # ── 5. Detach ─────────────────────────────────────────────────────────
+        try:
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-quiet"],
+                check=False, capture_output=True,
+            )
+        except Exception:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ── 6. Relaunch detached ─────────────────────────────────────────────────
+    _emit(on_progress, 95, "Relaunching…")
+    subprocess.Popen(
+        ["open", "/Applications/Omni.app"],
+        close_fds=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _emit(on_progress, 100, "Done — relaunching Omni…")
+
+
+# ── ZIP strategy (source / dev install) ──────────────────────────────────────
+
+def _apply_zip(url: str, on_progress=None):
     tmp_dir  = tempfile.mkdtemp(prefix="omni_update_")
     zip_path = os.path.join(tmp_dir, "omni_update.zip")
 
     # ── 1. Download ───────────────────────────────────────────────────────────
-    _prog(0, "Downloading update…")
+    _emit(on_progress, 0, "Downloading update…")
     try:
-        req = urllib.request.Request(
-            download_url,
-            headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            total      = int(resp.headers.get("Content-Length") or 0)
-            downloaded = 0
-            with open(zip_path, "wb") as f:
-                while chunk := resp.read(65536):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        _prog(int(downloaded / total * 55), "Downloading update…")
+        _download(url, zip_path, on_progress, 0, 55)
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Download failed: {e}")
 
     # ── 2. Extract ────────────────────────────────────────────────────────────
-    _prog(55, "Extracting…")
+    _emit(on_progress, 55, "Extracting…")
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir)
     try:
@@ -115,8 +200,8 @@ def apply_update(download_url: str, on_progress=None):
         else extract_dir
     )
 
-    # ── 3. Write the apply-and-relaunch helper script ────────────────────────
-    _prog(70, "Preparing…")
+    # ── 3. Write apply-and-relaunch shell helper ──────────────────────────────
+    _emit(on_progress, 70, "Preparing…")
     install_dir = str(INSTALL_DIR)
     script_path = os.path.join(tmp_dir, "do_update.sh")
     script_body = f"""\
@@ -138,11 +223,9 @@ rm -rf "{tmp_dir}"
     os.chmod(script_path, 0o755)
 
     # ── 4. Launch detached ────────────────────────────────────────────────────
-    _prog(90, "Applying update…")
+    _emit(on_progress, 90, "Applying update…")
     subprocess.Popen(
         ["bash", script_path],
-        close_fds=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        close_fds=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    _prog(100, "Done — relaunching Omni…")
+    _emit(on_progress, 100, "Done — relaunching Omni…")
