@@ -13,6 +13,8 @@ from src.services.llm.model_manager import ensure_model_loaded
 
 def create_app():
     setup_logging("brain")
+    from src.core import auth as _auth
+    _auth.load_saved_session()
     app = Flask(__name__)
     app.register_blueprint(api_bp)
 

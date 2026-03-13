@@ -123,7 +123,18 @@ def get_session() -> dict:
 
 def get_access_token() -> Optional[str]:
     with _lock:
-        return _session.get("access_token")
+        token = _session.get("access_token")
+        if token:
+            return token
+    # Brain process: in-memory session may not be loaded yet — read from disk.
+    try:
+        if os.path.exists(_TOKEN_FILE):
+            with open(_TOKEN_FILE) as f:
+                data = json.load(f)
+            return data.get("access_token") or None
+    except Exception:
+        pass
+    return None
 
 
 def get_user() -> Optional[dict]:

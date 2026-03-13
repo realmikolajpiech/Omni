@@ -562,16 +562,16 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delete_reminder",
-            "description": "Cancel and delete a pending reminder by its ID.",
+            "description": "Cancel and delete a pending reminder. Describe which reminder to delete in plain language (e.g. 'email reminder', 'Oskar call', 'bigos') — no need to look up IDs first.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reminder_id": {
+                    "query": {
                         "type": "string",
-                        "description": "The ID of the reminder to delete (from list_reminders).",
+                        "description": "Natural language description of the reminder to cancel, e.g. 'email summary', 'call Oskar', 'bigos'.",
                     }
                 },
-                "required": ["reminder_id"],
+                "required": ["query"],
             },
         },
     },
@@ -662,7 +662,7 @@ def execute_tool(name: str, arguments: dict) -> str:
         elif name == "list_reminders":
             return _tool_list_reminders()
         elif name == "delete_reminder":
-            return _tool_delete_reminder(arguments.get("reminder_id", ""))
+            return _tool_delete_reminder(arguments.get("query", ""))
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -1569,12 +1569,27 @@ def _tool_list_reminders() -> str:
     return "\n".join(lines)
 
 
-def _tool_delete_reminder(reminder_id: str) -> str:
-    from src.services.reminders.reminder_service import delete_reminder
-    reminder_id = reminder_id.strip()
-    if not reminder_id:
-        return "Error: reminder_id is required."
-    ok = delete_reminder(reminder_id)
-    if ok:
-        return f"Reminder {reminder_id} cancelled."
-    return f"No reminder found with ID {reminder_id}."
+def _tool_delete_reminder(query: str) -> str:
+    from src.services.reminders.reminder_service import delete_reminder, list_reminders
+    query = query.strip().lower()
+    if not query:
+        return "Error: query is required."
+    reminders = list_reminders()
+    if not reminders:
+        return "No pending reminders to delete."
+    # Find best match: exact ID, then substring match on label
+    match = next((r for r in reminders if r["id"] == query), None)
+    if not match:
+        match = next((r for r in reminders if query in r["label"].lower()), None)
+    if not match:
+        # Try matching any word from the query against the label
+        words = query.split()
+        match = next(
+            (r for r in reminders if any(w in r["label"].lower() for w in words if len(w) > 2)),
+            None
+        )
+    if not match:
+        labels = ", ".join(f'"{r["label"]}"' for r in reminders)
+        return f"No reminder matching '{query}'. Pending reminders: {labels}."
+    delete_reminder(match["id"])
+    return f"ok (cancelled '{match['label']}')"

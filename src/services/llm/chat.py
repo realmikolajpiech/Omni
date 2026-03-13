@@ -70,6 +70,27 @@ def _tool_invocation_line(tool_name: str, args: dict) -> str:
         arg_part = display
     elif tool_name in ("install_app", "uninstall_app"):
         arg_part = args.get("name", "")
+    elif tool_name == "set_reminder":
+        label = args.get("label", "")
+        fire_at = args.get("fire_at_iso", "")
+        # Trim to just time portion if it's a full datetime
+        if "T" in fire_at:
+            fire_at = fire_at.split("T")[1][:5]  # e.g. "14:30"
+        interval = args.get("interval_seconds", 0)
+        query = args.get("query", "")
+        parts = [f'"{label}"']
+        if fire_at:
+            parts.append(f"at {fire_at}")
+        if interval:
+            parts.append(f"every {interval}s")
+        if query:
+            q = query if len(query) <= 50 else query[:47] + "…"
+            parts.append(f"· {q}")
+        arg_part = "  ".join(parts)
+    elif tool_name == "delete_reminder":
+        arg_part = f'"{args.get("query", "")}"'
+    elif tool_name == "list_reminders":
+        arg_part = ""
     else:
         arg_part = "  ".join(f"{k}: {v!r}" for k, v in args.items())
 
@@ -1170,11 +1191,8 @@ Available settings and values:
                                 "content": result,
                             })
                             
-                        # Save this iteration's text for future display
-                        inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
-                        ans_clean, _, _ = extract_actions(answer_text) if answer_text else ("", [], "")
-                        if ans_clean:
-                            all_answer_text += ans_clean + "\n"
+                        # Discard intermediate text from tool-calling iterations;
+                        # the LLM's final response (after all tools) is always complete.
 
                         logging.info(f"[CHAT] Iteration {tool_iter} finished in {time.time() - iter_start_time:.4f}s")
 
@@ -1200,8 +1218,7 @@ Available settings and values:
                     thinking_content = _build_thinking(model_reasoning, tool_records, inline_thinking)
                     answer, actions, _ = extract_actions(answer_text) if answer_text else (answer_text, [], "")
                     
-                    # Prepend previous iterations' text
-                    final_full_answer = (all_answer_text + answer).strip()
+                    final_full_answer = answer.strip()
                     
                     if auto_actions:
                         actions.extend(auto_actions)

@@ -87,13 +87,12 @@ def _run_query(query: str) -> str:
     """Run an agentic query via process_chat_request (deferred import to avoid circular)."""
     try:
         from src.services.llm.chat import process_chat_request
-        messages = [{"role": "user", "content": query}]
         chunks = []
-        for chunk in process_chat_request(messages, stream=False):
-            if isinstance(chunk, str):
-                chunks.append(chunk)
-            elif isinstance(chunk, dict) and chunk.get("type") == "text":
-                chunks.append(chunk.get("text", ""))
+        for event_type, payload in process_chat_request(query, history=[], stream=True):
+            if event_type == "final":
+                return payload.get("answer", "").strip()
+            elif event_type == "partial":
+                pass  # ignore streaming partials
         return "".join(chunks).strip()
     except Exception as e:
         logging.error(f"[reminders] Query failed: {e}")
