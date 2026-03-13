@@ -664,7 +664,8 @@ Instructions:
                          llm_desc = _llm_person_description(q_val, search_context, safe_fast_completion)
                          if llm_desc:
                              person_res['description'] = llm_desc[1] if isinstance(llm_desc, tuple) else llm_desc
-                         if not person_res.get('description') or len(person_res.get('description', '')) < 20:
+                         else:
+                             # LLM description failed — always try snippet fallback regardless of existing length
                              fallback_desc = _build_person_desc_from_snippets(q_val, search_results or [])
                              if fallback_desc:
                                  person_res['description'] = fallback_desc
@@ -1665,14 +1666,14 @@ def action_pending_endpoint():
             "NEVER return empty output.\n"
             "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
             "Every output line must start with a valid prefix.\n"
-            "Never output PERSON with an empty description.\n"
+            "Never output PERSON without a description after the '|' separator.\n"
             "Never output trailing '|' without text after it.\n"
             "If the result is a physical location (school, restaurant, monument, city), ALWAYS output a PLACE: command.\n"
             "If it also has an official website, output OPEN: as well.\n"
-            "If it is a person, output PERSON:.\n\n"
+            "If it is a person, output PERSON:FullName|Description — the description is MANDATORY.\n\n"
             "Output one or more commands, one per line:\n"
             "- PLACE:Name (for ANY physical location/institution)\n"
-            "- PERSON:Name|Description (Name MUST be the full person name from best result title, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description is REQUIRED and MUST be 1-2 sentences with specific context: role + organization/school/company/location when present. If you cannot provide it, output SEARCH:query instead.)\n"
+            "- PERSON:Name|Description (Name MUST be the full person name, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description MUST be 1-2 sentences synthesized from the search results: role + organization/school/company/location. NEVER omit the description — if you truly cannot write one, use SEARCH:query instead.)\n"
             "- OPEN:url (for websites)\n"
             "- INSTALL/UNINSTALL:name\n"
             "- SEARCH:query\n"
@@ -1684,12 +1685,14 @@ def action_pending_endpoint():
             "OPEN:https://zstib.edu.pl\n\n"
             "Search result: 'Mikołaj Piech – Omni'\n"
             "PERSON:Mikołaj Piech|He is a Polish app developer associated with Omni and focused on AI-powered software.\n\n"
+            "Search result: 'Anna Kowalska – wicedyrektor. Szkoła Podstawowa nr 5, Kraków'\n"
+            "PERSON:Anna Kowalska|She is a vice-principal at Szkoła Podstawowa nr 5 in Kraków, Poland.\n\n"
             "Do not explain."
         )
         phase2_user = f"Query: {query}\n\n{search_context}"
         out = _safe_fast_completion(
             messages=[{"role": "system", "content": phase2_system}, {"role": "user", "content": phase2_user}],
-            max_tokens=256,
+            max_tokens=350,
             temperature=0.0,
             step_name="Action intent (pending)"
         )
