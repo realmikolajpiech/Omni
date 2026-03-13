@@ -2468,6 +2468,7 @@ class OmniWindow(QWidget):
                         def _cb(name, _widget):
                             self._cancel_all_workers()
                             find_and_launch_app(name)
+                            self._reset_on_next_show = True
                             self.animate_close()
                         return _cb
                     w.app_accepted.connect(_make_open_app_cb())
@@ -3108,6 +3109,7 @@ class OmniWindow(QWidget):
                 app_name = data.get('name')
                 self._cancel_all_workers()
                 find_and_launch_app(app_name)
+                self._reset_on_next_show = True
                 self.animate_close()
             elif data.get('type') == 'open_file':
                 # Open file in default application
@@ -3133,6 +3135,7 @@ class OmniWindow(QWidget):
                 try:
                     logging.info(f"Executing command: {data['cmd']}")
                     subprocess.Popen(data['cmd'], shell=True)
+                    self._reset_on_next_show = True
                     self.animate_close()
                 except Exception as e:
                     logging.error(f"Failed to execute command '{data['cmd']}': {e}")
