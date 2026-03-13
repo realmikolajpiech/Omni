@@ -172,12 +172,17 @@ def _parse_fast_action_output(
         logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
         result_text = f"SEARCH:{query}"
 
+    # NONE: fast model recognized a direct conversational AI query — return no actions
+    if re.search(r'\bNONE\b', result_text):
+        logging.info(f"[ACTION] Fast model returned NONE for conversational query: '{query}'")
+        return [], []
+
     # Also check if output contains only special tokens or is just newlines/spaces
     has_command = any(cmd in result_text for cmd in [
         "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
         "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
         "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
-        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:"
+        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:", "NONE"
     ])
     if not has_command:
         logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
@@ -1397,12 +1402,14 @@ Never output trailing '|' without text after it.
 - PASSWORD:length
 - QRCODE:data
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"...","value":...}
+- NONE (query is a direct conversational question to you as the AI — e.g. "who are you", "what are you", "are you an AI", "how are you", "what can you do", "do you have feelings", "are you sentient", "introduce yourself", "what's your name")
 """
 
     system_prompt = base_system_prompt.replace(
         "{tool_instruction}",
         "Think first: only call `web_search` if you truly need external, real-world info (unknown person/place/fact/event).\n"
-        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings."
+        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
+        "If the query is a direct conversational question to you as an AI (identity, feelings, capabilities, self-introduction), output NONE — do NOT search."
     )
 
     user_prompt = f"Query: {query}\n\n{search_context}"

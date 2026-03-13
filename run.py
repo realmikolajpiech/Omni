@@ -69,8 +69,6 @@ def main():
         os.makedirs(logs_dir, exist_ok=True)
         brain_proc = subprocess.Popen(
             [sys.executable, __file__, "brain"],
-            stdout=open(os.path.join(logs_dir, "brain_setup.log"), "a"),
-            stderr=subprocess.STDOUT,
         )
     else:
         print("Brain Service already running.")

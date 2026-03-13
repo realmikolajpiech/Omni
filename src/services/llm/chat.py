@@ -707,6 +707,7 @@ Output:"""
 def process_chat_request(query, history, screenshot_b64=None, stream=False):
     import sys # Ensure sys is available
     abort_fast_event.set()
+    model_manager.current_fast_request_id = None
     ensure_main_model()
 
     if not model_manager.llm:
@@ -776,6 +777,7 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
         logging.info("[CHAT] Screenshot provided — skipping tool calls for this request.")
 
     import concurrent.futures
+    _prefetch_start = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _pool:
         _loc_fut = _pool.submit(get_ip_location)
         _mem_fut = _pool.submit(get_user_memory, None)
@@ -783,6 +785,7 @@ def process_chat_request(query, history, screenshot_b64=None, stream=False):
         user_loc = _loc_fut.result()
         user_personal_context = _mem_fut.result()
         routed_model = _routing_fut.result()
+    logging.info(f"[CHAT] Pre-fetch done in {time.time() - _prefetch_start:.3f}s (loc+memory+routing)")
 
     # NOTE: user_personal_context will NOT have the "Just Learned" fact from this turn,
     # because it is being extracted in the background. This is a trade-off for speed.
@@ -1008,8 +1011,9 @@ Available settings and values:
         request_start_time = time.time()
         logging.info(f"[CHAT] Processing request at {request_start_time:.2f} (model={routed_model})")
 
+        _lock_wait_start = time.time()
         with main_lock:
-            logging.info("[CHAT] Main lock acquired. Starting generation...")
+            logging.info(f"[CHAT] Main lock acquired after {time.time() - _lock_wait_start:.3f}s wait. Starting generation...")
 
             if stream:
                 # ── Streaming with tool-calling loop ────────────────────────
@@ -1031,6 +1035,7 @@ Available settings and values:
                     if hasattr(model_manager.llm, 'reset'):
                         model_manager.llm.reset()
 
+                    _llm_call_start = time.time()
                     streamer = model_manager.llm.create_chat_completion(
                         messages=messages,
                         max_tokens=1536,
@@ -1043,6 +1048,7 @@ Available settings and values:
                     accumulated_text = ""
                     iter_reasoning = ""   # reasoning tokens from THIS iteration only
                     accumulated_tc: dict = {}  # index → tool call dict
+                    _first_token_logged = False
 
                     for chunk in streamer:
                         if model_manager.abort_fast_event.is_set():
@@ -1089,6 +1095,10 @@ Available settings and values:
                                     iter_reasoning += reasoning_token
 
                         accumulated_text += token
+
+                        if not _first_token_logged and (token or reasoning_token):
+                            logging.info(f"[CHAT] First token at {time.time() - _llm_call_start:.3f}s after LLM call (iter {tool_iter})")
+                            _first_token_logged = True
 
                         # Yield partial — combine tool log + all model reasoning so far
                         if token or reasoning_token:
@@ -1212,7 +1222,9 @@ Available settings and values:
                         continue  # Next iteration with tool results in messages
 
                     # ── No tool calls: this is the final response ────────────
-                    logging.info(f"[CHAT] Final response generation started after {time.time() - request_start_time:.4f}s total")
+                    _iter_dur = time.time() - iter_start_time
+                    _total_dur = time.time() - request_start_time
+                    logging.info(f"[CHAT] Iter {tool_iter} LLM generation: {_iter_dur:.3f}s | total so far: {_total_dur:.3f}s")
                     inline_thinking, answer_text = _split_thinking_and_answer(accumulated_text)
                     # model_reasoning already includes all iterations; inline_thinking from <think> tags
                     thinking_content = _build_thinking(model_reasoning, tool_records, inline_thinking)
@@ -1224,7 +1236,7 @@ Available settings and values:
                         actions.extend(auto_actions)
                     actions.extend(flush_pending_trust_requests())
                     _postprocess_actions(actions, final_full_answer)
-                    logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(final_full_answer)}, actions={len(actions)}")
+                    logging.info(f"[STREAM] final: thinking={len(thinking_content)}, answer={len(final_full_answer)}, actions={len(actions)}, total={time.time() - request_start_time:.3f}s")
 
                     final_header = f"Used {len(tool_records)} tool{'s' if len(tool_records) != 1 else ''}" if tool_records else None
                     # Pass first openable file path from tools (for "Enter to open" hint)

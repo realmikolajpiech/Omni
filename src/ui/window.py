@@ -684,7 +684,7 @@ class OmniWindow(QWidget):
                             self.mac_blur_view.layer().setCornerRadius_(24.0)
                             self.mac_blur_view.layer().setMasksToBounds_(True)
                             
-                            logging.info("MacOS Liquid Glass applied via NSGlassEffectView")
+                            # logging.info("MacOS Liquid Glass applied via NSGlassEffectView")
                         else:
                             # Fallback to NSVisualEffectView
                             self.mac_blur_view = NSVisualEffectView.alloc().initWithFrame_(ns_view.frame())
@@ -1526,7 +1526,7 @@ class OmniWindow(QWidget):
                         self.perform_ai_query(query)
                         return True
             elif event.key() == Qt.Key.Key_Escape:
-                logging.info("Escape key pressed (Input Field)")
+                # logging.info("Escape key pressed (Input Field)")
 
                 if self.is_command_palette:
                     self.is_command_palette = False
@@ -2149,7 +2149,7 @@ class OmniWindow(QWidget):
             return
         
         if event.key() == Qt.Key.Key_Escape:
-            logging.info("Escape key pressed (Global)")
+            # logging.info("Escape key pressed (Global)")
 
             if self.is_clipboard_mode:
                 self.exit_clipboard_mode()

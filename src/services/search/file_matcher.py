@@ -124,7 +124,7 @@ class FileMatcher:
             'want', 'need', 'find', 'search', 'look', 'show', 'me'
         }
         
-        words = [w.lower() for w in query.split() if len(w) > 2]
+        words = [w.lower() for w in query.split() if len(w) >= 4]
         keywords = [w for w in words if w not in stop_words]
         
         if not keywords:
