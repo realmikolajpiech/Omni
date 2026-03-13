@@ -323,7 +323,12 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
         if dlg.exec():   # accepted → user clicked Update Now
             QApplication.instance().quit()
 
+    def _notify_settings(tag, url, body):
+        if hasattr(window, 'settings_panel'):
+            window.settings_panel.notify_update(tag, url, body)
+
     _upd.found.connect(_show_update_dialog)
+    _upd.found.connect(_notify_settings)
 
     def _bg_update_check():
         from src.core.updater import check_update

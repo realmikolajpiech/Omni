@@ -15,7 +15,7 @@ import src.core.settings_store as settings_store
 import src.core.subscription as subscription
 import src.core.auth as auth
 import src.core.billing as billing
-from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, SUPABASE_URL, SUPABASE_ANON_KEY
+from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, SUPABASE_URL, SUPABASE_ANON_KEY, APP_VERSION
 
 # ── Website Supabase (waitlist / referrals) ───────────────────────────────────
 _WEBSITE_SB_URL  = "https://rfirkagyggkumbeqzxgf.supabase.co"
@@ -784,12 +784,31 @@ class SettingsPanel(QWidget):
         # ── Sidebar ──────────────────────────────────────────────────
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("SettingsSidebar")
-        self.sidebar.setFixedWidth(200)
         self.sidebar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sidebar.itemSelectionChanged.connect(self._on_sidebar_changed)
-        
+
+        self._version_label = QLabel(f"v{APP_VERSION}")
+        self._version_label.setObjectName("SettingsVersion")
+        self._version_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self._update_btn = QPushButton("↑  Update available")
+        self._update_btn.setObjectName("SettingsUpdateBtn")
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.hide()
+        self._update_info = (None, None, None)  # tag, url, body
+
+        sidebar_container = QWidget()
+        sidebar_container.setFixedWidth(200)
+        sidebar_container.setObjectName("SettingsSidebarContainer")
+        sc_layout = QVBoxLayout(sidebar_container)
+        sc_layout.setContentsMargins(0, 0, 0, 12)
+        sc_layout.setSpacing(6)
+        sc_layout.addWidget(self.sidebar)
+        sc_layout.addWidget(self._update_btn)
+        sc_layout.addWidget(self._version_label)
+
         # ── Content Area ─────────────────────────────────────────────
         self.content_stack = QStackedWidget()
         self.content_stack.setObjectName("SettingsContent")
@@ -802,7 +821,7 @@ class SettingsPanel(QWidget):
         self._referral_page = self._build_referral()  # hidden — referral system WIP
         self._add_page("Feedback", self._build_feedback())
 
-        root.addWidget(self.sidebar)
+        root.addWidget(sidebar_container)
         root.addWidget(self.content_stack)
         
         # Select first item by default
@@ -2139,6 +2158,23 @@ class SettingsPanel(QWidget):
 
     # ── Account tab ──────────────────────────────────────────────────
 
+    def notify_update(self, tag: str, url: str, body: str):
+        """Show the 'Update available' button in the sidebar."""
+        self._update_info = (tag, url, body)
+        self._update_btn.setToolTip(f"Version {tag} is available")
+        self._update_btn.show()
+        self._update_btn.clicked.connect(self._on_update_clicked)
+
+    def _on_update_clicked(self):
+        tag, url, body = self._update_info
+        if not url:
+            return
+        from src.ui.update_dialog import UpdateDialog
+        from PyQt6.QtWidgets import QApplication
+        dlg = UpdateDialog(APP_VERSION, tag, url, body, parent=self)
+        if dlg.exec():
+            QApplication.instance().quit()
+
     def refresh_account(self):
         """Refresh both auth state and subscription status."""
         # Always clear stale checkout messages — the poller keeps running silently in
@@ -2867,12 +2903,38 @@ class SettingsPanel(QWidget):
             QWidget {{ background: transparent; }}
             
             /* Sidebar */
-            QListWidget#SettingsSidebar {{
+            QWidget#SettingsSidebarContainer {{
                 background: {sidebar_bg};
-                border: none;
                 border-right: 1px solid {border};
+            }}
+            QListWidget#SettingsSidebar {{
+                background: transparent;
+                border: none;
                 outline: none;
                 padding-top: 20px;
+            }}
+            QLabel#SettingsVersion {{
+                color: {secondary};
+                font-family: Manrope;
+                font-size: 11px;
+                padding-left: 18px;
+                background: transparent;
+            }}
+            QPushButton#SettingsUpdateBtn {{
+                background: rgba(124, 110, 245, 0.15);
+                color: #9487f7;
+                border: 1px solid rgba(124, 110, 245, 0.35);
+                border-radius: 8px;
+                font-family: Manrope;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 5px 10px;
+                margin: 0 12px;
+                text-align: left;
+            }}
+            QPushButton#SettingsUpdateBtn:hover {{
+                background: rgba(124, 110, 245, 0.28);
+                border-color: rgba(124, 110, 245, 0.6);
             }}
             QListWidget#SettingsSidebar::item {{
                 height: 40px;

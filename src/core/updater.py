@@ -71,7 +71,10 @@ def _emit(on_progress, pct: int, msg: str):
 
 def _download(url: str, dest: str, on_progress, start_pct: int, end_pct: int):
     """Download url → dest, reporting progress in [start_pct, end_pct]."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Omni-Updater/1.0"})
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
+    )
     with urllib.request.urlopen(req, timeout=300) as resp:
         total      = int(resp.headers.get("Content-Length") or 0)
         downloaded = 0
