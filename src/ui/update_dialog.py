@@ -56,14 +56,15 @@ class _ApplyWorker(QThread):
     finished_ok  = pyqtSignal()
     finished_err = pyqtSignal(str)
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, tag: str):
         super().__init__()
         self._url = url
+        self._tag = tag
 
     def run(self):
         from src.core.updater import apply_update
         try:
-            apply_update(self._url, on_progress=lambda p, m: self.progress.emit(p, m))
+            apply_update(self._url, self._tag, on_progress=lambda p, m: self.progress.emit(p, m))
             self.finished_ok.emit()
         except Exception as e:
             self.finished_err.emit(str(e))
@@ -91,6 +92,7 @@ class UpdateDialog(QDialog):
     ):
         super().__init__(parent)
         self._url     = zipball_url
+        self._tag     = latest
         self._worker  = None
         self._accepted_update = False
 
@@ -248,7 +250,7 @@ class UpdateDialog(QDialog):
         self._err_lbl.setVisible(False)
         self.adjustSize()
 
-        self._worker = _ApplyWorker(self._url)
+        self._worker = _ApplyWorker(self._url, self._tag)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_ok)
         self._worker.finished_err.connect(self._on_err)
@@ -260,10 +262,15 @@ class UpdateDialog(QDialog):
 
     def _on_ok(self):
         self._prog_bar.set_value(100)
-        self._prog_lbl.setText("Done — relaunching Omni…")
+        self._prog_lbl.setText("Update installed! Restart Omni to apply.")
         self._prog_lbl.setStyleSheet(f"color: {GREEN}; font-size: 12px;")
         self._accepted_update = True
-        self.accept()
+        # Show a close button instead of quitting
+        self._later_btn.setText("Close")
+        self._later_btn.setEnabled(True)
+        self._later_btn.setVisible(True)
+        self._update_btn.setVisible(False)
+        self.adjustSize()
 
     def _on_err(self, msg: str):
         self._err_lbl.setText(f"Update failed: {msg}")

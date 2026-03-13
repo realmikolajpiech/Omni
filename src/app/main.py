@@ -320,10 +320,16 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
     def _show_update_dialog(tag, url, body):
         from src.ui.update_dialog import UpdateDialog
         dlg = UpdateDialog(APP_VERSION, tag, url, body)
-        if dlg.exec():   # accepted → user clicked Update Now
-            QApplication.instance().quit()
+        dlg.exec()  # dialog handles everything — no quit needed
 
     _upd.found.connect(_show_update_dialog)
+
+    # Clear pending-update flag if we're already running the updated version
+    from src.core import settings_store as _ss
+    from src.core.updater import _vtuple
+    _pending = _ss.get("updated_to_version")
+    if _pending and _vtuple(APP_VERSION) >= _vtuple(_pending):
+        _ss.set("updated_to_version", None)
 
     def _bg_update_check():
         from src.core.updater import check_update

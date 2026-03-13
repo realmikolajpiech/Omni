@@ -2,10 +2,9 @@
 
 Flow:
   check_update(current)  → (tag, download_url, changelog) | (None, None, None)
-  apply_update(url, cb)  → downloads zip, writes a shell helper that rsync's
-                           the new source over INSTALL_DIR and relaunches Omni,
-                           then launches that helper detached.
-  The caller is responsible for quitting the Qt app after apply_update returns.
+  apply_update(url, tag, cb) → downloads zip, rsyncs new source over the
+                                running project root, saves installed version.
+                                The caller does NOT need to quit the app.
 """
 
 import json
@@ -13,14 +12,17 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 from pathlib import Path
 
 from src.core.config import BACKEND_URL, OMNI_SECRET
 
-INSTALL_DIR = Path.home() / "Library" / "Application Support" / "Omni"
 _RELEASE_URL = f"{BACKEND_URL}/v1/release/latest"
+
+# The actual project root where the app is running from.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _vtuple(tag: str) -> tuple:
@@ -36,9 +38,17 @@ def check_update(current_version: str):
     Query the Omni worker for the latest GitHub release.
     Returns (latest_tag, download_url, changelog_body) if a newer release exists,
     otherwise (None, None, None).
+    Skips if this version was already installed via a previous update.
     Network errors are swallowed and logged at DEBUG level.
     """
     try:
+        # Skip if we already installed this update (pending restart)
+        from src.core import settings_store
+        already = settings_store.get("updated_to_version")
+        if already and _vtuple(already) >= _vtuple(current_version):
+            # We've already updated past our running version — don't nag
+            pass
+
         req = urllib.request.Request(
             _RELEASE_URL,
             headers={"User-Agent": "Omni-Updater/1.0", "X-Omni-Secret": OMNI_SECRET},
@@ -51,6 +61,10 @@ def check_update(current_version: str):
         body         = data.get("body", "No release notes available.")
 
         if tag and download_url and _vtuple(tag) > _vtuple(current_version):
+            # If we already applied this exact version, don't show it again
+            if already and _vtuple(already) >= _vtuple(tag):
+                logging.debug(f"[updater] skipping {tag}, already installed (pending restart)")
+                return None, None, None
             return tag, download_url, body
 
     except Exception as e:
@@ -59,11 +73,14 @@ def check_update(current_version: str):
     return None, None, None
 
 
-def apply_update(download_url: str, on_progress=None):
+def apply_update(download_url: str, tag: str, on_progress=None):
     """
-    Download the GitHub release zip, extract it, write a shell helper that
-    rsyncs the new source over INSTALL_DIR and relaunches Omni, then launches
-    that helper detached.  The caller must quit the Qt application afterwards.
+    Download the GitHub release zip, extract it, and rsync the new source
+    directly over the running project root.  Saves the installed version
+    to settings so the update dialog is not shown again.
+
+    The caller does NOT need to quit the app — changes take effect on
+    next restart.
 
     on_progress(pct: int, msg: str) — optional UI callback, called on the
     calling thread (run this in a QThread to keep the UI responsive).
@@ -92,13 +109,13 @@ def apply_update(download_url: str, on_progress=None):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total:
-                        _prog(int(downloaded / total * 55), "Downloading update…")
+                        _prog(int(downloaded / total * 50), "Downloading update…")
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Download failed: {e}")
 
     # ── 2. Extract ────────────────────────────────────────────────────────────
-    _prog(55, "Extracting…")
+    _prog(50, "Extracting…")
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir)
     try:
@@ -107,7 +124,7 @@ def apply_update(download_url: str, on_progress=None):
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Extraction failed: {e}")
 
-    # GitHub zips have a single top-level directory: realmikolajpiech-Omni-<sha>/
+    # GitHub zips have a single top-level directory: user-Repo-<sha>/
     entries = os.listdir(extract_dir)
     source_dir = (
         os.path.join(extract_dir, entries[0])
@@ -115,34 +132,43 @@ def apply_update(download_url: str, on_progress=None):
         else extract_dir
     )
 
-    # ── 3. Write the apply-and-relaunch helper script ────────────────────────
-    _prog(70, "Preparing…")
-    install_dir = str(INSTALL_DIR)
-    script_path = os.path.join(tmp_dir, "do_update.sh")
-    script_body = f"""\
-#!/bin/bash
-sleep 2
-rsync -a --delete \\
-    --exclude='.env' \\
-    --exclude='data/' \\
-    --exclude='logs/' \\
-    --exclude='venv/' \\
-    --exclude='*.pyc' \\
-    --exclude='__pycache__/' \\
-    "{source_dir}/" "{install_dir}/"
-open -a "/Applications/Omni.app"
-rm -rf "{tmp_dir}"
-"""
-    with open(script_path, "w") as f:
-        f.write(script_body)
-    os.chmod(script_path, 0o755)
+    # ── 3. Rsync new source over the running project root ────────────────────
+    _prog(65, "Applying update…")
+    install_dir = str(_PROJECT_ROOT)
+    try:
+        result = subprocess.run(
+            [
+                "rsync", "-a",
+                "--exclude=.env",
+                "--exclude=data/",
+                "--exclude=logs/",
+                "--exclude=venv/",
+                "--exclude=.venv/",
+                "--exclude=*.pyc",
+                "--exclude=__pycache__/",
+                "--exclude=.git/",
+                "--exclude=.claude/",
+                f"{source_dir}/",
+                f"{install_dir}/",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "rsync failed")
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError("Update apply timed out")
+    except RuntimeError:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
-    # ── 4. Launch detached ────────────────────────────────────────────────────
-    _prog(90, "Applying update…")
-    subprocess.Popen(
-        ["bash", script_path],
-        close_fds=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    _prog(100, "Done — relaunching Omni…")
+    # ── 4. Save installed version & clean up ─────────────────────────────────
+    _prog(90, "Finishing up…")
+    try:
+        from src.core import settings_store
+        settings_store.set("updated_to_version", tag.lstrip("v"))
+    except Exception as e:
+        logging.warning(f"[updater] could not save updated version: {e}")
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    _prog(100, "Update complete!")

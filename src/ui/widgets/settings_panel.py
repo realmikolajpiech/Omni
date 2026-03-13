@@ -15,7 +15,7 @@ import src.core.settings_store as settings_store
 import src.core.subscription as subscription
 import src.core.auth as auth
 import src.core.billing as billing
-from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, SUPABASE_URL, SUPABASE_ANON_KEY
+from src.core.config import BACKEND_URL, DEVICE_ID, OMNI_SECRET, INDEX_DONE_MARKER, INDEX_PROGRESS_PATH, SUPABASE_URL, SUPABASE_ANON_KEY, APP_VERSION
 
 # ── Website Supabase (waitlist / referrals) ───────────────────────────────────
 _WEBSITE_SB_URL  = "https://rfirkagyggkumbeqzxgf.supabase.co"
@@ -802,7 +802,17 @@ class SettingsPanel(QWidget):
         self._referral_page = self._build_referral()  # hidden — referral system WIP
         self._add_page("Feedback", self._build_feedback())
 
-        root.addWidget(self.sidebar)
+        sidebar_col = QVBoxLayout()
+        sidebar_col.setContentsMargins(0, 0, 0, 0)
+        sidebar_col.setSpacing(0)
+        sidebar_col.addWidget(self.sidebar)
+
+        self._version_label = QLabel(f"v{APP_VERSION}")
+        self._version_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._version_label.setContentsMargins(16, 4, 0, 12)
+        sidebar_col.addWidget(self._version_label)
+
+        root.addLayout(sidebar_col)
         root.addWidget(self.content_stack)
         
         # Select first item by default
@@ -2851,6 +2861,8 @@ class SettingsPanel(QWidget):
         self._apply_personality_toggle_theme(dark)
         if hasattr(self, "_fb_card"):
             self._fb_card.set_dark(dark)
+        if hasattr(self, "_version_label"):
+            self._version_label.setStyleSheet(f"color: {secondary}; font-size: 11px; background: transparent;")
         if hasattr(self, "_profile_card"):
             self._profile_card.set_dark(dark)
         if hasattr(self, "_security_card"):
