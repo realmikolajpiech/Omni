@@ -3673,10 +3673,16 @@ class OmniWindow(QWidget):
             # Proceed without screenshot
             self.start_ai_worker(self.input_field.text(), None)
 
-    def start_ai_worker(self, query, screenshot_b64):
+    def start_ai_worker(self, query, screenshot_b64, resume_session_id=None):
         self._last_ai_query = query  # stored so request_permission can re-run if user grants
         self.cleanup_worker('ai_worker')
-        self.ai_worker = AIWorker(query, self.chat_history, screenshot_b64)
+        # Track usage locally so the settings panel counter stays current.
+        # Skip continuations (resume_session_id) — those are tool-permission re-runs,
+        # not new user requests.
+        if not resume_session_id:
+            from src.core import subscription as _sub
+            _sub.increment_usage()
+        self.ai_worker = AIWorker(query, self.chat_history, screenshot_b64, resume_session_id=resume_session_id)
         self.ai_worker.finished.connect(self.on_ai_response)
         self.ai_worker.partial_response.connect(self.on_partial_response)
         self.ai_worker.start()
@@ -4026,6 +4032,7 @@ class OmniWindow(QWidget):
                             req_level  = act.get('required_level', 2)
                             cmd        = act.get('command', '')
                             desc       = act.get('description', cmd)[:80]
+                            session_id = act.get('session_id')
                             if settings_store.get("trust_level", 1) >= req_level:
                                 if cmd:
                                     self._run_trusted_terminal(cmd, insert_pos)
@@ -4036,7 +4043,7 @@ class OmniWindow(QWidget):
                                 perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                                 self._perm_widget = perm  # keep strong ref
                                 widget.set_answer_visible(False)
-                                def _make_tr_allow_cb(_perm_widget, _w, _lvl, _prior_thinking, _was_voice):
+                                def _make_tr_allow_cb(_perm_widget, _w, _lvl, _prior_thinking, _was_voice, _session_id):
                                     def _cb():
                                         # Clear the flag — finalize runs normally after re-run
                                         self._continuation_pending = False
@@ -4064,13 +4071,14 @@ class OmniWindow(QWidget):
                                         # Restore voice flag so the re-run response also gets TTS
                                         if _was_voice:
                                             self.voice_triggered_query = True
-                                        # Boost trust and re-run — widget updates in-place
+                                        # Boost trust and resume from saved session (no full restart)
                                         from src.services.llm.tools import set_trust_boost
                                         set_trust_boost(_lvl)
                                         self.logo_label.boost_speed()
                                         _w.set_answer("Running...")
                                         QTimer.singleShot(100, lambda: self.start_ai_worker(
-                                            getattr(self, '_last_ai_query', ''), None
+                                            getattr(self, '_last_ai_query', ''), None,
+                                            resume_session_id=_session_id
                                         ))
                                     return _cb
                                 def _make_tr_deny_cb(_w):
@@ -4086,7 +4094,7 @@ class OmniWindow(QWidget):
                                         self._finalize_response_ui()
                                         self._navigate_to_trust_settings()
                                     return _cb
-                                perm.allowed.connect(_make_tr_allow_cb(perm, widget, req_level, data.get("thinking", ""), self.voice_triggered_query))
+                                perm.allowed.connect(_make_tr_allow_cb(perm, widget, req_level, data.get("thinking", ""), self.voice_triggered_query, session_id))
                                 perm.denied.connect(_make_tr_deny_cb(widget))
                                 perm.open_settings.connect(_make_tr_settings_cb())
                                 self.insert_list_item(insert_pos, perm, {"type": "trust_permission"}, animation="pop")
@@ -4501,9 +4509,10 @@ class OmniWindow(QWidget):
                     w.uninstall_accepted.connect(lambda name, widget, _w=w: self.start_uninstall(name, source_widget=_w))
                     add_item(w, act, anim="fade")
                 elif act.get('type') == 'trust_request':
-                    req_level = act.get('required_level', 2)
-                    cmd       = act.get('command', '')
-                    desc      = act.get('description', cmd)[:80]
+                    req_level  = act.get('required_level', 2)
+                    cmd        = act.get('command', '')
+                    desc       = act.get('description', cmd)[:80]
+                    session_id = act.get('session_id')
                     if settings_store.get("trust_level", 1) >= req_level:
                         if cmd:
                             self._run_trusted_terminal(cmd)
@@ -4515,7 +4524,7 @@ class OmniWindow(QWidget):
                         perm = TrustPermissionChatWidget(req_level, desc, getattr(self, "current_theme", "dark"))
                         if _answer_bubble:
                             _answer_bubble.set_answer_visible(False)
-                        def _make_tr_allow_non_stream(_perm_widget, _w, _lvl, _prior_thinking, _was_voice):
+                        def _make_tr_allow_non_stream(_perm_widget, _w, _lvl, _prior_thinking, _was_voice, _session_id):
                             def _cb():
                                 self._continuation_pending = False
                                 for _i in range(self.list_widget.count() - 1, -1, -1):
@@ -4543,7 +4552,8 @@ class OmniWindow(QWidget):
                                 if _w:
                                     _w.set_answer("Running...")
                                 QTimer.singleShot(100, lambda: self.start_ai_worker(
-                                    getattr(self, '_last_ai_query', ''), None
+                                    getattr(self, '_last_ai_query', ''), None,
+                                    resume_session_id=_session_id
                                 ))
                             return _cb
                         def _make_tr_deny_non_stream(_w):
@@ -4560,7 +4570,7 @@ class OmniWindow(QWidget):
                                 self._finalize_response_ui()
                                 self._navigate_to_trust_settings()
                             return _cb
-                        perm.allowed.connect(_make_tr_allow_non_stream(perm, _answer_bubble, req_level, thinking, self.voice_triggered_query))
+                        perm.allowed.connect(_make_tr_allow_non_stream(perm, _answer_bubble, req_level, thinking, self.voice_triggered_query, session_id))
                         perm.denied.connect(_make_tr_deny_non_stream(_answer_bubble))
                         perm.open_settings.connect(_make_tr_settings_ns_cb())
                         add_item(perm, {"type": "trust_permission"}, anim="pop")

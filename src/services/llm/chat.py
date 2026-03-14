@@ -3,6 +3,7 @@ import json
 import re
 import time
 import os
+import uuid
 from simpleeval import SimpleEval
 from flask import jsonify
 
@@ -17,6 +18,9 @@ from src.services.system.location import get_ip_location
 from src.services.system.app_launcher import get_app_cache, find_and_launch_app
 from src.core.grid_locator import localize_target_from_b64
 import src.core.settings_store as settings_store
+
+# Session store for permission-paused requests (keyed by UUID)
+_pending_sessions: dict = {}
 
 # ── Tool call display helpers ─────────────────────────────────────────────────
 
@@ -704,7 +708,7 @@ Output:"""
     except Exception as e: logging.error(f"Extraction Error: {e}")
 
 
-def process_chat_request(query, history, screenshot_b64=None, stream=False):
+def process_chat_request(query, history, screenshot_b64=None, stream=False, resume_session_id=None):
     import sys # Ensure sys is available
     abort_fast_event.set()
     model_manager.current_fast_request_id = None
@@ -1002,6 +1006,16 @@ Available settings and values:
     # Tools are disabled for screenshot queries (model sees the screen directly)
     active_tools = None if screenshot_b64 else TOOL_SCHEMAS
 
+    # Session resumption: override messages and model with saved state (skips re-running all LLM iterations)
+    _resume_state = None
+    if resume_session_id and resume_session_id in _pending_sessions:
+        _resume_state = _pending_sessions.pop(resume_session_id)
+        messages = _resume_state["messages"]
+        routed_model = _resume_state["routed_model"]
+        auto_actions = _resume_state.get("auto_actions", [])
+        active_tools = _resume_state.get("active_tools", TOOL_SCHEMAS)
+        logging.info(f"[CHAT] Resuming session {resume_session_id} at iter {_resume_state['tool_iter']}")
+
     try:
         abort_fast_event.clear()
 
@@ -1026,6 +1040,15 @@ Available settings and values:
                 all_answer_text = ""   # Accumulated answer text across iterations
                 has_pending_trust = False  # Track if any tool needs permission
                 _tool_file_paths: list = []  # File paths produced by tools (for "Enter to open" hint)
+
+                # Restore loop state when resuming a permission-paused session
+                if _resume_state:
+                    tool_iter      = _resume_state["tool_iter"]
+                    max_tool_iters = _resume_state["max_tool_iters"]
+                    model_reasoning = _resume_state["model_reasoning"]
+                    tool_records   = list(_resume_state["tool_records"])
+                    all_answer_text = _resume_state["all_answer_text"]
+                    _tool_file_paths = list(_resume_state["_tool_file_paths"])
 
                 while tool_iter < max_tool_iters:
                     iter_start_time = time.time()
@@ -1211,7 +1234,24 @@ Available settings and values:
                         # query is re-sent with elevated trust — no wasted LLM iteration.
                         if has_pending_trust:
                             pending = flush_pending_trust_requests()
-                            logging.info(f"[CHAT] Stopping early — permission required ({len(pending)} trust_request(s))")
+                            # Save the full conversation state so the UI can resume from here
+                            # instead of restarting all LLM iterations from scratch.
+                            _sid = str(uuid.uuid4())
+                            _pending_sessions[_sid] = {
+                                "messages":       list(messages),
+                                "tool_iter":      tool_iter,
+                                "max_tool_iters": max_tool_iters,
+                                "model_reasoning": model_reasoning,
+                                "tool_records":   list(tool_records),
+                                "all_answer_text": all_answer_text,
+                                "_tool_file_paths": list(_tool_file_paths),
+                                "routed_model":   routed_model,
+                                "auto_actions":   list(auto_actions),
+                                "active_tools":   active_tools,
+                            }
+                            for req in pending:
+                                req["session_id"] = _sid
+                            logging.info(f"[CHAT] Stopping early — permission required ({len(pending)} trust_request(s)), session={_sid}")
                             yield ("final", {
                                 "answer": "",
                                 "actions": pending,

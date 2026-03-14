@@ -506,9 +506,6 @@ class CollapsibleThinkingWidget(QWidget):
 
     def set_thinking_text(self, text):
         """Update the thinking text and ensure the widget is visible."""
-        was_first = self._first_thinking_set
-        self._first_thinking_set = False
-
         self.thinking_text.setPlainText(text)
         self.thinking_text.document().setTextWidth(560)
 
@@ -519,7 +516,11 @@ class CollapsibleThinkingWidget(QWidget):
         self.setEnabled(True)
         self.header_button.setEnabled(True)
 
-        if was_first and text.strip():
+        # Auto-expand on the first call that has actual content.
+        # Only clear the flag when we expand so subsequent calls don't re-expand
+        # after the user has manually collapsed the block.
+        if self._first_thinking_set and text.strip():
+            self._first_thinking_set = False
             self.set_collapsed(False)
 
         self.size_changed.emit()
@@ -535,7 +536,11 @@ class CollapsibleThinkingWidget(QWidget):
         self.setVisible(True)
 
         new_visibility = not collapsed
-        self.content_widget.setVisible(new_visibility)
+
+        # Don't expand if there's no content yet — would show as an empty rectangle
+        if new_visibility and not self.thinking_text.toPlainText().strip():
+            self.header_button.setChecked(False)
+            return
 
         label = getattr(self, '_header_label', "Reasoning")
         if new_visibility:
@@ -544,10 +549,13 @@ class CollapsibleThinkingWidget(QWidget):
             self.header_button.setText(f"🧠  {label}")
         self.header_button.setChecked(new_visibility)
 
+        # Compute and set height BEFORE making content visible to avoid a rectangle flash
         if new_visibility:
             self.thinking_text.document().setTextWidth(560)
             doc_height = self.thinking_text.document().size().height()
             self.thinking_text.setFixedHeight(int(doc_height + 24))
+
+        self.content_widget.setVisible(new_visibility)
 
         self.size_changed.emit()
         self.updateGeometry()

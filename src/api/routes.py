@@ -894,8 +894,9 @@ def ask_llm():
     except: return jsonify({"answer": "Error: Bad JSON"}), 400
 
     query = req.get('query', ' '.strip())
-    history = req.get('history', []) 
+    history = req.get('history', [])
     screenshot_b64 = req.get('screenshot')
+    resume_session_id = req.get('resume_session_id')
 
     logging.info(f"Received /ask_llm request. Query: {query}")
     
@@ -956,7 +957,7 @@ def ask_llm():
 
         def stream_generator():
             try:
-                for msg_type, content in process_chat_request(query, history, screenshot_b64, stream=True):
+                for msg_type, content in process_chat_request(query, history, screenshot_b64, stream=True, resume_session_id=resume_session_id):
                     if msg_type == "partial":
                         # content is dict with "thinking" and "answer"
                         thinking = content.get("thinking", "")
@@ -973,7 +974,7 @@ def ask_llm():
         return Response(stream_generator(), mimetype="text/event-stream")
     else:
         # Non-streaming response
-        response = process_chat_request(query, history, screenshot_b64)
+        response = process_chat_request(query, history, screenshot_b64, resume_session_id=resume_session_id)
         return jsonify(response)
 
 @api_bp.route('/search', methods=['POST'])

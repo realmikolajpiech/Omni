@@ -8,15 +8,17 @@ class AIWorker(QThread):
     finished = pyqtSignal(object)
     partial_response = pyqtSignal(object)
     stream_started = pyqtSignal(object)
-    def __init__(self, query, history=[], screenshot=None):
+    def __init__(self, query, history=[], screenshot=None, resume_session_id=None):
         super().__init__()
         self.query = query
         self.history = history
         self.screenshot = screenshot
+        self.resume_session_id = resume_session_id
     def run(self):
         try:
             payload = {"query": self.query, "history": self.history, "stream": True}
             if self.screenshot: payload["screenshot"] = self.screenshot
+            if self.resume_session_id: payload["resume_session_id"] = self.resume_session_id
 
             # Use streaming=True to get server-sent events
             r = requests.post(BRAIN_URL, json=payload, timeout=300, stream=True)
