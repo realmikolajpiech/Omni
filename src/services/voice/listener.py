@@ -110,10 +110,11 @@ class VoiceService:
             from openwakeword.model import Model
             from openwakeword.utils import download_models
 
-            # Always download base preprocessing models (melspectrogram.onnx etc.)
-            # These are required regardless of which wake word model is used.
+            # Download only the base preprocessing models (melspectrogram.onnx,
+            # embedding_model.onnx). We use a custom Hey_Omni.onnx wake word so
+            # there is no need to download all pretrained wakeword models.
             logger.info("Ensuring openWakeWord base models are present...")
-            download_models()
+            download_models(model_names=[])
 
             custom_path = OWW_CUSTOM_MODEL_PATH if OWW_CUSTOM_MODEL_PATH else ""
             if custom_path and os.path.exists(custom_path):

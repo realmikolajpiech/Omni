@@ -462,7 +462,7 @@ class WelcomePage(QWidget):
         footer = QHBoxLayout()
         footer.setContentsMargins(52, 16, 52, 20)
 
-        footer_note = make_label("Takes about 5 minutes  ·  macOS 12+", size=12, color=TEXT_HINT)
+        footer_note = make_label("Takes about 2 minutes  ·  macOS 12+", size=12, color=TEXT_HINT)
         footer.addWidget(footer_note)
         footer.addStretch()
 
@@ -941,15 +941,10 @@ class InstallWorker(QThread):
         self._run_cmd([pip_cmd, "install", "-r", str(req_file), "--quiet", "--no-cache-dir"], env=env)
         self._tlog("OK: requirements installed")
 
-        self.progress.emit(85, "Installing voice engine…")
-        self._tlog("STEP: pip install Qwen3-ASR (from GitHub)")
-        self._run_cmd([pip_cmd, "install", "git+https://github.com/QwenLM/Qwen3-ASR.git", "--quiet", "--no-cache-dir"], env=env)
-        self._tlog("OK: voice engine installed")
-
         self.progress.emit(90, "Downloading voice activation models…")
-        self._tlog("STEP: download_models() (openwakeword)")
-        self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models()"], env=env)
-        self._tlog("OK: wakeword models downloaded")
+        self._tlog("STEP: download_models(model_names=[]) — base preprocessing models only")
+        self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models(model_names=[])"], env=env)
+        self._tlog("OK: wakeword base models downloaded")
 
         self.progress.emit(93, "Compiling speech recognition engine…")
         self._tlog("STEP: swiftc compile streaming_asr")
@@ -1111,7 +1106,7 @@ class InstallPage(QWidget):
         v.setContentsMargins(52, 44, 52, 0)
         v.setSpacing(0)
 
-        h, sub = page_header("Installing Omni", "Setting up your environment. This usually takes 3–5 minutes.")
+        h, sub = page_header("Installing Omni", "Setting up your environment. This usually takes 1–2 minutes.")
         v.addWidget(h)
         v.addSpacing(4)
         v.addWidget(sub)

@@ -7,7 +7,6 @@ embed-anything
 lancedb
 memvid_sdk
 PyQt6
-PyQt6-WebEngine
 Pillow
 watchdog
 packaging

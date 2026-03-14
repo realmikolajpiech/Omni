@@ -3906,6 +3906,11 @@ class OmniWindow(QWidget):
     def on_ai_response(self, data):
         self.logo_label.stop_spinning()
 
+        # Sync real backend usage count — each query may trigger multiple LLM
+        # API calls (tool iterations), so the local +1 counter can lag behind.
+        from src.core import subscription as _sub
+        _sub.refresh_status()
+
         # Clear any temporary trust boost that was set for a request_permission re-run
         from src.services.llm.tools import clear_trust_boost
         clear_trust_boost()

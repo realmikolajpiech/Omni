@@ -45,14 +45,6 @@ def refresh_status(callback=None):
     def _run():
         result = _fetch_status()
         with _lock:
-            if not result.get("error"):
-                # Keep the higher of the local-incremented count vs the backend count,
-                # so locally-tracked requests aren't lost if the backend returns 0.
-                if "daily_usage" in result:
-                    result["daily_usage"] = max(
-                        _cache.get("daily_usage", 0),
-                        result["daily_usage"],
-                    )
             _cache.update(result)
             if not result.get("error"):
                 _cache["loaded"] = True
