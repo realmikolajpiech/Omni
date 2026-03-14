@@ -3,6 +3,7 @@ import logging
 import shutil
 import sys
 import os
+import time
 from datetime import datetime
 
 
@@ -109,6 +110,8 @@ KNOWN = {
 def generate_install_plan(app_name):
     """Generate a macOS-native install plan using Homebrew."""
     logging.info(f"Generating Install Plan for: {app_name}")
+    t0 = time.monotonic()
+    log_debug(f"generate_install_plan START: {app_name!r}")
 
     if sys.platform != "darwin":
         return {"method": "failed", "description": "Currently only macOS is supported.", "commands": []}
@@ -125,10 +128,13 @@ def generate_install_plan(app_name):
     brew_name = app_name.lower().replace(" ", "-").replace("_", "-")
 
     # 1. Check KNOWN map first (fast, no network)
+    t1 = time.monotonic()
     matched = KNOWN.get(brew_name) or KNOWN.get(app_name.lower())
+    log_debug(f"  [step 1] KNOWN lookup: {time.monotonic()-t1:.3f}s → matched={matched}")
     if matched:
         kind, pkg = matched
         flag = "--cask " if kind == "cask" else ""
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN hit)")
         return {
             "method": f"brew_{kind}",
             "description": f"Installing '{pkg}' via Homebrew",
@@ -136,8 +142,11 @@ def generate_install_plan(app_name):
         }
 
     # 2. Try exact cask match (reduced timeout to keep total latency reasonable)
+    t2 = time.monotonic()
     rc, out, _ = _run(["brew", "info", "--cask", brew_name], timeout=10)
+    log_debug(f"  [step 2] brew info --cask: {time.monotonic()-t2:.3f}s → rc={rc}")
     if rc == 0:
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask hit)")
         return {
             "method": "brew_cask",
             "description": f"Installing '{brew_name}' via Homebrew Cask",
@@ -145,8 +154,11 @@ def generate_install_plan(app_name):
         }
 
     # 3. Try exact formula match
+    t3 = time.monotonic()
     rc, out, _ = _run(["brew", "info", "--formula", brew_name], timeout=10)
+    log_debug(f"  [step 3] brew info --formula: {time.monotonic()-t3:.3f}s → rc={rc}")
     if rc == 0:
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula hit)")
         return {
             "method": "brew_formula",
             "description": f"Installing '{brew_name}' via Homebrew",
@@ -154,21 +166,27 @@ def generate_install_plan(app_name):
         }
 
     # 4. Fuzzy search (last resort, can be slow)
+    t4 = time.monotonic()
     kind, pkg = _brew_search(brew_name)
+    log_debug(f"  [step 4] brew search (cask+formula): {time.monotonic()-t4:.3f}s → kind={kind}, pkg={pkg}")
     if pkg:
         flag = "--cask " if kind == "cask" else ""
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (search hit)")
         return {
             "method": f"brew_{kind}",
             "description": f"Found '{pkg}' in Homebrew",
             "commands": [f"{BREW} install {flag}{pkg}"]
         }
 
+    log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (not found)")
     return {"method": "failed", "description": f"Could not find '{app_name}' in Homebrew.", "commands": []}
 
 
 def generate_uninstall_plan(app_name):
     """Generate a macOS-native uninstall plan using Homebrew."""
     logging.info(f"Generating Uninstall Plan for: {app_name}")
+    t0 = time.monotonic()
+    log_debug(f"generate_uninstall_plan START: {app_name!r}")
 
     if sys.platform != "darwin":
         return {"method": "failed", "description": "Currently only macOS is supported.", "commands": []}
@@ -179,20 +197,25 @@ def generate_uninstall_plan(app_name):
     brew_name = app_name.lower().replace(" ", "-").replace("_", "-")
 
     # 1. Resolve canonical name via KNOWN map, then verify it's actually installed
+    t1 = time.monotonic()
     matched = KNOWN.get(brew_name) or KNOWN.get(app_name.lower())
+    log_debug(f"  [step 1] KNOWN lookup: {time.monotonic()-t1:.3f}s → matched={matched}")
     if matched:
         kind, pkg = matched
         flag = "--cask " if kind == "cask" else ""
-        # Verify the package is actually installed via brew before issuing uninstall
         list_flag = ["--cask"] if kind == "cask" else []
+        t1b = time.monotonic()
         rc, out, _ = _run(["brew", "list"] + list_flag + ["--versions", pkg], timeout=8)
+        log_debug(f"  [step 1b] brew list --versions: {time.monotonic()-t1b:.3f}s → rc={rc}, installed={bool(rc==0 and out.strip())}")
         if rc == 0 and out.strip():
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN+installed)")
             return {
                 "method": f"brew_{kind}_uninstall",
                 "description": f"Uninstalling '{pkg}' via Homebrew",
                 "commands": [f"{BREW} uninstall {flag}{pkg}"]
             }
         else:
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN but not installed)")
             return {
                 "method": "not_installed",
                 "description": f"'{app_name}' does not appear to be installed via Homebrew.",
@@ -200,8 +223,11 @@ def generate_uninstall_plan(app_name):
             }
 
     # 2. Check if installed as cask
+    t2 = time.monotonic()
     rc, out, _ = _run(["brew", "list", "--cask", "--versions", brew_name], timeout=8)
+    log_debug(f"  [step 2] brew list --cask --versions: {time.monotonic()-t2:.3f}s → rc={rc}")
     if rc == 0 and out.strip():
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask installed)")
         return {
             "method": "brew_cask_uninstall",
             "description": f"Uninstalling '{brew_name}' cask via Homebrew",
@@ -209,8 +235,11 @@ def generate_uninstall_plan(app_name):
         }
 
     # 3. Check if installed as formula
+    t3 = time.monotonic()
     rc, out, _ = _run(["brew", "list", "--versions", brew_name], timeout=8)
+    log_debug(f"  [step 3] brew list --versions: {time.monotonic()-t3:.3f}s → rc={rc}")
     if rc == 0 and out.strip():
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula installed)")
         return {
             "method": "brew_formula_uninstall",
             "description": f"Uninstalling '{brew_name}' formula via Homebrew",
@@ -218,9 +247,11 @@ def generate_uninstall_plan(app_name):
         }
 
     # 4. Try cask info (exists in brew but may not be installed)
+    t4 = time.monotonic()
     rc, _, _ = _run(["brew", "info", "--cask", brew_name], timeout=10)
+    log_debug(f"  [step 4] brew info --cask: {time.monotonic()-t4:.3f}s → rc={rc}")
     if rc == 0:
-        # Package exists in Homebrew but not currently installed
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask exists, not installed)")
         return {
             "method": "not_installed",
             "description": f"'{app_name}' does not appear to be installed via Homebrew.",
@@ -228,12 +259,16 @@ def generate_uninstall_plan(app_name):
         }
 
     # 5. Try formula info
+    t5 = time.monotonic()
     rc, _, _ = _run(["brew", "info", "--formula", brew_name], timeout=10)
+    log_debug(f"  [step 5] brew info --formula: {time.monotonic()-t5:.3f}s → rc={rc}")
     if rc == 0:
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula exists, not installed)")
         return {
             "method": "not_installed",
             "description": f"'{app_name}' does not appear to be installed via Homebrew.",
             "commands": []
         }
 
+    log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (not found)")
     return {"method": "failed", "description": f"Could not find '{app_name}' in Homebrew.", "commands": []}

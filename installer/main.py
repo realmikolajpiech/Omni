@@ -685,6 +685,21 @@ class InstallWorker(QThread):
     def _emit_log(self, line):
         self.log_line.emit(line)
 
+    # ── timing log ──────────────────────────────────────────────────────────
+    _tlog_start: float = 0.0
+
+    def _tlog(self, msg: str):
+        import time as _time
+        elapsed = _time.monotonic() - self._tlog_start
+        line = f"[{elapsed:7.2f}s] {msg}"
+        try:
+            with open("/tmp/omni_setup.log", "a") as f:
+                f.write(line + "\n")
+                f.flush()
+        except Exception:
+            pass
+        self.log_line.emit(line)
+
     def run(self):
         try:
             self._install()
@@ -692,6 +707,15 @@ class InstallWorker(QThread):
             self.finished_err.emit(str(e))
 
     def _install(self):
+        import time as _time
+        self._tlog_start = _time.monotonic()
+        # Clear log file for this run
+        try:
+            open("/tmp/omni_setup.log", "w").close()
+        except Exception:
+            pass
+        self._tlog("=== Omni install started ===")
+
         env = os.environ.copy()
         for brew_path in ("/opt/homebrew/bin", "/usr/local/bin"):
             if brew_path not in env.get("PATH", ""):
@@ -700,9 +724,11 @@ class InstallWorker(QThread):
         self.progress.emit(0, "Starting…")
 
         # Quick pre-flight checks
+        self._tlog("STEP: pre-flight checks (disk + internet)")
         import urllib.request
         free_gb = shutil.disk_usage(Path.home()).free / 1e9
         if free_gb < 10:
+            self._tlog(f"FAIL: only {free_gb:.1f} GB free")
             self.finished_err.emit(
                 f"Not enough disk space ({free_gb:.1f} GB free). "
                 f"Omni needs about 10 GB. Free up some space and try again."
@@ -711,19 +737,23 @@ class InstallWorker(QThread):
         try:
             urllib.request.urlopen("https://github.com", timeout=5)
         except Exception:
+            self._tlog("FAIL: no internet")
             self.finished_err.emit(
                 "No internet connection. Omni needs to download "
                 "dependencies during installation. Check your connection and try again."
             )
             return
+        self._tlog("OK: pre-flight passed")
 
         self.progress.emit(5, "Checking Homebrew…")
+        self._tlog("STEP: checking Homebrew")
         _brew_found = (
             shutil.which("brew", path=env.get("PATH"))
             or os.path.exists("/opt/homebrew/bin/brew")
             or os.path.exists("/usr/local/bin/brew")
         )
         if not _brew_found:
+            self._tlog("Homebrew not found — installing")
             self.progress.emit(5, "Installing Homebrew…")
 
             import getpass as _getpass, shlex as _shlex
@@ -787,6 +817,7 @@ class InstallWorker(QThread):
                 )
                 as_path = af.name
 
+            self._tlog("  running osascript to install Homebrew…")
             rc, out, err = self._run_cmd(["osascript", as_path])
 
             for p in (brew_path, user_cmd_path, wrapper_path, as_path):
@@ -794,10 +825,15 @@ class InstallWorker(QThread):
                 except OSError: pass
 
             if rc != 0:
+                self._tlog(f"FAIL: Homebrew install rc={rc}")
                 self.finished_err.emit(f"Homebrew install failed:\n{err}")
                 return
+            self._tlog("OK: Homebrew installed")
+        else:
+            self._tlog("OK: Homebrew already present")
 
         self.progress.emit(15, "Checking Python…")
+        self._tlog("STEP: checking Python")
         import re as _re
 
         def _find_python(env_):
@@ -831,8 +867,10 @@ class InstallWorker(QThread):
 
         py_cmd = _find_python(env)
         if not py_cmd:
+            self._tlog("Python not found — installing python@3.12 via brew")
             self.progress.emit(15, "Installing Python 3.12…")
             rc, out, err = self._run_cmd(["brew", "install", "python@3.12"], env=env)
+            self._tlog(f"OK: brew install python@3.12 done rc={rc}")
             if rc != 0:
                 self.finished_err.emit(f"Python install failed:\n{err}")
                 return
@@ -841,11 +879,15 @@ class InstallWorker(QThread):
         if not py_cmd:
             self.finished_err.emit("Could not find Python 3.10+ after install.")
             return
+        self._tlog(f"OK: Python found → {py_cmd}")
 
         self.progress.emit(25, "Installing system dependencies…")
+        self._tlog("STEP: brew install ffmpeg portaudio")
         self._run_cmd(["brew", "install", "ffmpeg", "portaudio"], env=env)
+        self._tlog("OK: system deps done")
 
         self.progress.emit(35, "Copying Omni…")
+        self._tlog("STEP: copying Omni files")
         src_root = omni_src()
         if INSTALL_DIR.exists():
             for item in INSTALL_DIR.iterdir():
@@ -876,28 +918,41 @@ class InstallWorker(QThread):
                 run_sh.write_text("".join(_lines))
             run_sh.chmod(run_sh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
+        self._tlog("OK: files copied")
+
         venv_dir = INSTALL_DIR / "venv"
         self.progress.emit(45, "Setting up Python environment…")
+        self._tlog(f"STEP: venv (exists={venv_dir.exists()})")
         if not venv_dir.exists():
             rc, out, err = self._run_cmd([py_cmd, "-m", "venv", str(venv_dir)], env=env)
+            self._tlog(f"OK: venv created rc={rc}")
             if rc != 0:
                 self.finished_err.emit(f"Virtual env failed:\n{err}")
                 return
         pip_cmd = str(venv_dir / "bin" / "pip")
         python_venv = str(venv_dir / "bin" / "python3")
+        self._tlog("STEP: pip upgrade")
         self._run_cmd([pip_cmd, "install", "--upgrade", "pip", "--quiet", "--no-cache-dir"], env=env)
+        self._tlog("OK: pip upgraded")
 
         self.progress.emit(55, "Installing requirements…")
         req_file = INSTALL_DIR / "requirements.txt"
+        self._tlog(f"STEP: pip install -r requirements.txt ({req_file})")
         self._run_cmd([pip_cmd, "install", "-r", str(req_file), "--quiet", "--no-cache-dir"], env=env)
+        self._tlog("OK: requirements installed")
 
         self.progress.emit(85, "Installing voice engine…")
+        self._tlog("STEP: pip install Qwen3-ASR (from GitHub)")
         self._run_cmd([pip_cmd, "install", "git+https://github.com/QwenLM/Qwen3-ASR.git", "--quiet", "--no-cache-dir"], env=env)
+        self._tlog("OK: voice engine installed")
 
         self.progress.emit(90, "Downloading voice activation models…")
+        self._tlog("STEP: download_models() (openwakeword)")
         self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models()"], env=env)
+        self._tlog("OK: wakeword models downloaded")
 
         self.progress.emit(93, "Compiling speech recognition engine…")
+        self._tlog("STEP: swiftc compile streaming_asr")
         if sys.platform == "darwin":
             swift_src = INSTALL_DIR / "src" / "services" / "voice" / "streaming_asr.swift"
             swift_bin = INSTALL_DIR / "src" / "services" / "voice" / "streaming_asr"
@@ -907,10 +962,14 @@ class InstallWorker(QThread):
                     swiftc, "-O", "-o", str(swift_bin), str(swift_src),
                     "-framework", "Speech", "-framework", "AVFoundation",
                 ], env=env)
+                self._tlog(f"OK: swiftc done rc={rc}")
                 if rc == 0 and swift_bin.exists():
                     swift_bin.chmod(swift_bin.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            else:
+                self._tlog(f"SKIP: swiftc (src_exists={swift_src.exists()}, swiftc={swiftc})")
 
         self.progress.emit(96, "Finalising…")
+        self._tlog("STEP: finalising (config, env file, marker)")
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         settings_file = CONFIG_DIR / "settings.json"
         if settings_file.exists():
@@ -939,6 +998,7 @@ class InstallWorker(QThread):
                 env_file.write_text(existing.rstrip() + "\n" + "\n".join(additions) + "\n")
 
         INSTALL_MARKER.touch()
+        self._tlog("=== Omni install COMPLETE ===")
         self.progress.emit(100, "Done.")
         self.finished_ok.emit()
 

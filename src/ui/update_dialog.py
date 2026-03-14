@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer
 from PyQt6.QtGui import QColor, QBrush, QPainter, QPainterPath, QLinearGradient
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -262,15 +262,19 @@ class UpdateDialog(QDialog):
 
     def _on_ok(self):
         self._prog_bar.set_value(100)
-        self._prog_lbl.setText("Update installed! Restart Omni to apply.")
+        self._prog_lbl.setText("Update installed! Restarting Omni…")
         self._prog_lbl.setStyleSheet(f"color: {GREEN}; font-size: 12px;")
         self._accepted_update = True
-        # Show a close button instead of quitting
-        self._later_btn.setText("Close")
-        self._later_btn.setEnabled(True)
-        self._later_btn.setVisible(True)
+        self._later_btn.setVisible(False)
         self._update_btn.setVisible(False)
         self.adjustSize()
+        QTimer.singleShot(1500, self._do_restart)
+
+    def _do_restart(self):
+        from src.core.updater import restart_omni
+        from PyQt6.QtWidgets import QApplication
+        restart_omni()
+        QApplication.quit()
 
     def _on_err(self, msg: str):
         self._err_lbl.setText(f"Update failed: {msg}")

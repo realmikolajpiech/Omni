@@ -807,10 +807,25 @@ class SettingsPanel(QWidget):
         sidebar_col.setSpacing(0)
         sidebar_col.addWidget(self.sidebar)
 
+        ver_row = QHBoxLayout()
+        ver_row.setContentsMargins(16, 4, 8, 12)
+        ver_row.setSpacing(8)
+
         self._version_label = QLabel(f"v{APP_VERSION}")
-        self._version_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._version_label.setContentsMargins(16, 4, 0, 12)
-        sidebar_col.addWidget(self._version_label)
+        self._version_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        ver_row.addWidget(self._version_label)
+
+        self._check_update_btn = QPushButton("Check for Updates")
+        self._check_update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._check_update_btn.setFixedHeight(22)
+        self._check_update_btn.clicked.connect(self._on_check_update)
+        ver_row.addWidget(self._check_update_btn)
+        ver_row.addStretch()
+
+        ver_widget = QWidget()
+        ver_widget.setLayout(ver_row)
+        ver_widget.setContentsMargins(0, 0, 0, 0)
+        sidebar_col.addWidget(ver_widget)
 
         root.addLayout(sidebar_col)
         root.addWidget(self.content_stack)
@@ -1764,6 +1779,29 @@ class SettingsPanel(QWidget):
 
         ac.addSpacing(12)
 
+        # ── Usage bar (shown when not logged in) ─────────────────────
+        self._login_usage_section = QWidget()
+        lus = QVBoxLayout(self._login_usage_section)
+        lus.setContentsMargins(0, 0, 0, 8)
+        lus.setSpacing(0)
+
+        lus_sep = QFrame(); lus_sep.setFrameShape(QFrame.Shape.HLine); lus_sep.setObjectName("SepLine")
+        lus.addWidget(lus_sep)
+        lus.addSpacing(10)
+
+        self.login_usage_bar = _UsageBar()
+        lus.addWidget(self.login_usage_bar)
+        lus.addSpacing(4)
+
+        self.login_usage_lbl = QLabel("0 / 10 requests today")
+        self.login_usage_lbl.setObjectName("UsageLbl")
+        self.login_usage_lbl.setFont(_font("Manrope", 10))
+        lus.addWidget(self.login_usage_lbl)
+
+        ac.addWidget(self._login_usage_section)
+
+        ac.addSpacing(12)
+
         sep_row = QHBoxLayout()
         sep_row.setContentsMargins(0, 0, 0, 0)
         sep_l = QFrame(); sep_l.setFrameShape(QFrame.Shape.HLine); sep_l.setObjectName("SepLine")
@@ -2229,6 +2267,11 @@ class SettingsPanel(QWidget):
         if not is_pro:
             self.usage_bar.set_fraction(daily_usage, daily_limit)
             self.usage_lbl.setText(f"{daily_usage} / {daily_limit} requests today")
+        if hasattr(self, "login_usage_bar"):
+            self._login_usage_section.setVisible(not is_pro)
+            if not is_pro:
+                self.login_usage_bar.set_fraction(daily_usage, daily_limit)
+                self.login_usage_lbl.setText(f"{daily_usage} / {daily_limit} requests today")
 
         if error:
             self._account_status(f"Could not refresh: {error}", error=True)
@@ -2700,12 +2743,14 @@ class SettingsPanel(QWidget):
             self._dispatch.emit(_done)
         threading.Thread(target=_run, daemon=True).start()
 
-    def _set_auth_error(self, msg: str):
-        """Show an error inline in the login form, just below the buttons."""
+    def _set_auth_error(self, msg: str, success: bool = False):
+        """Show a message inline in the login form, just below the buttons."""
         if not hasattr(self, "auth_error_lbl"):
             return
         if msg:
             self.auth_error_lbl.setText(msg)
+            color = "#4ade80" if success else "#f87171"
+            self.auth_error_lbl.setStyleSheet(f"color: {color}; background: transparent;")
             self.auth_error_lbl.setVisible(True)
         else:
             self.auth_error_lbl.setText("")
@@ -2748,9 +2793,12 @@ class SettingsPanel(QWidget):
             def _done():
                 self._set_auth_busy(False)
                 if ok:
-                    self._set_auth_error("")
                     if auth.is_logged_in():
+                        self._set_auth_error("")
                         self.refresh_account()
+                    else:
+                        # Email confirmation required — show the message in green
+                        self._set_auth_error(msg, success=True)
                 else:
                     self._set_auth_error(msg)
             self._dispatch.emit(_done)
@@ -2863,6 +2911,21 @@ class SettingsPanel(QWidget):
             self._fb_card.set_dark(dark)
         if hasattr(self, "_version_label"):
             self._version_label.setStyleSheet(f"color: {secondary}; font-size: 11px; background: transparent;")
+        if hasattr(self, "_check_update_btn"):
+            self._check_update_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {secondary};
+                    font-size: 10px;
+                    background: transparent;
+                    border: 1px solid {"rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.12)"};
+                    border-radius: 4px;
+                    padding: 1px 6px;
+                }}
+                QPushButton:hover {{
+                    color: {primary};
+                    border-color: {"rgba(255,255,255,0.25)" if dark else "rgba(0,0,0,0.25)"};
+                }}
+            """)
         if hasattr(self, "_profile_card"):
             self._profile_card.set_dark(dark)
         if hasattr(self, "_security_card"):
@@ -3201,3 +3264,32 @@ class SettingsPanel(QWidget):
         # Update usage bar dark mode
         if hasattr(self, "usage_bar"):
             self.usage_bar.set_dark(dark)
+
+    def _on_check_update(self):
+        btn = self._check_update_btn
+        btn.setEnabled(False)
+        btn.setText("Checking…")
+
+        import threading
+
+        def _run():
+            from src.core.updater import check_update
+            try:
+                tag, url, body = check_update(APP_VERSION)
+            except Exception:
+                tag, url, body = None, None, None
+
+            def _done():
+                btn.setEnabled(True)
+                btn.setText("Check for Updates")
+                if tag:
+                    from src.ui.update_dialog import UpdateDialog
+                    dlg = UpdateDialog(APP_VERSION, tag, url, body, parent=self)
+                    dlg.exec()
+                else:
+                    btn.setText("Up to date!")
+                    QTimer.singleShot(2500, lambda: btn.setText("Check for Updates"))
+
+            QTimer.singleShot(0, _done)
+
+        threading.Thread(target=_run, daemon=True).start()

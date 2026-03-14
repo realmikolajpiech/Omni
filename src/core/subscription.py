@@ -110,6 +110,7 @@ def _fetch_status() -> dict:
     # Primary check: query the subscriptions table directly with the user's JWT.
     # RLS ensures they can only read their own row. This is the most reliable
     # source of truth and doesn't depend on the worker or KV being correct.
+    supabase_auth_failed = False
     if token:
         try:
             req = urllib.request.Request(
@@ -126,6 +127,14 @@ def _fetch_status() -> dict:
                 return {"plan": "pro", "daily_usage": 0, "daily_limit": 999, "error": None}
         except Exception as e:
             print(f"[subscription] supabase check failed: {e}")
+            supabase_auth_failed = True
+
+    # If Supabase rejected our token (likely expired), try to refresh it before
+    # hitting the backend — otherwise the backend will also return 403.
+    if supabase_auth_failed and token:
+        refreshed = _auth.refresh_session_sync()
+        if refreshed:
+            token = refreshed
 
     # Fallback: ask the worker (handles anonymous device-ID rate limiting too).
     try:

@@ -172,3 +172,53 @@ def apply_update(download_url: str, tag: str, on_progress=None):
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _prog(100, "Update complete!")
+
+
+def restart_omni():
+    """
+    Kill every Omni-related Python process and relaunch via run.sh.
+
+    Spawns a detached shell script so the relaunch survives the current
+    process exiting.  Callers should call QApplication.quit() immediately
+    after this returns.
+    """
+    run_sh = _PROJECT_ROOT / "run.sh"
+
+    # Fall back to the installed location on macOS
+    if not run_sh.exists():
+        installed = Path.home() / "Library" / "Application Support" / "Omni" / "run.sh"
+        if installed.exists():
+            run_sh = installed
+
+    kill_cmds = "\n".join([
+        "pkill -f 'src/app/brain.py'          2>/dev/null || true",
+        "pkill -f 'src/services/voice/listener.py' 2>/dev/null || true",
+        "pkill -f 'src/services/search/watcher.py' 2>/dev/null || true",
+        "pkill -f 'src/services/search/indexer.py' 2>/dev/null || true",
+        "pkill -f 'run.py'                     2>/dev/null || true",
+        "lsof -ti :5555 | xargs kill -9        2>/dev/null || true",
+        "sleep 0.5",
+    ])
+
+    script = (
+        "#!/usr/bin/env bash\n"
+        "sleep 1\n"
+        f"{kill_cmds}\n"
+        f'exec bash "{run_sh}"\n'
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sh", prefix="omni_restart_", delete=False
+    )
+    tmp.write(script)
+    tmp.flush()
+    tmp.close()
+    os.chmod(tmp.name, 0o755)
+
+    subprocess.Popen(
+        ["bash", tmp.name],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )

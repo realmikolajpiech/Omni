@@ -53,6 +53,15 @@ def main():
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3"
 
+    # macOS: hide from Dock BEFORE QApplication is created so Python never
+    # appears in the Dock even briefly.
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApplication
+            NSApplication.sharedApplication().setActivationPolicy_(1)
+        except Exception:
+            pass
+
     setup_logging("omni_ui")
     setup_exception_hook()
 
@@ -78,7 +87,8 @@ def main():
             process_info = Foundation.NSProcessInfo.processInfo()
             process_info.setProcessName_(app_name)
 
-            # 2. Hide from Dock (Accessory Mode)
+            # 2. Hide from Dock (Accessory Mode) — already set before QApplication,
+            # but re-apply here to ensure it sticks after Qt initializes.
             # NSApplicationActivationPolicyAccessory = 1
             ns_app = NSApplication.sharedApplication()
             ns_app.setActivationPolicy_(1)

@@ -137,6 +137,28 @@ def get_access_token() -> Optional[str]:
     return None
 
 
+def refresh_session_sync() -> Optional[str]:
+    """Synchronously refresh the access token using the stored refresh token.
+
+    Returns the new access token, or None if refresh failed / no refresh token.
+    Must only be called from a background thread (makes a network request).
+    """
+    with _lock:
+        rt = _session.get("refresh_token")
+    if not rt:
+        try:
+            if os.path.exists(_TOKEN_FILE):
+                with open(_TOKEN_FILE) as f:
+                    data = json.load(f)
+                rt = data.get("refresh_token") or None
+        except Exception:
+            pass
+    if not rt:
+        return None
+    _refresh_tokens(rt)
+    return get_access_token()
+
+
 def get_user() -> Optional[dict]:
     with _lock:
         return _session.get("user")
