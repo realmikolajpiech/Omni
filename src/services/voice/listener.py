@@ -375,7 +375,9 @@ class VoiceService:
                 if "PortAudio" in str(e) or "PaErrorCode" in str(e):
                     logger.warning("PortAudio conflict detected. Waiting longer...")
                     time.sleep(5)
-                logger.info("Restarting audio stream in 2 seconds...")
+                else:
+                    logger.info("Mic stream failed — will retry in 3 seconds...")
+                    time.sleep(3)
                 time.sleep(2)
 
     def handle_idle(self, audio_data: np.ndarray, paused_mode: bool = False):
