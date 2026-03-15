@@ -32,11 +32,13 @@ except ImportError:
 
 class LinkActionWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
+    description_fetched = pyqtSignal(str)
 
     def __init__(self, title, url, description, parent=None):
         super().__init__(parent)
         self.url = url
         self.icon_downloaded.connect(self.update_icon)
+        self.description_fetched.connect(self._on_description_fetched)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -93,6 +95,13 @@ class LinkActionWidget(QWidget):
         self.title_label.setStyleSheet("color: #050505; margin-top: 0px;")
         self.title_label.setTextFormat(Qt.TextFormat.RichText) # Enable HTML for bold tags
 
+        # One-line description (filled async from page meta)
+        self.description_label = QLabel("")
+        self.description_label.setWordWrap(False)
+        self.description_label.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+        self.description_label.setStyleSheet("color: #555555;")
+        self.description_label.hide()
+
         # Description (URL)
         self.desc_label = QLabel(url)
         self.desc_label.setWordWrap(True)
@@ -102,15 +111,17 @@ class LinkActionWidget(QWidget):
 
         card_layout.addWidget(top_row)
         card_layout.addWidget(self.title_label)
+        card_layout.addWidget(self.description_label)
         card_layout.addWidget(self.desc_label)
 
         layout.addWidget(self.card)
         
         self.current_theme = "light"
         self.update_style()
-        
+
         self.nam = QNetworkAccessManager(self)
         self.fetch_icon()
+        self.fetch_description()
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -153,6 +164,8 @@ class LinkActionWidget(QWidget):
         """)
         
         self.title_label.setStyleSheet(f"color: {title_color}; margin-top: 0px;")
+        if hasattr(self, 'description_label'):
+            self.description_label.setStyleSheet(f"color: {desc_color};")
         if hasattr(self, 'desc_label'):
             self.desc_label.setStyleSheet(f"color: {desc_color};")
         self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
@@ -207,6 +220,58 @@ class LinkActionWidget(QWidget):
                 self.icon_label.setText("")
                 self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         except: pass
+
+    def fetch_description(self):
+        try:
+            if not self.url: return
+            clean_url = self.url.strip().strip('<>').strip('"').strip("'")
+            if not clean_url.startswith("http"):
+                clean_url = "https://" + clean_url
+            req = QNetworkRequest(QUrl(clean_url))
+            req.setRawHeader(b"User-Agent", b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+            req.setRawHeader(b"Accept", b"text/html")
+            reply = self.nam.get(req)
+            reply.finished.connect(lambda: self._on_description_reply(reply))
+        except Exception: pass
+
+    def _on_description_reply(self, reply):
+        try:
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                raw = bytes(reply.readAll())
+                # Only parse the first 8 KB — the <head> is always near the top
+                chunk = raw[:8192].decode("utf-8", errors="ignore")
+                desc = self._parse_meta_description(chunk)
+                if desc:
+                    self.description_fetched.emit(desc)
+        except Exception: pass
+        finally:
+            reply.deleteLater()
+
+    def _parse_meta_description(self, html):
+        import re
+        # og:description first, then name="description"
+        for pattern in [
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']{5,300})["\']',
+            r'<meta[^>]+content=["\']([^"\']{5,300})["\'][^>]+property=["\']og:description["\']',
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']{5,300})["\']',
+            r'<meta[^>]+content=["\']([^"\']{5,300})["\'][^>]+name=["\']description["\']',
+        ]:
+            m = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+            if m:
+                text = m.group(1).strip()
+                # Collapse whitespace
+                text = re.sub(r'\s+', ' ', text)
+                return text
+        return ""
+
+    def _on_description_fetched(self, text):
+        try:
+            # Truncate to one line
+            if len(text) > 120:
+                text = text[:117] + "…"
+            self.description_label.setText(text)
+            self.description_label.show()
+        except Exception: pass
 
     def sizeHint(self):
         w = 660
@@ -2118,60 +2183,50 @@ class CurrencyActionWidget(QWidget):
     def __init__(self, amount, from_unit, to_unit, converted_value, parent=None):
         super().__init__(parent)
         self.icon_downloaded.connect(self.update_icon)
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
-        # Card Container
+
         self.card = QWidget()
         self.card.setObjectName("ActionCard")
-        
+
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(16, 16, 16, 16)
-        card_layout.setSpacing(12)
-        
-        # Top Row: Icon + Label + Units
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(4)
+
         top_row = QWidget()
         top_layout = QHBoxLayout(top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(8)
-        
+        top_layout.setSpacing(6)
+
         self.icon_label = QLabel("$")
-        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setFixedSize(16, 16)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("background-color: transparent; border: none; font-weight: bold;")
-        
+        top_layout.addWidget(self.icon_label)
+
         self.action_label = QLabel("CONVERT")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-        
-        # Unit Badge
-        self.unit_badge = QLabel(f"{from_unit.upper()} ➝ {to_unit.upper()}")
-        self.unit_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        top_layout.addWidget(self.icon_label)
         top_layout.addWidget(self.action_label)
-        top_layout.addStretch()
+
+        self.unit_badge = QLabel(f"{from_unit.upper()} → {to_unit.upper()}")
+        self.unit_badge.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top_layout.addWidget(self.unit_badge)
-        
-        # Source Amount
-        self.source_label = QLabel(f"{amount} {from_unit.upper()}")
-        self.source_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
-        self.source_label.setWordWrap(True)
-        
-        # Converted Amount
-        self.converted_label = QLabel(f"{converted_value} {to_unit.upper()}")
-        self.converted_label.setFont(QFont("Instrument Serif", 36, QFont.Weight.Normal))
+
+        top_layout.addStretch()
+
+        self.converted_label = QLabel(f"{amount} {from_unit.upper()}  =  {converted_value} {to_unit.upper()}")
+        self.converted_label.setFont(QFont("Manrope", 17, QFont.Weight.Medium))
         self.converted_label.setWordWrap(True)
         self.converted_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        
+
         card_layout.addWidget(top_row)
-        card_layout.addWidget(self.source_label)
         card_layout.addWidget(self.converted_label)
-        
+
         layout.addWidget(self.card)
-        
+
         self.current_theme = "light"
         self.update_style()
         self.fetch_icon()
@@ -2194,29 +2249,27 @@ class CurrencyActionWidget(QWidget):
             pixmap.loadFromData(data)
             if not pixmap.isNull():
                 self.icon_label.setText("")
-                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.icon_label.setPixmap(pixmap.scaled(16, 16, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         except: pass
-        
+
     def set_theme(self, theme):
         self.current_theme = theme
         self.update_style()
-        
+
     def update_style(self):
         is_dark = self.current_theme == "dark"
-        
+
         if is_dark:
             bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(30, 215, 96, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
             border = "rgba(30, 215, 96, 0.2)"
             title_color = "#FFFFFF"
-            desc_color = "rgba(255,255,255,0.7)"
-            action_color = "#1ED760" 
+            action_color = "#1ED760"
             badge_bg = "rgba(30, 215, 96, 0.15)"
             badge_color = "#1ED760"
         else:
             bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(0, 180, 70, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
             border = "rgba(0, 180, 70, 0.2)"
             title_color = "#050505"
-            desc_color = "rgba(0,0,0,0.6)"
             action_color = "#00B446"
             badge_bg = "rgba(0, 180, 70, 0.15)"
             badge_color = "#00963C"
@@ -2228,12 +2281,11 @@ class CurrencyActionWidget(QWidget):
                 border: 1px solid {border};
             }}
         """)
-        
-        self.converted_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
-        self.source_label.setStyleSheet(f"color: {desc_color};")
+
+        self.converted_label.setStyleSheet(f"color: {title_color};")
         self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
-        self.icon_label.setStyleSheet(f"color: {action_color}; font-size: 14px;")
-        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+        self.icon_label.setStyleSheet(f"color: {action_color}; font-size: 13px;")
+        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 3px 8px; font-weight: bold;")
 
     def sizeHint(self):
         w = 660
@@ -4328,53 +4380,50 @@ class UnitActionWidget(QWidget):
     def __init__(self, amount, from_unit, to_unit, converted_value, parent=None):
         super().__init__(parent)
         self.icon_downloaded.connect(self.update_icon)
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
+
         self.card = QWidget()
         self.card.setObjectName("ActionCard")
+
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(16, 16, 16, 16)
-        card_layout.setSpacing(12)
-        
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(4)
+
         top_row = QWidget()
         top_layout = QHBoxLayout(top_row)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(8)
-        
+        top_layout.setSpacing(6)
+
         self.icon_label = QLabel()
-        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setFixedSize(16, 16)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("background-color: transparent; border: none;")
-        
+        top_layout.addWidget(self.icon_label)
+
         self.action_label = QLabel("CONVERT")
         self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
-        
-        self.unit_badge = QLabel(f"{from_unit.upper()} ➝ {to_unit.upper()}")
-        self.unit_badge.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
-        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        top_layout.addWidget(self.icon_label)
         top_layout.addWidget(self.action_label)
-        top_layout.addStretch()
+
+        self.unit_badge = QLabel(f"{from_unit.upper()} → {to_unit.upper()}")
+        self.unit_badge.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.unit_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top_layout.addWidget(self.unit_badge)
-        
-        self.source_label = QLabel(f"{amount} {from_unit.upper()}")
-        self.source_label.setFont(QFont("Manrope", 14, QFont.Weight.Medium))
-        self.source_label.setWordWrap(True)
-        
-        self.converted_label = QLabel(f"{converted_value} {to_unit.upper()}")
-        self.converted_label.setFont(QFont("Instrument Serif", 36, QFont.Weight.Normal))
-        self.converted_label.setWordWrap(True)
-        self.converted_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        
+
+        top_layout.addStretch()
+
+        self.conversion_label = QLabel(f"{amount} {from_unit.upper()}  =  {converted_value} {to_unit.upper()}")
+        self.conversion_label.setFont(QFont("Manrope", 17, QFont.Weight.Medium))
+        self.conversion_label.setWordWrap(True)
+        self.conversion_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
         card_layout.addWidget(top_row)
-        card_layout.addWidget(self.source_label)
-        card_layout.addWidget(self.converted_label)
+        card_layout.addWidget(self.conversion_label)
+
         layout.addWidget(self.card)
-        
+
         self.current_theme = "light"
         self.update_style()
         self.fetch_icon()
@@ -4397,37 +4446,35 @@ class UnitActionWidget(QWidget):
             pixmap.loadFromData(data)
             if not pixmap.isNull():
                 self.icon_label.setText("")
-                self.icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.icon_label.setPixmap(pixmap.scaled(16, 16, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         except: pass
 
     def set_theme(self, theme):
         self.current_theme = theme
         self.update_style()
-        
+
     def update_style(self):
         is_dark = self.current_theme == "dark"
         if is_dark:
             bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(168, 85, 247, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
             border = "rgba(168, 85, 247, 0.2)"
             title_color = "#FFFFFF"
-            desc_color = "rgba(255,255,255,0.7)"
-            action_color = "#A855F7" 
+            action_color = "#A855F7"
             badge_bg = "rgba(168, 85, 247, 0.15)"
             badge_color = "#C084FC"
         else:
             bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(147, 51, 234, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
             border = "rgba(147, 51, 234, 0.2)"
             title_color = "#050505"
-            desc_color = "rgba(0,0,0,0.6)"
             action_color = "#9333EA"
             badge_bg = "rgba(147, 51, 234, 0.15)"
             badge_color = "#7E22CE"
 
         self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
-        self.converted_label.setStyleSheet(f"color: {title_color}; margin-top: -4px;")
-        self.source_label.setStyleSheet(f"color: {desc_color};")
+        self.conversion_label.setStyleSheet(f"color: {title_color};")
         self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
-        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 4px 10px; font-weight: bold;")
+        self.icon_label.setStyleSheet(f"background-color: transparent; border: none;")
+        self.unit_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 3px 8px; font-weight: bold;")
 
     def sizeHint(self):
         w = 660

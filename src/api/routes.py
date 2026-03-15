@@ -1134,6 +1134,158 @@ def _is_search_engine_url(url: str) -> bool:
 
 
 
+_CURRENCY_CODES = frozenset([
+    'USD','EUR','GBP','PLN','JPY','CHF','AUD','CAD','CNY','SEK','NOK','DKK',
+    'CZK','HUF','RON','BGN','RUB','TRY','BRL','MXN','INR','KRW','SGD','HKD',
+    'THB','ZAR','NZD','ILS','AED','SAR','QAR','KWD','UAH','CLP','COP','PEN',
+    'ARS','IDR','MYR','PHP','VND','PKR','BDT','DZD','MAD','EGP','NGN','KES',
+    'GHS','TZS','UGX','ZMW','BWP','MUR','NAD','MZN','XOF','XAF','SCR','RWF',
+    'BIF','DJF','GMD','SLL','GNF','LRD','TTD','JMD','BBD','XCD','BSD','BMD',
+    'KYD','BZD','AWG','ANG','CUP','HTG','DOP','MOP','TWD','BHD','OMR','JOD',
+    'TND','LYD','ETB','ISK','HRK','RSD','BAM','ALL','MDL','MKD','GEL','AZN',
+    'KZT','AMD','CVE','MGA','SZL','LSL','NAD','ERN','DJF','KMF','MRO','STD',
+    'FJD','PGK','SBD','WST','TOP','VUV','NIO','GTQ','HNL','CRC','PAB','BOB',
+    'PYG','UYU','GYD','SRD','TTD',
+])
+
+_CURRENCY_ALIASES = {
+    'dollar': 'USD', 'dollars': 'USD', 'bucks': 'USD',
+    'dolar': 'USD', 'dolary': 'USD', 'dolarów': 'USD', 'dolara': 'USD',
+    'euro': 'EUR', 'euros': 'EUR',
+    'pound': 'GBP', 'pounds': 'GBP', 'sterling': 'GBP',
+    'zloty': 'PLN', 'złoty': 'PLN', 'zł': 'PLN', 'złotych': 'PLN', 'zlotych': 'PLN',
+    'yen': 'JPY', 'yens': 'JPY',
+    'franc': 'CHF', 'francs': 'CHF',
+    'yuan': 'CNY', 'renminbi': 'CNY',
+    'ruble': 'RUB', 'rubles': 'RUB', 'rubel': 'RUB',
+    'won': 'KRW',
+    'rupee': 'INR', 'rupees': 'INR',
+    'forint': 'HUF',
+    'lira': 'TRY', 'lire': 'TRY',
+    'rand': 'ZAR',
+    'baht': 'THB',
+    'ringgit': 'MYR',
+    'real': 'BRL', 'reais': 'BRL',
+    'shekel': 'ILS', 'shekels': 'ILS',
+    'dirham': 'AED',
+    'riyal': 'SAR',
+    'hryvnia': 'UAH', 'hryvna': 'UAH',
+    'dram': 'AMD',
+    'lari': 'GEL',
+    'tenge': 'KZT',
+    'koruna': 'CZK', 'korona': 'CZK',
+    'krona': 'SEK',
+    'krone': 'NOK',
+    'peso': 'MXN',
+}
+
+def _resolve_currency_code(s: str):
+    if s.upper() in _CURRENCY_CODES:
+        return s.upper()
+    return _CURRENCY_ALIASES.get(s.lower())
+
+_CURRENCY_RE = re.compile(
+    r'^(\d+(?:[.,]\d+)?)\s*([A-Za-z\u00c0-\u024f]{2,10})\s+(?:to|in|na|w)\s+([A-Za-z\u00c0-\u024f]{2,10})$',
+    re.IGNORECASE
+)
+
+# Unit conversion factors (all to base unit per category)
+# Length → meters, Mass → kg, Volume → liters, Area → m², Speed → m/s
+# Temperature is handled separately
+_UNIT_TO_BASE = {
+    # length (base: meter)
+    'km': 1000.0, 'kilometer': 1000.0, 'kilometers': 1000.0, 'kilometre': 1000.0, 'kilometres': 1000.0,
+    'm': 1.0, 'meter': 1.0, 'meters': 1.0, 'metre': 1.0, 'metres': 1.0,
+    'cm': 0.01, 'centimeter': 0.01, 'centimeters': 0.01, 'centimetre': 0.01, 'centimetres': 0.01,
+    'mm': 0.001, 'millimeter': 0.001, 'millimeters': 0.001, 'millimetre': 0.001, 'millimetres': 0.001,
+    'mi': 1609.344, 'mile': 1609.344, 'miles': 1609.344,
+    'ft': 0.3048, 'foot': 0.3048, 'feet': 0.3048,
+    'in': 0.0254, 'inch': 0.0254, 'inches': 0.0254,
+    'yd': 0.9144, 'yard': 0.9144, 'yards': 0.9144,
+    'nmi': 1852.0, 'nautical mile': 1852.0,
+    # mass (base: kg)
+    'kg': 1.0, 'kilogram': 1.0, 'kilograms': 1.0,
+    'g': 0.001, 'gram': 0.001, 'grams': 0.001,
+    'mg': 1e-6, 'milligram': 1e-6, 'milligrams': 1e-6,
+    'lb': 0.453592, 'lbs': 0.453592, 'pound': 0.453592, 'pounds': 0.453592,
+    'oz': 0.0283495, 'ounce': 0.0283495, 'ounces': 0.0283495,
+    't': 1000.0, 'ton': 1000.0, 'tons': 1000.0, 'tonne': 1000.0, 'tonnes': 1000.0,
+    'st': 6.35029, 'stone': 6.35029, 'stones': 6.35029,
+    # volume (base: liter)
+    'l': 1.0, 'liter': 1.0, 'liters': 1.0, 'litre': 1.0, 'litres': 1.0,
+    'ml': 0.001, 'milliliter': 0.001, 'milliliters': 0.001, 'millilitre': 0.001, 'millilitres': 0.001,
+    'cl': 0.01, 'centiliter': 0.01, 'centiliters': 0.01,
+    'gal': 3.78541, 'gallon': 3.78541, 'gallons': 3.78541,
+    'qt': 0.946353, 'quart': 0.946353, 'quarts': 0.946353,
+    'pt': 0.473176, 'pint': 0.473176, 'pints': 0.473176,
+    'cup': 0.236588, 'cups': 0.236588,
+    'floz': 0.0295735, 'fl_oz': 0.0295735,
+    'tbsp': 0.0147868, 'tablespoon': 0.0147868, 'tablespoons': 0.0147868,
+    'tsp': 0.00492892, 'teaspoon': 0.00492892, 'teaspoons': 0.00492892,
+    # area (base: m²)
+    'm2': 1.0, 'sqm': 1.0,
+    'km2': 1e6,
+    'cm2': 1e-4,
+    'ft2': 0.092903, 'sqft': 0.092903,
+    'mi2': 2.58999e6, 'sqmi': 2.58999e6,
+    'ha': 10000.0, 'hectare': 10000.0, 'hectares': 10000.0,
+    'acre': 4046.86, 'acres': 4046.86,
+    'yd2': 0.836127, 'sqyd': 0.836127,
+    # speed (base: m/s)
+    'km/h': 1/3.6, 'kmh': 1/3.6, 'kph': 1/3.6,
+    'mph': 0.44704,
+    'm/s': 1.0, 'ms': 1.0,
+    'knot': 0.514444, 'knots': 0.514444, 'kt': 0.514444, 'kts': 0.514444,
+    # data (base: bytes)
+    'b': 1, 'byte': 1, 'bytes': 1,
+    'kb': 1024, 'kilobyte': 1024, 'kilobytes': 1024,
+    'mb': 1048576, 'megabyte': 1048576, 'megabytes': 1048576,
+    'gb': 1073741824, 'gigabyte': 1073741824, 'gigabytes': 1073741824,
+    'tb': 1099511627776, 'terabyte': 1099511627776, 'terabytes': 1099511627776,
+}
+
+_TEMP_UNITS = frozenset(['c', 'celsius', '°c', 'f', 'fahrenheit', '°f', 'k', 'kelvin'])
+
+def _convert_unit(amount: float, from_u: str, to_u: str):
+    """Return (result_float, display_from, display_to) or None if not supported."""
+    fl = from_u.lower().strip('°')
+    tl = to_u.lower().strip('°')
+    # Normalize °c/°f back
+    fl_orig = from_u.lower()
+    tl_orig = to_u.lower()
+
+    # Temperature
+    if fl_orig in _TEMP_UNITS or fl in _TEMP_UNITS:
+        if tl_orig not in _TEMP_UNITS and tl not in _TEMP_UNITS:
+            return None
+        # to Celsius first
+        if fl in ('f', 'fahrenheit'):
+            c = (amount - 32) * 5 / 9
+        elif fl in ('k', 'kelvin'):
+            c = amount - 273.15
+        else:
+            c = amount
+        # from Celsius to target
+        if tl in ('f', 'fahrenheit'):
+            result = c * 9 / 5 + 32
+        elif tl in ('k', 'kelvin'):
+            result = c + 273.15
+        else:
+            result = c
+        return result
+
+    from_factor = _UNIT_TO_BASE.get(fl_orig) or _UNIT_TO_BASE.get(fl)
+    to_factor = _UNIT_TO_BASE.get(tl_orig) or _UNIT_TO_BASE.get(tl)
+    if from_factor is None or to_factor is None:
+        return None
+    return amount * from_factor / to_factor
+
+_UNIT_RE = re.compile(
+    r'^(\d+(?:[.,]\d+)?)\s*([A-Za-z°/²][A-Za-z°/²_]*)\s+(?:to|in|na|w)\s+([A-Za-z°/²][A-Za-z°/²_]*)$',
+    re.IGNORECASE
+)
+
+
 def check_fast_regex_actions(query: str):
     """Return a list of action dicts for queries that can be resolved without LLM/internet.
     Returns an empty list if no regex shortcut matches."""
@@ -1255,6 +1407,56 @@ def check_fast_regex_actions(query: str):
     qr_match = re.match(r"^qr(?:code)?:\s*(.+)$", query.strip(), re.IGNORECASE)
     if qr_match:
         return [{"type": "qrcode", "data": qr_match.group(1).strip()}]
+
+    # Currency conversion: "50 USD to PLN", "50usd to pln", "100 eur in gbp"
+    _curr_m = _CURRENCY_RE.match(query.strip())
+    if _curr_m:
+        amount_str = _curr_m.group(1).replace(',', '.')
+        from_code = _resolve_currency_code(_curr_m.group(2))
+        to_code = _resolve_currency_code(_curr_m.group(3))
+        if from_code and to_code and from_code != to_code:
+            converted = ""
+            try:
+                import requests as _req
+                resp = _req.get(
+                    f"https://api.frankfurter.app/latest?amount={amount_str}&from={from_code}&to={to_code}",
+                    timeout=4
+                )
+                if resp.status_code == 200:
+                    rate_val = resp.json().get("rates", {}).get(to_code)
+                    if rate_val is not None:
+                        converted = f"{rate_val:,.2f}"
+                        logging.info(f"Currency fast path: {amount_str} {from_code} = {converted} {to_code}")
+            except Exception as _ce:
+                logging.warning(f"Currency fast path API failed: {_ce}")
+            return [{"type": "currency", "amount": amount_str, "from_unit": from_code,
+                     "to_unit": to_code, "converted_value": converted}]
+
+    # Unit conversion: "10 km to miles", "100 celsius to fahrenheit", "5 kg to lbs"
+    _unit_m = _UNIT_RE.match(query.strip())
+    if _unit_m:
+        amount_str = _unit_m.group(1).replace(',', '.')
+        from_u = _unit_m.group(2)
+        to_u = _unit_m.group(3)
+        # Skip if it looks like a currency (would have been caught above or is unrecognised)
+        if not (_resolve_currency_code(from_u) and _resolve_currency_code(to_u)):
+            try:
+                result = _convert_unit(float(amount_str), from_u, to_u)
+                if result is not None:
+                    # Format result nicely
+                    if abs(result) >= 1000:
+                        converted = f"{result:,.4g}"
+                    elif abs(result) >= 1:
+                        converted = f"{result:.4g}"
+                    elif abs(result) >= 0.0001:
+                        converted = f"{result:.6g}"
+                    else:
+                        converted = f"{result:.2e}"
+                    logging.info(f"Unit fast path: {amount_str} {from_u} = {converted} {to_u}")
+                    return [{"type": "unit", "amount": amount_str, "from_unit": from_u,
+                             "to_unit": to_u, "converted_value": converted}]
+            except Exception as _ue:
+                logging.warning(f"Unit fast path failed: {_ue}")
 
     return []
 
