@@ -74,11 +74,22 @@ def get_app_cache():
             if not os.path.exists(d): continue
             try:
                 for f in os.listdir(d):
+                    full_path = os.path.join(d, f)
                     if f.endswith(".app"):
                         name = f[:-4]
                         clean_name = name.lower()
-                        full_path = os.path.join(d, f)
                         apps[clean_name] = {"cmd": f'open "{full_path}"', "orig_name": name, "icon": full_path}
+                    elif os.path.isdir(full_path) and not f.startswith('.'):
+                        # Scan one level deeper for apps in subdirectories (e.g. DaVinci Resolve)
+                        try:
+                            for sub_f in os.listdir(full_path):
+                                if sub_f.endswith(".app"):
+                                    sub_name = sub_f[:-4]
+                                    sub_clean = sub_name.lower()
+                                    sub_full = os.path.join(full_path, sub_f)
+                                    apps[sub_clean] = {"cmd": f'open "{sub_full}"', "orig_name": sub_name, "icon": sub_full}
+                        except Exception:
+                            pass
             except Exception as e:
                 logging.error(f"Error scanning {d}: {e}")
 

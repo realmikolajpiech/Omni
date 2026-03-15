@@ -41,9 +41,13 @@ _TOOL_META = {
     "organize_folder": {"icon": "📁", "label": "Organize"},
     "compress":        {"icon": "🗜️", "label": "Compress"},
     "convert_file":    {"icon": "🔄", "label": "Convert file"},
-    "set_reminder":    {"icon": "⏰", "label": "Set reminder"},
-    "list_reminders":  {"icon": "⏰", "label": "Reminders"},
-    "delete_reminder": {"icon": "⏰", "label": "Cancel reminder"},
+    "set_reminder":          {"icon": "⏰", "label": "Set reminder"},
+    "list_reminders":        {"icon": "⏰", "label": "Reminders"},
+    "delete_reminder":       {"icon": "⏰", "label": "Cancel reminder"},
+    "get_calendar_events":   {"icon": "📅", "label": "Calendar"},
+    "create_calendar_event": {"icon": "📅", "label": "Create event"},
+    "get_unread_emails":     {"icon": "📬", "label": "Emails"},
+    "send_email":            {"icon": "📧", "label": "Send email"},
 }
 
 
@@ -848,6 +852,7 @@ IMPORTANT efficiency rules:
 **Open application**
 {{"type": "open_app", "name": "google-chrome"}}
 → "browser"/"chrome" → "google-chrome". This will prompt the user if they want to launch the app.
+→ NEVER output open_app for Calendar, Reminders, Mail, or Focus after calling get_calendar_events, get_unread_emails, or any read-only query — those tools already fetch the data; just answer in text.
 
 **Open URL** (ONLY links from Context data above — never invent)
 {{"type": "open_url", "url": "https://..."}}
