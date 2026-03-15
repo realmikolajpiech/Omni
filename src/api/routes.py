@@ -529,6 +529,34 @@ Instructions:
                             context = "\n\n".join(text_res)
                     except Exception: pass
 
+                # If results exist but don't mention the person's name, retry with intitle: to
+                # surface biography/Wikipedia pages where the name appears in the page title.
+                if results:
+                    _results_combined = ' '.join(
+                        (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
+                        for r in results[:3]
+                    ).lower()
+                    _person_in_results = person_candidate.lower() in _results_combined
+
+                    if not _person_in_results:
+                        logging.info(f"[DEBUG] Results don't mention '{person_candidate}', retrying with intitle:")
+                        try:
+                            from src.services.search.web_search import search_api
+                            intitle_results = search_api(f'intitle:"{person_candidate}"', categories='general', fast=True)
+                            if intitle_results:
+                                results = intitle_results
+                                text_res = []
+                                for i, r in enumerate(results[:3]):
+                                    text_res.append(
+                                        f"Title: {r.get('title')}\n"
+                                        f"Description: {r.get('content') or r.get('snippet')}\n"
+                                        f"URL: {r.get('url')}"
+                                    )
+                                context = "\n\n".join(text_res)
+                                logging.info(f"[DEBUG] intitle: retry returned {len(intitle_results)} results")
+                        except Exception as e:
+                            logging.warning(f"[DEBUG] intitle: retry failed: {e}")
+
                 person_result = get_person_result(person_candidate, existing_results=results if results else None)
                 if person_result:
                     logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
