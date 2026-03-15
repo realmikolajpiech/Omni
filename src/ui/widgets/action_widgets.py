@@ -4541,6 +4541,7 @@ class ColorActionWidget(QWidget):
         rgb_val = data.get('rgb_val', '')
         hsl_val = data.get('hsl_val', '')
         self.color_preview.setStyleSheet(f"background-color: {color_hex}; border-radius: 8px; border: 1px solid rgba(128,128,128,0.3);")
+        self.color_preview.update()
         self.hex_label.setText(color_hex.upper())
         self.desc_label.setText(f"RGB: {rgb_val} • HSL: {hsl_val}")
 
