@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.core.config import BRAIN_HOST, BRAIN_PORT
 from src.core.logger import setup_logging
 from src.api.routes import api_bp
-from src.services.llm.model_manager import ensure_model_loaded
+from src.services.llm.model_manager import ensure_model_loaded, ensure_resources
 
 def create_app():
     setup_logging("brain")
@@ -27,6 +27,7 @@ def load_models_background():
     """Load models in background with error handling."""
     try:
         ensure_model_loaded()
+        ensure_resources()
         logging.info("Model loading completed successfully")
     except Exception as e:
         logging.error(f"Model loading failed: {e}")

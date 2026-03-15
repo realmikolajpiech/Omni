@@ -132,6 +132,19 @@ def main():
     # Allow Ctrl+C to interrupt the Qt Event Loop
     from PyQt6.QtCore import QTimer
 
+    # macOS: Re-apply Accessory policy once the event loop starts.
+    # PyQt6 may reset the activation policy to Regular during its own macOS
+    # initialization. A 0-ms timer fires after Qt finishes starting up,
+    # ensuring the app never shows as "Python" in the Dock.
+    if sys.platform == "darwin":
+        def _reapply_accessory_policy():
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().setActivationPolicy_(1)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _reapply_accessory_policy)
+
     # Handle Ctrl+C gracefully
     def handle_sigint(signum, frame):
         print("\nReceived SIGINT (Ctrl+C). Quitting Omni...")
