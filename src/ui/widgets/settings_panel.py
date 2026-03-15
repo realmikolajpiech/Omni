@@ -10,6 +10,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
 
+import sys
+import os
+
 from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
 import src.core.subscription as subscription
@@ -1085,57 +1088,115 @@ _TRUST_DESCS = {
 class _TrustCheckpointWidget(QWidget):
     """
     Horizontal track with 3 checkpoint nodes. Click or drag to select a level.
-    Track fills left-to-right up to the active node; labels with desc below.
+    Single unified animation drives fill + node scale + glow simultaneously.
     """
     level_changed = pyqtSignal(int)
 
     _TRACK_H = 6
     _NODE_R  = 14
     _PAD_X   = 52
-    _TRACK_Y = 36   # y of track centre
+    _TRACK_Y = 36
 
     def __init__(self, level: int = 1, dark: bool = True, parent=None):
         super().__init__(parent)
         self._level    = level
         self._dark     = dark
-        self._anim_t   = float(level - 1) / 2
-        self._hover    = 0   # 0 = none, 1/2/3 = hovered level
+        self._fill     = float(level - 1) / 2   # 0.0 … 1.0 animated fill
+        self._hover    = 0
         self._dragging = False
-        self._anim     = None
+        # Per-node animated state (driven by _tween helper)
+        self._node_scale = {1: 1.0, 2: 1.0, 3: 1.0}
+        self._node_glow  = {1: 0.0, 2: 0.0, 3: 0.0}
+        self._hover_glow = {1: 0.0, 2: 0.0, 3: 0.0}
+        self._node_glow[level] = 1.0
+        self._tweens = {}  # anim_key → QVariantAnimation
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
         self.setFixedHeight(110)
 
-    # ── Animated fill property ────────────────────────────────────────
+    # ── Tween engine (one system for everything) ──────────────────────
 
-    @pyqtProperty(float)
-    def fill_t(self) -> float:
-        return self._anim_t
+    def _tween(self, key: str, prop_dict: dict, prop_key,
+               target: float, duration: int = 300,
+               curve: QEasingCurve.Type = QEasingCurve.Type.OutCubic):
+        """Smoothly animate prop_dict[prop_key] → target. Cancels any running
+        tween on the same key. All tweens share one repaint path."""
+        if key in self._tweens:
+            old = self._tweens.pop(key)
+            old.stop()
+            old.deleteLater()
 
-    @fill_t.setter
-    def fill_t(self, v: float):
-        self._anim_t = v
-        self.update()
+        start = prop_dict[prop_key]
+        if abs(start - target) < 0.003:
+            prop_dict[prop_key] = target
+            self.update()
+            return
+
+        from PyQt6.QtCore import QVariantAnimation
+        a = QVariantAnimation(self)
+        a.setStartValue(float(start))
+        a.setEndValue(float(target))
+        a.setDuration(duration)
+        a.setEasingCurve(QEasingCurve(curve))
+
+        def on_val(v):
+            prop_dict[prop_key] = v
+            self.update()
+
+        def on_done():
+            prop_dict[prop_key] = target
+            self._tweens.pop(key, None)
+            self.update()
+
+        a.valueChanged.connect(on_val)
+        a.finished.connect(on_done)
+        self._tweens[key] = a
+        a.start()
+
+    def _tween_fill(self, target: float, duration: int = 320):
+        self._tween("fill", self.__dict__, "_fill", target, duration,
+                    QEasingCurve.Type.InOutCubic)
+
+    # ── Animate selection (all at once) ───────────────────────────────
+
+    def _animate_to(self, new_level: int, old_level: int):
+        """Single call drives fill + old-node fadeout + new-node pop. All start
+        together so the motion reads as one gesture."""
+        # ── Fill bar ──
+        self._tween_fill(float(new_level - 1) / 2, 320)
+
+        # ── Old node: glow out + scale settle ──
+        if old_level and old_level != new_level:
+            self._tween(f"glow_{old_level}", self._node_glow, old_level,
+                        0.0, 250, QEasingCurve.Type.InOutCubic)
+            self._tween(f"scale_{old_level}", self._node_scale, old_level,
+                        1.0, 250, QEasingCurve.Type.OutCubic)
+
+        # ── New node: elastic pop (1.0 → 1.18 → 1.0) + glow in ──
+        self._node_scale[new_level] = 1.0          # start from current size
+        self._tween(f"scale_{new_level}", self._node_scale, new_level,
+                    1.18, 160, QEasingCurve.Type.OutCubic)
+        # After the pop-up, settle back
+        QTimer.singleShot(160, lambda nl=new_level: self._tween(
+            f"scale_{nl}", self._node_scale, nl,
+            1.0, 280, QEasingCurve.Type.OutBack))
+        self._tween(f"glow_{new_level}", self._node_glow, new_level,
+                    1.0, 260, QEasingCurve.Type.OutCubic)
 
     # ── Public API ────────────────────────────────────────────────────
 
     def set_level(self, level: int, animate: bool = True):
-        if level == self._level and abs(self._anim_t - float(level - 1) / 2) < 0.01:
+        if level == self._level and abs(self._fill - float(level - 1) / 2) < 0.01:
             return
+        old = self._level
         self._level = level
-        target = float(level - 1) / 2
         if animate and not self._dragging:
-            if self._anim:
-                self._anim.stop()
-            self._anim = QPropertyAnimation(self, b"fill_t")
-            self._anim.setDuration(300)
-            self._anim.setStartValue(self._anim_t)
-            self._anim.setEndValue(target)
-            self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            self._anim.start()
+            self._animate_to(level, old)
         else:
-            self._anim_t = target
+            self._fill = float(level - 1) / 2
+            self._node_glow = {l: (1.0 if l == level else 0.0) for l in [1, 2, 3]}
+            self._node_scale = {l: 1.0 for l in [1, 2, 3]}
             self.update()
 
     def set_dark(self, dark: bool):
@@ -1154,28 +1215,35 @@ class _TrustCheckpointWidget(QWidget):
 
     # ── Mouse events ─────────────────────────────────────────────────
 
-    def _apply_x(self, x: float, emit: bool):
-        lvl = self._nearest(x)
-        self._anim_t = float(lvl - 1) / 2
-        if lvl != self._level:
-            self._level = lvl
-            if emit:
-                self.level_changed.emit(lvl)
-        self.update()
-
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
-            self._apply_x(event.position().x(), emit=True)
+            lvl = self._nearest(event.position().x())
+            if lvl != self._level:
+                old = self._level
+                self._level = lvl
+                self._animate_to(lvl, old)
+                self.level_changed.emit(lvl)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         hov = self._nearest(event.position().x())
         if hov != self._hover:
+            old_hov = self._hover
             self._hover = hov
-            self.update()
+            if old_hov and old_hov != self._level:
+                self._tween(f"hov_{old_hov}", self._hover_glow, old_hov,
+                            0.0, 160, QEasingCurve.Type.OutCubic)
+            if hov and hov != self._level:
+                self._tween(f"hov_{hov}", self._hover_glow, hov,
+                            1.0, 160, QEasingCurve.Type.OutCubic)
         if self._dragging:
-            self._apply_x(event.position().x(), emit=True)
+            lvl = self._nearest(event.position().x())
+            if lvl != self._level:
+                old = self._level
+                self._level = lvl
+                self._animate_to(lvl, old)
+                self.level_changed.emit(lvl)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1183,8 +1251,11 @@ class _TrustCheckpointWidget(QWidget):
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event):
+        old_hov = self._hover
         self._hover = 0
-        self.update()
+        if old_hov:
+            self._tween(f"hov_{old_hov}", self._hover_glow, old_hov,
+                        0.0, 180, QEasingCurve.Type.OutCubic)
         super().leaveEvent(event)
 
     # ── Paint ─────────────────────────────────────────────────────────
@@ -1206,7 +1277,7 @@ class _TrustCheckpointWidget(QWidget):
         p.fillPath(bg_path, QColor(255, 255, 255, 28 if dark else 50))
 
         # ── Filled portion ─────────────────────────────────────────────
-        fill_w = self._anim_t * span
+        fill_w = self._fill * span
         if fill_w > 1:
             fill_path = QPainterPath()
             fill_path.addRoundedRect(QRectF(x0, ty - th / 2, fill_w, th), th / 2, th / 2)
@@ -1220,37 +1291,49 @@ class _TrustCheckpointWidget(QWidget):
             nx     = self._node_x(l)
             active = l <= self._level
             sel    = l == self._level
-            hov    = (l == self._hover and not sel)
+            scale  = self._node_scale.get(l, 1.0)
+            glow_a = self._node_glow.get(l, 1.0 if sel else 0.0)
+            hov_a  = self._hover_glow.get(l, 0.0)
+            r      = nr * scale
 
-            # Glow ring (selected or hovered)
-            if sel:
+            # Glow ring (selection)
+            if glow_a > 0.01:
+                gr = r + 7
                 gp = QPainterPath()
-                gp.addEllipse(QRectF(nx - nr - 7, ty - nr - 7, (nr + 7) * 2, (nr + 7) * 2))
-                p.fillPath(gp, QColor(99, 102, 241, 35))
-            elif hov:
-                gp = QPainterPath()
-                gp.addEllipse(QRectF(nx - nr - 4, ty - nr - 4, (nr + 4) * 2, (nr + 4) * 2))
-                p.fillPath(gp, QColor(99, 102, 241, 18))
+                gp.addEllipse(QRectF(nx - gr, ty - gr, gr * 2, gr * 2))
+                p.fillPath(gp, QColor(99, 102, 241, int(35 * glow_a)))
+
+            # Glow ring (hover)
+            if hov_a > 0.01 and not sel:
+                hr = r + 4
+                hp = QPainterPath()
+                hp.addEllipse(QRectF(nx - hr, ty - hr, hr * 2, hr * 2))
+                p.fillPath(hp, QColor(99, 102, 241, int(20 * hov_a)))
 
             # Node body
             np_ = QPainterPath()
-            np_.addEllipse(QRectF(nx - nr, ty - nr, nr * 2, nr * 2))
+            np_.addEllipse(QRectF(nx - r, ty - r, r * 2, r * 2))
             if active:
-                node_col = QColor(129, 140, 248) if hov else QColor(99, 102, 241)
-                p.fillPath(np_, node_col)
+                blend = hov_a if not sel else 0.0
+                c = QColor(
+                    int(99 + 30 * blend),
+                    int(102 + 38 * blend),
+                    int(241 + 7 * blend),
+                )
+                p.fillPath(np_, c)
             else:
                 p.fillPath(np_, QColor(55, 55, 72) if dark else QColor(210, 210, 220))
                 p.setPen(QPen(QColor(255, 255, 255, 55 if dark else 110), 1.5))
-                p.drawEllipse(QRectF(nx - nr + 0.75, ty - nr + 0.75,
-                                     (nr - 0.75) * 2, (nr - 0.75) * 2))
+                p.drawEllipse(QRectF(nx - r + 0.75, ty - r + 0.75,
+                                     (r - 0.75) * 2, (r - 0.75) * 2))
                 p.setPen(Qt.PenStyle.NoPen)
 
-            # White inner dot (selected)
-            if sel:
-                ir = nr * 0.36
+            # White inner dot
+            if sel and glow_a > 0.2:
+                ir = r * 0.36
                 ip = QPainterPath()
                 ip.addEllipse(QRectF(nx - ir, ty - ir, ir * 2, ir * 2))
-                p.fillPath(ip, QColor(255, 255, 255))
+                p.fillPath(ip, QColor(255, 255, 255, int(255 * min(1.0, glow_a))))
 
         # ── Labels ─────────────────────────────────────────────────────
         label_top = ty + nr + 12
@@ -1262,7 +1345,6 @@ class _TrustCheckpointWidget(QWidget):
             active = l <= self._level
             sel    = l == self._level
 
-            # Level name — centred on node, clamped to widget
             nf = QFont("Manrope", 12)
             nf.setWeight(QFont.Weight.Bold if sel else QFont.Weight.DemiBold)
             p.setFont(nf)
@@ -1276,7 +1358,6 @@ class _TrustCheckpointWidget(QWidget):
             name_x = max(pad, min(nx - fw / 2, self.width() - fw - pad))
             p.drawText(int(name_x), int(label_top + fm.ascent()), name)
 
-            # Short description — clamped rect, left/centre/right aligned per position
             df = QFont("Manrope", 10)
             p.setFont(df)
             p.setPen(
@@ -1644,6 +1725,13 @@ class SettingsPanel(QWidget):
         self._check_update_btn.clicked.connect(self._on_check_update)
         ver_inner.addWidget(self._check_update_btn)
 
+        self._restart_btn = QPushButton("Restart Omni")
+        self._restart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restart_btn.setFlat(True)
+        self._restart_btn.setFont(_font("Manrope", 10))
+        self._restart_btn.clicked.connect(self._on_restart)
+        ver_inner.addWidget(self._restart_btn)
+
         ver_col.addLayout(ver_inner)
         sidebar_col.addWidget(ver_widget)
 
@@ -1794,6 +1882,35 @@ class SettingsPanel(QWidget):
                 col_vlay.addWidget(divider)
 
                 lay.addWidget(col_wrap)
+
+    def _rebuild_cap_rows_animated(self, level: int):
+        """Rebuild capabilities with a smooth height crossfade on the whole card."""
+        if not hasattr(self, "_cap_rows_layout") or not hasattr(self, "_trust_cap_card"):
+            return
+        current = settings_store.get("trust_level", 1)
+        if current != level:
+            return
+        card = self._trust_cap_card
+        old_h = card.height()
+        self._rebuild_cap_rows(level)
+        # Force layout recalc to get the new target height
+        card.adjustSize()
+        new_h = card.sizeHint().height()
+        if old_h == new_h or old_h <= 0:
+            return
+        # Animate the card height from old → new so no jump
+        from PyQt6.QtCore import QVariantAnimation
+        card.setFixedHeight(old_h)
+        anim = QVariantAnimation(card)
+        anim.setStartValue(old_h)
+        anim.setEndValue(new_h)
+        anim.setDuration(280)
+        anim.setEasingCurve(QEasingCurve(QEasingCurve.Type.OutCubic))
+        anim.valueChanged.connect(lambda v: card.setFixedHeight(int(v)))
+        anim.finished.connect(lambda: card.setMinimumHeight(0) or card.setMaximumHeight(16777215))
+        anim.start()
+        # prevent gc
+        card._h_anim = anim
 
     def _on_trust_level_label_update(self, level: int):
         """Update the trust level name/desc labels in the slider card header."""
@@ -3098,7 +3215,7 @@ class SettingsPanel(QWidget):
         if hasattr(self, "_trust_track") and self._trust_track is not None:
             self._trust_track.set_level(level)
         if hasattr(self, "_cap_rows_layout"):
-            self._rebuild_cap_rows(level)
+            self._rebuild_cap_rows_animated(level)
 
     def _on_personality_changed(self):
         # Legacy — kept for safety; new path goes through _on_personality_mode_selected
@@ -3868,6 +3985,24 @@ class SettingsPanel(QWidget):
                     color: {'rgba(99,102,241,0.5)' if dark else 'rgba(79,70,229,0.5)'};
                 }}
             """)
+        if hasattr(self, "_restart_btn"):
+            self._restart_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {'rgba(239,68,68,0.65)' if dark else 'rgba(220,38,38,0.7)'};
+                    font-family: 'Manrope';
+                    font-size: 10px;
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    text-align: center;
+                }}
+                QPushButton:hover {{
+                    color: {'#f87171' if dark else '#dc2626'};
+                }}
+                QPushButton:pressed {{
+                    color: {'rgba(239,68,68,0.5)' if dark else 'rgba(220,38,38,0.5)'};
+                }}
+            """)
         if hasattr(self, "_profile_card"):
             self._profile_card.set_dark(dark)
         if hasattr(self, "_security_card"):
@@ -4288,3 +4423,31 @@ class SettingsPanel(QWidget):
         worker.done.connect(_on_done)
         worker.start()
         self._update_worker = worker  # prevent GC
+
+    def _on_restart(self):
+        import subprocess
+        import signal
+
+        self._restart_btn.setEnabled(False)
+        self._restart_btn.setText("Restarting…")
+
+        # Kill brain service
+        subprocess.run(["pkill", "-f", "src/app/brain.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Kill voice listener
+        subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Kill file watcher
+        subprocess.run(["pkill", "-f", "services/search/watcher.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Relaunch the app
+        python = sys.executable
+        script = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "app", "main.py"
+        ))
+        subprocess.Popen([python, script], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Quit current process
+        QTimer.singleShot(300, lambda: QApplication.instance().quit())
