@@ -1319,7 +1319,11 @@ class AnswerWidget(QWidget):
                     break
 
         if hasattr(self.window(), "adjust_window_height"):
-            self.window().adjust_window_height()
+            # During active streaming the height changes every ~80 ms.
+            # Animating each tiny increment restarts the 450 ms easing, causing
+            # visible text wiggle.  Skip animation when streaming is in progress.
+            streaming = getattr(self.window(), '_streaming_answer_widget', None) is not None
+            self.window().adjust_window_height(animate=not streaming)
 
 class CommandPaletteItemWidget(QWidget):
     """A single command palette row: accent-colored symbol + name + description."""

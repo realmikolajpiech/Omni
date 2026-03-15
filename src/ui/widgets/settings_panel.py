@@ -10,6 +10,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, QTimer, QSize, QRectF, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QColor, QPainter, QPainterPath, QLinearGradient, QBrush, QPen, QFontMetrics
 
+import sys
+import os
+
 from src.ui.styles import THEMES
 import src.core.settings_store as settings_store
 import src.core.subscription as subscription
@@ -1721,6 +1724,13 @@ class SettingsPanel(QWidget):
         self._check_update_btn.setFont(_font("Manrope", 10))
         self._check_update_btn.clicked.connect(self._on_check_update)
         ver_inner.addWidget(self._check_update_btn)
+
+        self._restart_btn = QPushButton("Restart Omni")
+        self._restart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restart_btn.setFlat(True)
+        self._restart_btn.setFont(_font("Manrope", 10))
+        self._restart_btn.clicked.connect(self._on_restart)
+        ver_inner.addWidget(self._restart_btn)
 
         ver_col.addLayout(ver_inner)
         sidebar_col.addWidget(ver_widget)
@@ -3975,6 +3985,24 @@ class SettingsPanel(QWidget):
                     color: {'rgba(99,102,241,0.5)' if dark else 'rgba(79,70,229,0.5)'};
                 }}
             """)
+        if hasattr(self, "_restart_btn"):
+            self._restart_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {'rgba(239,68,68,0.65)' if dark else 'rgba(220,38,38,0.7)'};
+                    font-family: 'Manrope';
+                    font-size: 10px;
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    text-align: center;
+                }}
+                QPushButton:hover {{
+                    color: {'#f87171' if dark else '#dc2626'};
+                }}
+                QPushButton:pressed {{
+                    color: {'rgba(239,68,68,0.5)' if dark else 'rgba(220,38,38,0.5)'};
+                }}
+            """)
         if hasattr(self, "_profile_card"):
             self._profile_card.set_dark(dark)
         if hasattr(self, "_security_card"):
@@ -4395,3 +4423,31 @@ class SettingsPanel(QWidget):
         worker.done.connect(_on_done)
         worker.start()
         self._update_worker = worker  # prevent GC
+
+    def _on_restart(self):
+        import subprocess
+        import signal
+
+        self._restart_btn.setEnabled(False)
+        self._restart_btn.setText("Restarting…")
+
+        # Kill brain service
+        subprocess.run(["pkill", "-f", "src/app/brain.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Kill voice listener
+        subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Kill file watcher
+        subprocess.run(["pkill", "-f", "services/search/watcher.py"], check=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Relaunch the app
+        python = sys.executable
+        script = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "app", "main.py"
+        ))
+        subprocess.Popen([python, script], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Quit current process
+        QTimer.singleShot(300, lambda: QApplication.instance().quit())
