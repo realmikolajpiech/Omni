@@ -1189,6 +1189,107 @@ _CURRENCY_RE = re.compile(
     re.IGNORECASE
 )
 
+# World Time
+_CITY_TZ = {
+    "tokyo": "Asia/Tokyo", "osaka": "Asia/Tokyo", "kyoto": "Asia/Tokyo",
+    "london": "Europe/London",
+    "paris": "Europe/Paris", "rome": "Europe/Rome", "berlin": "Europe/Berlin",
+    "madrid": "Europe/Madrid", "amsterdam": "Europe/Amsterdam",
+    "warsaw": "Europe/Warsaw", "vienna": "Europe/Vienna", "prague": "Europe/Prague",
+    "stockholm": "Europe/Stockholm", "oslo": "Europe/Oslo", "helsinki": "Europe/Helsinki",
+    "athens": "Europe/Athens", "budapest": "Europe/Budapest", "bucharest": "Europe/Bucharest",
+    "new york": "America/New_York", "nyc": "America/New_York",
+    "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+    "chicago": "America/Chicago", "houston": "America/Chicago",
+    "denver": "America/Denver", "phoenix": "America/Phoenix",
+    "seattle": "America/Los_Angeles", "san francisco": "America/Los_Angeles",
+    "toronto": "America/Toronto", "montreal": "America/Toronto",
+    "vancouver": "America/Vancouver",
+    "mexico city": "America/Mexico_City",
+    "sao paulo": "America/Sao_Paulo", "buenos aires": "America/Argentina/Buenos_Aires",
+    "dubai": "Asia/Dubai", "riyadh": "Asia/Riyadh",
+    "moscow": "Europe/Moscow", "istanbul": "Europe/Istanbul",
+    "beijing": "Asia/Shanghai", "shanghai": "Asia/Shanghai",
+    "hong kong": "Asia/Hong_Kong", "taipei": "Asia/Taipei",
+    "seoul": "Asia/Seoul", "singapore": "Asia/Singapore",
+    "sydney": "Australia/Sydney", "melbourne": "Australia/Melbourne",
+    "auckland": "Pacific/Auckland",
+    "mumbai": "Asia/Kolkata", "delhi": "Asia/Kolkata", "bangalore": "Asia/Kolkata",
+    "karachi": "Asia/Karachi", "lahore": "Asia/Karachi",
+    "dhaka": "Asia/Dhaka", "colombo": "Asia/Colombo",
+    "tehran": "Asia/Tehran", "baghdad": "Asia/Baghdad",
+    "cairo": "Africa/Cairo", "nairobi": "Africa/Nairobi",
+    "johannesburg": "Africa/Johannesburg", "lagos": "Africa/Lagos",
+    "casablanca": "Africa/Casablanca",
+    "jakarta": "Asia/Jakarta", "bangkok": "Asia/Bangkok",
+    "kuala lumpur": "Asia/Kuala_Lumpur",
+    "manila": "Asia/Manila",
+}
+
+_WORLD_TIME_RE = re.compile(
+    r'^(?:time\s+in\s+|what(?:\'s|\s+is)\s+(?:the\s+)?time\s+in\s+)(.+)$'
+    r'|^(.+?)\s+time$',
+    re.IGNORECASE
+)
+
+
+def _get_world_time(city_raw: str):
+    """Return a world_time action dict for the given city, or None on failure."""
+    from datetime import datetime
+    city_key = city_raw.strip().lower()
+
+    # Fast path: known city dict
+    iana_tz = _CITY_TZ.get(city_key)
+    if iana_tz:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(iana_tz)
+            now = datetime.now(tz)
+            return {
+                "type": "world_time",
+                "city": city_raw.strip().title(),
+                "timezone": now.strftime("%Z"),
+                "current_time": now.strftime("%H:%M"),
+                "date": now.strftime("%A, %B %-d"),
+            }
+        except Exception as e:
+            logging.warning(f"World time fast path failed for {city_key}: {e}")
+
+    # Fallback: geocode via Nominatim + TimeAPI.io
+    try:
+        import urllib.parse
+        import requests as _req
+        geo_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(city_raw)}&format=json&limit=1"
+        geo_resp = _req.get(geo_url, headers={"User-Agent": "OmniApp/1.0"}, timeout=4)
+        if geo_resp.status_code != 200 or not geo_resp.json():
+            return None
+        geo = geo_resp.json()[0]
+        lat, lon = geo["lat"], geo["lon"]
+        display_name = geo.get("display_name", city_raw.strip().title()).split(",")[0].strip()
+
+        time_url = f"https://timeapi.io/api/time/current/coordinate?latitude={lat}&longitude={lon}"
+        time_resp = _req.get(time_url, timeout=4)
+        if time_resp.status_code != 200:
+            return None
+        td = time_resp.json()
+        # Parse date from "MM/DD/YYYY" format
+        from datetime import datetime as dt
+        try:
+            d = dt.strptime(td.get("date", ""), "%m/%d/%Y")
+            date_str = d.strftime("%A, %B %-d")
+        except Exception:
+            date_str = td.get("date", "")
+        return {
+            "type": "world_time",
+            "city": display_name,
+            "timezone": td.get("timeZone", "").split("/")[-1].replace("_", " "),
+            "current_time": td.get("time", "")[:5],
+            "date": date_str,
+        }
+    except Exception as e:
+        logging.warning(f"World time fallback failed for '{city_raw}': {e}")
+        return None
+
 # Unit conversion factors (all to base unit per category)
 # Length → meters, Mass → kg, Volume → liters, Area → m², Speed → m/s
 # Temperature is handled separately
@@ -1431,6 +1532,16 @@ def check_fast_regex_actions(query: str):
                 logging.warning(f"Currency fast path API failed: {_ce}")
             return [{"type": "currency", "amount": amount_str, "from_unit": from_code,
                      "to_unit": to_code, "converted_value": converted}]
+
+    # World Time: "time in tokyo", "paris time", "what's the time in new york"
+    _wt_m = _WORLD_TIME_RE.match(query.strip())
+    if _wt_m:
+        city_raw = (_wt_m.group(1) or _wt_m.group(2) or "").strip()
+        if city_raw:
+            result = _get_world_time(city_raw)
+            if result:
+                logging.info(f"World time fast path: {city_raw} -> {result['current_time']} {result['timezone']}")
+                return [result]
 
     # Unit conversion: "10 km to miles", "100 celsius to fahrenheit", "5 kg to lbs"
     _unit_m = _UNIT_RE.match(query.strip())

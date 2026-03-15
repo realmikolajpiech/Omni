@@ -402,6 +402,16 @@ class CollapsibleThinkingWidget(QWidget):
         self.header_button.setChecked(False)
         self.header_button.clicked.connect(self.toggle_content)
         self.header_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Set font programmatically so Qt's emoji fallback chain is preserved.
+        # CSS font-family (including the global QListWidget::item stylesheet) restricts
+        # rendering to a single font, breaking emoji on fresh installs. setFont()
+        # uses Qt's glyph-fallback pipeline which correctly delegates emoji to the
+        # system emoji font (Apple Color Emoji / Segoe UI Emoji).
+        _btn_font = QFont()
+        _btn_font.setFamilies(["Manrope", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"])
+        _btn_font.setPointSize(11)
+        _btn_font.setWeight(QFont.Weight.DemiBold)
+        self.header_button.setFont(_btn_font)
         header_row.addWidget(self.header_button)
 
         # Open-file hint (shown to the right of the Reasoning pill)
@@ -473,9 +483,6 @@ class CollapsibleThinkingWidget(QWidget):
                 border-radius: 10px;
                 padding: 3px 10px 3px 9px;
                 text-align: left;
-                font-family: Manrope;
-                font-size: 11px;
-                font-weight: 600;
                 color: {badge_color};
             }}
             QPushButton:hover {{
@@ -777,6 +784,12 @@ class _BubbleInner(QWidget):
         if self.thinking_placeholder is not None:
             self._placeholder_shown = False
             self.thinking_placeholder.setVisible(False)
+        # Invalidate cache whenever the thinking widget changes size (expand/collapse).
+        if hasattr(widget, 'size_changed'):
+            widget.size_changed.connect(self._invalidate_size_cache)
+
+    def _invalidate_size_cache(self):
+        self._cached_size = None
 
     def set_text(self, text):
         if text == self._last_text:

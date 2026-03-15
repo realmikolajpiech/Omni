@@ -208,7 +208,9 @@ def main():
             if sys.platform == "darwin":
                 try:
                     from AppKit import NSApplication
-                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                    ns_app = NSApplication.sharedApplication()
+                    ns_app.activateIgnoringOtherApps_(True)
+                    ns_app.setActivationPolicy_(1)
                 except Exception:
                     pass
 

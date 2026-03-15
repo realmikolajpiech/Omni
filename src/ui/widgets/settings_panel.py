@@ -2167,6 +2167,17 @@ class SettingsPanel(QWidget):
         self.account_stack = QStackedWidget()
         self.account_stack.addWidget(self._build_auth_form())    # index 0 — logged out
         self.account_stack.addWidget(self._build_account_info()) # index 1 — logged in
+
+        def _sync_stack_size(index: int):
+            for i in range(self.account_stack.count()):
+                sp = (QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred) \
+                     if i == index else \
+                     (QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+                self.account_stack.widget(i).setSizePolicy(*sp)
+            self.account_stack.adjustSize()
+
+        self.account_stack.currentChanged.connect(_sync_stack_size)
+        _sync_stack_size(self.account_stack.currentIndex())
         page.add_widget(self.account_stack)
 
         # ── Shared status label ───────────────────────────────────────
@@ -2956,46 +2967,46 @@ class SettingsPanel(QWidget):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 8, 0, 0)
         lay.setSpacing(12)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # ── Profile hero card ─────────────────────────────────────────
         self._profile_card = _FeedbackFormCard(dark=dark)
         pc = self._profile_card._inner
-        pc.setContentsMargins(20, 18, 20, 18)
+        pc.setContentsMargins(16, 14, 16, 14)
         pc.setSpacing(0)
 
+        # Single flat row: avatar | email | plan badge | stretch | refresh
         profile_row = QHBoxLayout()
         profile_row.setContentsMargins(0, 0, 0, 0)
-        profile_row.setSpacing(14)
+        profile_row.setSpacing(10)
+        profile_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._profile_avatar = _AvatarWidget(initial="?")
         profile_row.addWidget(self._profile_avatar, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        info_col = QVBoxLayout()
-        info_col.setSpacing(5)
-        info_col.setContentsMargins(0, 0, 0, 0)
-
         self.account_email_lbl = QLabel("")
         self.account_email_lbl.setFont(_font("Manrope", 13, bold=True))
-        info_col.addWidget(self.account_email_lbl)
+        self.account_email_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        profile_row.addWidget(self.account_email_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.plan_badge = QLabel("FREE")
         self.plan_badge.setObjectName("PlanBadgeFree")
         self.plan_badge.setFont(_font("Manrope", 9, bold=True))
-        self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.plan_badge.setFixedHeight(20)
-        self.plan_badge.setContentsMargins(8, 0, 8, 0)
+        self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.plan_badge.setFixedHeight(18)
+        self.plan_badge.setContentsMargins(7, 0, 7, 0)
         self.plan_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        info_col.addWidget(self.plan_badge)
+        profile_row.addWidget(self.plan_badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        profile_row.addLayout(info_col, 1)
+        profile_row.addStretch(1)
 
         self.refresh_btn = QPushButton("↻")
         self.refresh_btn.setObjectName("RefreshBtn")
-        self.refresh_btn.setFixedSize(30, 30)
+        self.refresh_btn.setFixedSize(28, 28)
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh_btn.setToolTip("Refresh plan status")
         self.refresh_btn.clicked.connect(self.refresh_account)
-        profile_row.addWidget(self.refresh_btn, 0, Qt.AlignmentFlag.AlignTop)
+        profile_row.addWidget(self.refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         pc.addLayout(profile_row)
         lay.addWidget(self._profile_card)
@@ -3078,7 +3089,7 @@ class SettingsPanel(QWidget):
         # ── Account settings card ─────────────────────────────────────
         settings_card = _FeedbackFormCard(dark=dark)
         sc = settings_card._inner
-        sc.setContentsMargins(20, 16, 20, 4)
+        sc.setContentsMargins(20, 16, 20, 16)
         sc.setSpacing(0)
 
         sc.addWidget(_section_header("ACCOUNT SETTINGS"))
@@ -3093,7 +3104,7 @@ class SettingsPanel(QWidget):
         self.sync_btn = QPushButton("Sync Now")
         self.sync_btn.setObjectName("ResetBtn")
         self.sync_btn.setFixedHeight(30)
-        self.sync_btn.setFixedWidth(84)
+        self.sync_btn.setFixedWidth(100)
         self.sync_btn.setFont(_font("Manrope", 10))
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sync_btn.clicked.connect(self._do_sync_now)

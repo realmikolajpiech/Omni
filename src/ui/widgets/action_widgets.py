@@ -2295,6 +2295,107 @@ class CurrencyActionWidget(QWidget):
             return self.layout().sizeHint()
         return super().sizeHint()
 
+class WorldTimeWidget(QWidget):
+    def __init__(self, city, timezone, current_time, date="", parent=None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(4)
+
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)
+
+        self.icon_label = QLabel("🕐")
+        self.icon_label.setFixedSize(16, 16)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setStyleSheet("background-color: transparent; border: none;")
+        top_layout.addWidget(self.icon_label)
+
+        self.action_label = QLabel("WORLD TIME")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        top_layout.addWidget(self.action_label)
+
+        self.tz_badge = QLabel(timezone)
+        self.tz_badge.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+        self.tz_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top_layout.addWidget(self.tz_badge)
+
+        top_layout.addStretch()
+
+        self.time_label = QLabel(current_time)
+        self.time_label.setFont(QFont("Instrument Serif", 40, QFont.Weight.Normal))
+        self.time_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.city_label = QLabel(f"{city}  ·  {date}" if date else city)
+        self.city_label.setFont(QFont("Manrope", 11, QFont.Weight.Normal))
+
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.time_label)
+        card_layout.addWidget(self.city_label)
+
+        layout.addWidget(self.card)
+
+        self.current_theme = "light"
+        self.update_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+
+        if is_dark:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(0, 150, 200, 0.12), stop:1 rgba(255, 255, 255, 0.04))"
+            border = "rgba(0, 150, 200, 0.2)"
+            title_color = "#FFFFFF"
+            action_color = "#00BFFF"
+            badge_bg = "rgba(0, 150, 200, 0.15)"
+            badge_color = "#00BFFF"
+            sub_color = "#AAAAAA"
+        else:
+            bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(0, 150, 200, 0.08), stop:1 rgba(255, 255, 255, 0.5))"
+            border = "rgba(0, 150, 200, 0.2)"
+            title_color = "#050505"
+            action_color = "#0096C8"
+            badge_bg = "rgba(0, 150, 200, 0.12)"
+            badge_color = "#007AA3"
+            sub_color = "#666666"
+
+        self.card.setStyleSheet(f"""
+            QWidget#ActionCard {{
+                background: {bg};
+                border-radius: 16px;
+                border: 1px solid {border};
+            }}
+        """)
+
+        self.time_label.setStyleSheet(f"color: {title_color};")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 1px;")
+        self.icon_label.setStyleSheet(f"color: {action_color}; font-size: 13px;")
+        self.tz_badge.setStyleSheet(f"background-color: {badge_bg}; color: {badge_color}; border-radius: 8px; padding: 3px 8px; font-weight: bold;")
+        self.city_label.setStyleSheet(f"color: {sub_color};")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0:
+                return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+
 class MapNavigationWidget(QWidget):
     icon_downloaded = pyqtSignal(object)
 

@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -776,7 +776,17 @@ class OmniWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        
+
+        # macOS: PyQt6 resets the activation policy to Regular when a window is
+        # first shown, making Python appear in the Dock. Re-apply Accessory here
+        # so the Python icon is suppressed every time the window becomes visible.
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().setActivationPolicy_(1)
+            except Exception:
+                pass
+
         # Check for theme change on show
         current_os_theme = self.detect_system_theme()
         if current_os_theme != self.current_theme:
@@ -806,7 +816,13 @@ class OmniWindow(QWidget):
         self.raise_()
         if sys.platform == "darwin":
             try:
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                from AppKit import NSApplication
+                ns_app = NSApplication.sharedApplication()
+                ns_app.activateIgnoringOtherApps_(True)
+                # Re-apply Accessory policy immediately after activation —
+                # activateIgnoringOtherApps_ can cause macOS to promote the
+                # app to Regular, briefly showing "Python" in the Dock.
+                ns_app.setActivationPolicy_(1)
             except Exception as e:
                 logging.debug(f"MacOS activateIgnoringOtherApps failed: {e}")
         elif sys.platform == "win32":
@@ -2636,6 +2652,8 @@ class OmniWindow(QWidget):
                     return CalcActionWidget(a['content'], a.get('equation', ''))
                 elif a.get('type') == 'currency':
                     return CurrencyActionWidget(a.get('amount', '0'), a.get('from_unit', ''), a.get('to_unit', ''), a.get('converted_value', ''))
+                elif a.get('type') == 'world_time':
+                    return WorldTimeWidget(a.get('city', ''), a.get('timezone', ''), a.get('current_time', ''), a.get('date', ''))
                 elif a.get('type') == 'weather':
                     return WeatherActionWidget(a.get('location', ''), a.get('temp', ''), a.get('condition', ''))
                 elif a.get('type') == 'unit':
@@ -3645,7 +3663,7 @@ class OmniWindow(QWidget):
         # If the query already produced a widget-type fast action (currency, unit,
         # translate, calc), skip the AI entirely and just display that widget
         # nicely without any reasoning model involvement.
-        _FAST_WIDGET_TYPES = {'currency', 'unit', 'translate', 'calc'}
+        _FAST_WIDGET_TYPES = {'currency', 'unit', 'translate', 'calc', 'world_time'}
         _fast_actions = [a for a in self.external_actions if isinstance(a, dict) and a.get('type') in _FAST_WIDGET_TYPES]
         if _fast_actions and not self.is_history_mode:
             self.cleanup_worker('search_worker')
@@ -3664,6 +3682,8 @@ class OmniWindow(QWidget):
                     w = TranslateActionWidget(act.get('source_text', ''), act.get('from_lang', ''), act.get('to_lang', ''), act.get('translated_text', ''))
                 elif t == 'calc':
                     w = CalcActionWidget(act.get('content', ''), act.get('equation', ''))
+                elif t == 'world_time':
+                    w = WorldTimeWidget(act.get('city', ''), act.get('timezone', ''), act.get('current_time', ''), act.get('date', ''))
                 else:
                     continue
                 self.insert_list_item(0, w, act, animation="pop")
@@ -4273,6 +4293,10 @@ class OmniWindow(QWidget):
                             insert_pos += 1
                         elif act.get('type') == 'currency':
                             w = CurrencyActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'world_time':
+                            w = WorldTimeWidget(act.get('city', ''), act.get('timezone', ''), act.get('current_time', ''), act.get('date', ''))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'translate':
