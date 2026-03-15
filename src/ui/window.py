@@ -3954,6 +3954,11 @@ class OmniWindow(QWidget):
                 self.insert_list_item(0, answer_widget, "answer")
             else:
                 self.add_list_item(answer_widget, "answer")
+            # After inserting into the list the widget has a real parent chain so
+            # isVisible() returns True — re-compute the item's sizeHint now.
+            # Without this, a slow tool call (e.g. get_calendar_events ~5s) leaves
+            # the item at the 40px stub height until the next partial arrives.
+            QTimer.singleShot(0, answer_widget.update_item_size)
             return
 
         # ── Subsequent partials: buffer data and throttle UI updates ──
