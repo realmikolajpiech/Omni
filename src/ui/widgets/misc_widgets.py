@@ -506,6 +506,8 @@ class CollapsibleThinkingWidget(QWidget):
 
     def set_thinking_text(self, text):
         """Update the thinking text and ensure the widget is visible."""
+        if self.thinking_text.toPlainText() == text:
+            return  # skip redundant update
         self.thinking_text.setPlainText(text)
         self.thinking_text.document().setTextWidth(560)
 
@@ -678,6 +680,11 @@ class _BubbleWidget(QWidget):
         w = 660
         if self.parent() and self.parent().width() > 100:
             w = self.parent().width()
+            # Account for parent layout margins so the bubble doesn't overflow
+            parent_layout = self.parent().layout() if self.parent() else None
+            if parent_layout:
+                m = parent_layout.contentsMargins()
+                w -= m.left() + m.right()
         name_h = self.name_label.sizeHint().height() + 3
         bubble_h = self.bubble.sizeHint_for_width(w).height()
         return QSize(w, name_h + bubble_h + 2)
@@ -702,11 +709,19 @@ class _BubbleInner(QWidget):
         self._bottom_widgets    = []   # settings animation widgets appended below text
         self._highlight_opacity = 0.0
         self._placeholder_shown = False  # set True below when placeholder is created
+        self._cached_size = None  # cached sizeHint result, invalidated on text change
+        self._cached_size_w = -1  # width used for cached size
+        self._last_text = ""  # track last text to skip redundant setMarkdown calls
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(self.PADDING_H, self.PADDING_V,
                                self.PADDING_H, self.PADDING_V)
         lay.setSpacing(8 if is_markdown else 0)
+        self._show_more_label = None
+        self._full_text = ""
+        self._is_truncated = False
+        self._is_expanded = False
+        self._MAX_DISPLAY_CHARS = 200
 
         if is_markdown:
             # Placeholder shown while AI is "thinking" (no answer/thinking content yet)
@@ -733,15 +748,30 @@ class _BubbleInner(QWidget):
             self.label = QLabel()
             self.label.setWordWrap(True)
             self.label.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
-            if sender == "user":
-                self.label.setAlignment(Qt.AlignmentFlag.AlignRight)
             lay.addWidget(self.label)
             self.edit = None
+
+            # Truncation for user bubbles: collapse to ~5 lines
+            self._full_text = ""
+            self._is_truncated = False
+            self._is_expanded = False
+            self._MAX_DISPLAY_CHARS = 200  # ~5 lines worth of text
+            self._show_more_label = None
+            if sender == "user":
+                self._show_more_label = QLabel()
+                self._show_more_label.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+                self._show_more_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                self._show_more_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+                self._show_more_label.setContentsMargins(0, 0, 6, 0)
+                self._show_more_label.setVisible(False)
+                self._show_more_label.mousePressEvent = lambda e: self._toggle_expand()
+                lay.addWidget(self._show_more_label)
 
         self.set_theme(self.current_theme)
 
     def insert_thinking_widget(self, widget):
         """Insert a thinking widget at the top of the bubble content (before answer text)."""
+        self._cached_size = None
         self._extra_top_widgets.append(widget)
         self.layout().insertWidget(0, widget)
         if self.thinking_placeholder is not None:
@@ -749,6 +779,12 @@ class _BubbleInner(QWidget):
             self.thinking_placeholder.setVisible(False)
 
     def set_text(self, text):
+        if text == self._last_text:
+            return  # skip redundant setMarkdown — no change
+        self._last_text = text
+        self._cached_size = None  # invalidate size cache on text change
+        import logging
+        logging.info(f"[_BubbleInner.set_text] sender={self.sender} len={len(text)} edit={self.edit is not None} label={self.label is not None} show_more={self._show_more_label is not None} truncated={len(text) > self._MAX_DISPLAY_CHARS}")
         if self.edit is not None:
             has_text = bool(text and text.strip())
             self.edit.setVisible(has_text)
@@ -759,10 +795,49 @@ class _BubbleInner(QWidget):
             if text:
                 self.edit.setMarkdown(text)
         elif self.label is not None:
-            self.label.setText(text)
+            if self._show_more_label is not None:
+                # User bubble with truncation support
+                self._full_text = text
+                self._is_truncated = len(text) > self._MAX_DISPLAY_CHARS
+                if self._is_truncated:
+                    if not self._is_expanded:
+                        self.label.setText(text[:self._MAX_DISPLAY_CHARS].rstrip() + "...")
+                    else:
+                        self.label.setText(text)
+                    self._show_more_label.setVisible(True)
+                    self._update_show_more_style()
+                else:
+                    self.label.setText(text)
+                    self._show_more_label.setVisible(False)
+            else:
+                self.label.setText(text)
+
+    def _toggle_expand(self):
+        """Toggle between truncated and full text for user bubbles."""
+        self._is_expanded = not self._is_expanded
+        self._cached_size = None
+        self._last_text = ""  # force re-render
+        self.set_text(self._full_text)
+        # Propagate size change up to the list
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'update_item_size'):
+                parent.update_item_size()
+                break
+            parent = parent.parent() if hasattr(parent, 'parent') else None
+
+    def _update_show_more_style(self):
+        if self._show_more_label is None:
+            return
+        label = "Show less" if self._is_expanded else "Show more"
+        t = THEMES.get(self.current_theme, THEMES["light"])
+        color = t.get("text_secondary", "#888888")
+        self._show_more_label.setText(label)
+        self._show_more_label.setStyleSheet(f"color: {color}; background: transparent;")
 
     def append_settings_widget(self, widget):
         """Append a SettingsAnimationWidget below the answer text (inside the bubble)."""
+        self._cached_size = None
         widget.set_theme(self.current_theme)
         self._bottom_widgets.append(widget)
         self.layout().addWidget(widget)
@@ -806,6 +881,8 @@ class _BubbleInner(QWidget):
             self.thinking_placeholder.setStyleSheet(
                 f"color: {ph_color}; background: transparent;"
             )
+        if hasattr(self, '_show_more_label') and self._show_more_label is not None:
+            self._update_show_more_style()
         for w in self._extra_top_widgets:
             if hasattr(w, 'set_theme'):
                 w.set_theme(theme)
@@ -868,6 +945,16 @@ class _BubbleInner(QWidget):
         return int(w * self.MAX_FRACTION)
 
     def sizeHint_for_width(self, total_w):
+        # Return cached size if text hasn't changed and width is the same
+        if self._cached_size is not None and self._cached_size_w == total_w:
+            return self._cached_size
+
+        result = self._compute_size_for_width(total_w)
+        self._cached_size = result
+        self._cached_size_w = total_w
+        return result
+
+    def _compute_size_for_width(self, total_w):
         max_w = int(total_w * self.MAX_FRACTION)
         inner_w = max_w - 2 * self.PADDING_H
 
@@ -941,18 +1028,17 @@ class _BubbleInner(QWidget):
             text = self.label.text()
             fm = QFontMetrics(self.label.font())
             if text:
-                # Keep buffer minimal — text is right-aligned so any extra becomes
-                # phantom left-padding, making the pill look uneven.
-                single_line_w = fm.horizontalAdvance(text) + 2
                 from PyQt6.QtCore import Qt as _Qt
-                if single_line_w > inner_w:
-                    # Text wraps — use full allowed width so it doesn't overflow
+                single_line_w = fm.horizontalAdvance(text) + 2
+                
+                # If text naturally wraps or we are dealing with truncated/expanded text that spans lines
+                if single_line_w > inner_w or self._is_truncated:
                     use_inner_w = inner_w
                     rect = fm.boundingRect(0, 0, inner_w, 100000,
                                            _Qt.TextFlag.TextWordWrap, text)
                     h = rect.height()
                 else:
-                    # Text fits on one line — shrink bubble to fit
+                    # Keep buffer minimal
                     rect = fm.boundingRect(0, 0, single_line_w, 100000,
                                            _Qt.TextFlag.TextWordWrap, text)
                     use_inner_w = min(single_line_w, rect.width() + 2)
@@ -961,10 +1047,16 @@ class _BubbleInner(QWidget):
                 use_inner_w = 60
                 h = fm.height()
 
+            show_more_h = 0
+            if self._show_more_label is not None and self._show_more_label.isVisible():
+                show_more_w = self._show_more_label.sizeHint().width() + 11
+                use_inner_w = max(use_inner_w, show_more_w)
+                show_more_h = self._show_more_label.sizeHint().height() + 4
+
             use_w = use_inner_w + 2 * self.PADDING_H
             self.label.setFixedWidth(use_inner_w)
             self.setFixedWidth(use_w)
-            total_h = h + 2 * self.PADDING_V
+            total_h = h + show_more_h + 2 * self.PADDING_V
             return QSize(use_w, max(total_h, 36))
 
     def sizeHint(self):
@@ -1103,10 +1195,11 @@ class AnswerWidget(QWidget):
                 insert_idx = 1 if (self.chat_mode and self.user_bubble) else 0
                 self.outer_layout.insertWidget(insert_idx, self.thinking_widget)
 
-    def update_thinking(self, text):
+    def update_thinking(self, text, skip_resize=False):
         self.ensure_thinking_widget()
         self.thinking_widget.set_thinking_text(text)
-        self.update_item_size()
+        if not skip_resize:
+            self.update_item_size()
         has_answer = bool(self.text_edit and self.text_edit.toPlainText().strip())
         if self.text_edit:
             self.text_edit.setVisible(has_answer)
@@ -1116,27 +1209,32 @@ class AnswerWidget(QWidget):
         if self.thinking_widget is not None:
             self.thinking_widget.set_open_hint(text)
 
-    def set_thinking_collapsed(self, collapsed):
+    def set_thinking_collapsed(self, collapsed, skip_resize=False):
         if self.thinking_widget is not None:
             self.thinking_widget.set_collapsed(collapsed)
-            self.update_item_size()
+            if not skip_resize:
+                self.update_item_size()
 
-    def set_answer(self, text):
-        """Set the AI answer text through the proper path (hides Thinking… placeholder)."""
+    def set_answer(self, text, skip_resize=False):
+        """Set the AI answer text through the proper path (hides Thinking… placeholder).
+        If skip_resize is True, text is updated but layout recalculation is deferred."""
+        prev = getattr(self, '_answer_text', '')
         self._answer_text = text  # save it
         visible = getattr(self, '_answer_visible', True)
         text_to_show = text if visible else ""
-        
+
         if self.chat_mode and self.ai_bubble is not None:
+            # _BubbleInner.set_text has its own skip-if-unchanged check
             self.ai_bubble.bubble.set_text(text_to_show)
             self.ai_bubble.setVisible(True)
         elif self.text_edit is not None:
             has_text = bool(text_to_show and text_to_show.strip())
             self.text_edit.setVisible(has_text)
-            if text_to_show:
+            if text_to_show and text != prev:
                 self.text_edit.setMarkdown(text_to_show)
         # Always update item size so the list allocates correct height
-        self.update_item_size()
+        if not skip_resize:
+            self.update_item_size()
 
     def set_answer_visible(self, visible):
         """Toggle the visibility of the text block by rendering empty text when hidden. This shrinks the bubble correctly without leaving empty space."""
@@ -1145,10 +1243,11 @@ class AnswerWidget(QWidget):
         text = getattr(self, '_answer_text', '')
         self.set_answer(text)
 
-    def set_thinking_header(self, text):
+    def set_thinking_header(self, text, skip_resize=False):
         if self.thinking_widget is not None:
             self.thinking_widget.set_header_label(text)
-            self.update_item_size()
+            if not skip_resize:
+                self.update_item_size()
 
     def hide_thinking_and_play_done(self, action_label=None):
         """Collapse thinking block and play a short 'done' highlight. Rename label if provided."""

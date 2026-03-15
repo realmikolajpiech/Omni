@@ -257,6 +257,7 @@ class OmniWindow(QWidget):
             }
         """)
         self.input_field.setFrame(False) # Important for Qt widgets to remove native frame
+        self.input_field.setMaxLength(750)
         self.input_field.setPlaceholderText("Search or ask...")
         self.input_field.textChanged.connect(self.on_text_changed)
         self.input_field.returnPressed.connect(self.on_entered)
@@ -369,6 +370,11 @@ class OmniWindow(QWidget):
         self.chat_history = []
         self.is_history_mode = False
         self._streaming_answer_widget = None  # tracks widget currently being streamed
+        self._pending_partial_data = None  # buffered partial for throttled UI update
+        self._partial_flush_timer = QTimer(self)
+        self._partial_flush_timer.setSingleShot(True)
+        self._partial_flush_timer.setInterval(80)  # ~12 FPS cap for layout updates
+        self._partial_flush_timer.timeout.connect(self._flush_partial_update)
         self._continuation_thinking_prefix = ""  # thinking text prepended on request_permission re-run
         self._continuation_pending = False  # True while waiting for user to approve request_permission
         self._pending_open_file = None  # file path shown as "Enter to open" hint after AI response
@@ -1424,15 +1430,17 @@ class OmniWindow(QWidget):
         if not force and hasattr(self, 'is_entry_animating') and self.is_entry_animating:
             # Don't interrupt entry animation
             return
-        
+
         list_h = 0
         count = self.list_widget.count()
-        
+
         if count > 0:
             self.divider.show()
             self.list_widget.show()
             for i in range(count):
                 item = self.list_widget.item(i)
+                # Use already-set sizeHint (cached by update_item_size / setSizeHint)
+                # instead of recomputing via the widget's sizeHint() method
                 list_h += item.sizeHint().height() + 6 # Add margin-bottom from CSS
             
             base_h = 84 
@@ -3859,65 +3867,40 @@ class OmniWindow(QWidget):
                 self.tts_worker.finished_speaking.connect(self.on_tts_finished)
                 self.tts_worker.start()
                 self.is_tts_playing = True
-            
+
             # Get new content
             if len(answer) > self.tts_spoken_len:
                 new_content = answer[self.tts_spoken_len:]
                 self.tts_buffer += new_content
                 self.tts_spoken_len = len(answer)
-                
-                # Check for sentence boundaries
-                # Split by punctuation (. ! ? , : ;) followed by space or newline
-                # We use regex capture group to keep the delimiter
+
                 import re
-                
-                # More robust splitting to catch "Hello, how are you?" etc.
-                # Don't split on comma alone as it breaks flow too much, but .!? is good.
-                # User wants faster TTS start, so we include comma/colon/semicolon too.
-                # Added comma to make it more responsive
                 parts = re.split(r'([.!?]+[\s\n]+)', self.tts_buffer)
-                
-                # If we have at least one delimiter, we can process the sentence
-                # We need [Sentence, Delimiter, NextPart...]
-                
+
                 while len(parts) >= 2:
                     segment = parts.pop(0)
                     delimiter = parts.pop(0)
-                    
+
                     full_sentence = segment + delimiter
-                    
+
                     # Ignore short fragments that might be artifacts
                     if len(full_sentence.strip()) > 2:
                         logging.info(f"Queueing TTS chunk: {full_sentence[:30]}...")
                         self.tts_worker.add_text(full_sentence)
-                
+
                 # Keep the rest in buffer
                 self.tts_buffer = "".join(parts)
 
-        # Use the tracked streaming widget for this query; never touch old history widgets
-        answer_widget = self._streaming_answer_widget
-        answer_item = None
-        if answer_widget is not None:
-            # Find the corresponding list item
-            for i in range(self.list_widget.count()):
-                item = self.list_widget.item(i)
-                if self._unwrap_answer_widget(item) is answer_widget:
-                    answer_item = item
-                    break
-
-        if answer_widget is None:
-            # First partial: Remove "Thinking..." widget first
-            # We need to find the thinking widget index, and see if there is a separator below it.
+        # ── First partial: create the widget (must happen immediately) ──
+        if self._streaming_answer_widget is None:
             thinking_idx = -1
             for i in range(self.list_widget.count()):
                 item = self.list_widget.item(i)
                 if item.data(Qt.ItemDataRole.UserRole) == "thinking":
                     thinking_idx = i
                     break
-            
+
             if thinking_idx != -1:
-                # Check if next item is separator (thinking is at top/0 usually, so separator at 1)
-                # First remove separator if it exists below thinking
                 if thinking_idx + 1 < self.list_widget.count():
                     next_item = self.list_widget.item(thinking_idx + 1)
                     if next_item.data(Qt.ItemDataRole.UserRole) == "separator":
@@ -3925,19 +3908,16 @@ class OmniWindow(QWidget):
                         if taken_sep:
                             w = self.list_widget.itemWidget(taken_sep)
                             if w: w.deleteLater()
-                
-                # Then remove thinking
+
                 taken_think = self.list_widget.takeItem(thinking_idx)
                 if taken_think:
                     w = self.list_widget.itemWidget(taken_think)
                     if w: w.deleteLater()
 
-            # Create widget WITHOUT thinking in constructor, add it dynamically
             prepend = self.is_history_mode
             if prepend and self.list_widget.count() > 0:
                 self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
 
-            # Normal (first) query streaming: simple answer view, no bubbles
             current_query = getattr(self, '_current_query', self.input_field.text())
             answer_widget = AnswerWidget("", query_text=current_query, chat_mode=False)
             self._streaming_answer_widget = answer_widget
@@ -3947,48 +3927,67 @@ class OmniWindow(QWidget):
                 answer_widget.update_thinking(thinking)
                 answer_widget.set_thinking_collapsed(False)
 
+            if answer:
+                answer_widget.set_answer(answer)
+
             if prepend:
                 self.insert_list_item(0, answer_widget, "answer")
             else:
                 self.add_list_item(answer_widget, "answer")
-        else:
-            # Update existing: stream thinking in collapsible, answer in main
-            if thinking and thinking.strip():
-                answer_widget.ensure_thinking_widget()
-                answer_widget.update_thinking(thinking)
+            return
 
-            if answer:
-                # Collapse thinking when answer starts appearing
-                if thinking:
-                    answer_widget.set_thinking_collapsed(True)
-                # set_answer also calls update_item_size() internally
-                answer_widget.set_answer(answer)
-            elif answer_item is not None:
-                # No answer yet but size may have changed (thinking expanded)
-                answer_item.setSizeHint(answer_widget.sizeHint())
-                self.adjust_window_height(animate=False)
+        # ── Subsequent partials: buffer data and throttle UI updates ──
+        self._pending_partial_data = data
+        if not self._partial_flush_timer.isActive():
+            self._partial_flush_timer.start()
+
+    def _flush_partial_update(self):
+        """Apply the latest buffered partial data to the streaming widget (throttled)."""
+        data = self._pending_partial_data
+        if data is None:
+            return
+        self._pending_partial_data = None
+
+        answer_widget = self._streaming_answer_widget
+        if answer_widget is None:
+            return
+
+        thinking = data.get("thinking", "")
+        answer = data.get("answer", "")
+
+        # Prepend continuation thinking prefix
+        if self._continuation_thinking_prefix and thinking:
+            thinking = self._continuation_thinking_prefix + "\n\n" + thinking
+        elif self._continuation_thinking_prefix and not thinking:
+            thinking = self._continuation_thinking_prefix
+
+        # Update thinking (skip_resize — we do one layout pass at the end)
+        if thinking and thinking.strip():
+            answer_widget.ensure_thinking_widget()
+            answer_widget.update_thinking(thinking, skip_resize=True)
+
+        if answer:
+            if thinking:
+                answer_widget.set_thinking_collapsed(True, skip_resize=True)
+            # skip_resize — single layout pass below
+            answer_widget.set_answer(answer, skip_resize=True)
 
         # Update collapsible header label (from tool calls or terminal commands)
         thinking_header = data.get("thinking_header", "")
-        if thinking_header and answer_widget:
-            answer_widget.set_thinking_header(thinking_header)
-            if answer_item is not None:
-                answer_item.setSizeHint(answer_widget.sizeHint())
+        if thinking_header:
+            answer_widget.set_thinking_header(thinking_header, skip_resize=True)
 
         actions = data.get("actions", [])
-        if actions and answer_widget:
+        if actions:
             for act in actions:
                 if isinstance(act, dict) and act.get("type") == "terminal_command" and act.get("description"):
                     action_label = str(act.get("description")).strip().capitalize()
-                    answer_widget.set_thinking_header(action_label)
-                    answer_widget.set_thinking_collapsed(True)
-                    if answer_item is not None:
-                        answer_item.setSizeHint(answer_widget.sizeHint())
+                    answer_widget.set_thinking_header(action_label, skip_resize=True)
+                    answer_widget.set_thinking_collapsed(True, skip_resize=True)
                     break
 
-        self.list_widget.update()
-        if hasattr(self, "adjust_window_height"):
-            self.adjust_window_height(animate=False)
+        # Single layout pass for all changes above
+        answer_widget.update_item_size()
 
     def _upgrade_to_chat_bubbles(self):
         """Convert any remaining simple (chat_mode=False) AnswerWidgets to chat bubble layout.
@@ -4046,6 +4045,11 @@ class OmniWindow(QWidget):
             self.frame.set_minimal_mode(False)
 
     def on_ai_response(self, data):
+        # Flush any buffered partial update before processing final response
+        self._partial_flush_timer.stop()
+        if self._pending_partial_data is not None:
+            self._flush_partial_update()
+
         self.logo_label.stop_spinning()
 
         # Sync real backend usage count — each query may trigger multiple LLM
