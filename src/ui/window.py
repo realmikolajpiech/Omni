@@ -4058,6 +4058,7 @@ class OmniWindow(QWidget):
         # the next show, even after WA_MacShowFocusRect is suppressed.
         if self.isVisible():
             self.input_field.setFocus()
+            self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.follow_up_widget.set_mode("followup")
 
         if not self.is_history_mode:

@@ -565,6 +565,7 @@ class CollapsibleThinkingWidget(QWidget):
             self.thinking_text.setFixedHeight(int(doc_height + 24))
 
         self.content_widget.setVisible(new_visibility)
+        self.layout.invalidate()
 
         self.size_changed.emit()
         self.updateGeometry()
@@ -573,6 +574,13 @@ class CollapsibleThinkingWidget(QWidget):
             if hasattr(parent, 'updateGeometry'):
                 parent.updateGeometry()
             parent = parent.parent()
+
+    def sizeHint(self):
+        btn_h = self.header_button.sizeHint().height()
+        if self.content_widget.isVisible():
+            content_h = self.content_widget.sizeHint().height()
+            return QSize(super().sizeHint().width(), btn_h + self.layout.spacing() + content_h)
+        return QSize(super().sizeHint().width(), btn_h)
 
     def toggle_content(self):
         is_visible = self.content_widget.isVisible()
@@ -1127,14 +1135,16 @@ class AnswerWidget(QWidget):
         self.thinking_widget = None
         if thinking_text and thinking_text.strip():
             self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
-            self.thinking_widget.size_changed.connect(self.update_item_size)
             if chat_mode and self.ai_bubble:
-                # In chat mode: thinking lives inside the AI bubble (above answer text)
+                # In chat mode: thinking lives inside the AI bubble (above answer text).
+                # insert_thinking_widget connects _invalidate_size_cache — must happen
+                # BEFORE connecting update_item_size so cache is cleared first.
                 self.ai_bubble.bubble.insert_thinking_widget(self.thinking_widget)
             else:
                 # In simple mode: thinking sits above the answer text area.
                 # insertWidget(0) ensures it precedes the text_edit that was just added.
                 self.outer_layout.insertWidget(0, self.thinking_widget)
+            self.thinking_widget.size_changed.connect(self.update_item_size)
 
         # Legacy alias
         self.query_label = self.user_bubble.name_label if self.user_bubble else None
@@ -1198,15 +1208,17 @@ class AnswerWidget(QWidget):
     def ensure_thinking_widget(self):
         if self.thinking_widget is None:
             self.thinking_widget = CollapsibleThinkingWidget("")
-            self.thinking_widget.size_changed.connect(self.update_item_size)
             self.thinking_widget.set_theme(self.current_theme)
             if self.chat_mode and self.ai_bubble:
-                # In chat mode: insert thinking inside AI bubble (before answer text)
+                # In chat mode: insert thinking inside AI bubble (before answer text).
+                # insert_thinking_widget connects _invalidate_size_cache — must happen
+                # BEFORE connecting update_item_size so cache is cleared first.
                 self.ai_bubble.bubble.insert_thinking_widget(self.thinking_widget)
             else:
                 # In simple mode: insert before AI content
                 insert_idx = 1 if (self.chat_mode and self.user_bubble) else 0
                 self.outer_layout.insertWidget(insert_idx, self.thinking_widget)
+            self.thinking_widget.size_changed.connect(self.update_item_size)
 
     def update_thinking(self, text, skip_resize=False):
         self.ensure_thinking_widget()
