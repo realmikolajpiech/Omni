@@ -9,7 +9,6 @@ memvid_sdk
 PyQt6
 Pillow
 watchdog
-packaging
 pypdf
 python-docx
 openpyxl
@@ -20,7 +19,6 @@ keyboard
 
 # AI / LLM (Groq + xAI via OpenAI-compatible API)
 openai
-groq
 huggingface_hub[hf_xet]
 
 # Voice (ASR & TTS)
@@ -32,9 +30,6 @@ openwakeword
 onnxruntime
 edge-tts
 langdetect
-
-# Utils
-pytz
 
 # Windows specific
 pywin32; sys_platform == 'win32'

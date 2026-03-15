@@ -944,14 +944,19 @@ class _BubbleInner(QWidget):
                 # Keep buffer minimal — text is right-aligned so any extra becomes
                 # phantom left-padding, making the pill look uneven.
                 single_line_w = fm.horizontalAdvance(text) + 2
-                natural_inner_w = min(single_line_w, inner_w)
-                # Compute height at this natural width (may wrap for very long text)
                 from PyQt6.QtCore import Qt as _Qt
-                rect = fm.boundingRect(0, 0, natural_inner_w, 100000,
-                                       _Qt.TextFlag.TextWordWrap, text)
-                
-                use_inner_w = min(natural_inner_w, rect.width() + 2)
-                h = rect.height()
+                if single_line_w > inner_w:
+                    # Text wraps — use full allowed width so it doesn't overflow
+                    use_inner_w = inner_w
+                    rect = fm.boundingRect(0, 0, inner_w, 100000,
+                                           _Qt.TextFlag.TextWordWrap, text)
+                    h = rect.height()
+                else:
+                    # Text fits on one line — shrink bubble to fit
+                    rect = fm.boundingRect(0, 0, single_line_w, 100000,
+                                           _Qt.TextFlag.TextWordWrap, text)
+                    use_inner_w = min(single_line_w, rect.width() + 2)
+                    h = rect.height()
             else:
                 use_inner_w = 60
                 h = fm.height()

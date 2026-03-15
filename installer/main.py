@@ -700,6 +700,94 @@ class InstallWorker(QThread):
             pass
         self.log_line.emit(line)
 
+    def _run_pip_streaming(self, pip_bin: str, req_file: str, env: dict, start_pct: int, end_pct: int) -> int:
+        """Run pip install -r req_file with live output streaming and progress updates."""
+        import re as _re
+        try:
+            with open(req_file) as _f:
+                total_pkgs = max(1, sum(
+                    1 for l in _f
+                    if l.strip() and not l.strip().startswith("#")
+                ))
+        except Exception:
+            total_pkgs = 35
+
+        cmd = [pip_bin, "install", "-r", req_file, "--progress-bar", "off"]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, env=env, bufsize=1,
+            )
+        except Exception as e:
+            self._tlog(f"FAIL: pip Popen: {e}")
+            return 1
+
+        _collect_re = _re.compile(r"^Collecting (\S+)", _re.I)
+        _already_re = _re.compile(r"^Requirement already satisfied: (\S+)", _re.I)
+        collected = 0
+
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            if not line:
+                continue
+            self._tlog(line)
+            m = _collect_re.match(line)
+            if m:
+                pkg = m.group(1).split("==")[0].split(">=")[0].split("[")[0]
+                collected += 1
+                pct = start_pct + int((end_pct - start_pct) * min(collected / total_pkgs, 0.85))
+                self.progress.emit(pct, f"Downloading {pkg}…")
+            elif _already_re.match(line):
+                collected += 1
+            elif "Installing collected packages" in line:
+                self.progress.emit(start_pct + int((end_pct - start_pct) * 0.9), "Installing packages…")
+            elif line.startswith("Successfully installed"):
+                self.progress.emit(end_pct, "Packages installed ✓")
+
+        proc.wait()
+        return proc.returncode
+
+    def _run_uv_streaming(self, uv_bin: str, req_file: str, env: dict, start_pct: int, end_pct: int) -> int:
+        """Run uv pip install -r req_file with live output streaming and progress updates."""
+        import re as _re
+
+        cmd = [uv_bin, "pip", "install", "-r", req_file]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, env=env, bufsize=1,
+            )
+        except Exception as e:
+            self._tlog(f"FAIL: uv Popen: {e}")
+            return 1
+
+        # uv output patterns
+        _pkg_re      = _re.compile(r"^\s+[✓⠼⠸⠴⠦⠧⠇⠏]\s+(\S+)")
+        _dl_total_re = _re.compile(r"Downloading packages \((.+?) total\)")
+        _installed_re = _re.compile(r"Installed \d+ packages")
+        downloaded = 0
+
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            if not line:
+                continue
+            self._tlog(line)
+            m = _pkg_re.match(line)
+            if m:
+                pkg = m.group(1).split("==")[0].split(">=")[0].split("[")[0]
+                downloaded += 1
+                pct = start_pct + int((end_pct - start_pct) * min(downloaded / 35, 0.9))
+                self.progress.emit(pct, f"Downloading {pkg}…")
+            elif _dl_total_re.search(line):
+                self.progress.emit(start_pct + int((end_pct - start_pct) * 0.1), "Downloading packages…")
+            elif _installed_re.search(line):
+                self.progress.emit(end_pct, "Packages installed ✓")
+            elif "Resolved" in line:
+                self.progress.emit(start_pct + int((end_pct - start_pct) * 0.05), "Resolving packages…")
+
+        proc.wait()
+        return proc.returncode
+
     def run(self):
         try:
             self._install()
@@ -881,10 +969,21 @@ class InstallWorker(QThread):
             return
         self._tlog(f"OK: Python found → {py_cmd}")
 
-        self.progress.emit(25, "Installing system dependencies…")
-        self._tlog("STEP: brew install ffmpeg portaudio")
-        self._run_cmd(["brew", "install", "ffmpeg", "portaudio"], env=env)
-        self._tlog("OK: system deps done")
+        self.progress.emit(25, "Checking system dependencies…")
+        self._tlog("STEP: brew install ffmpeg portaudio (check first)")
+        _brew_bin = shutil.which("brew", path=env.get("PATH")) or "brew"
+        _missing_deps = []
+        for _dep in ("ffmpeg", "portaudio"):
+            _rc, _, _ = self._run_cmd([_brew_bin, "list", "--formula", _dep], env=env)
+            if _rc != 0:
+                _missing_deps.append(_dep)
+        if _missing_deps:
+            self.progress.emit(25, f"Installing {', '.join(_missing_deps)}…")
+            self._tlog(f"  installing missing: {_missing_deps}")
+            self._run_cmd([_brew_bin, "install"] + _missing_deps, env=env)
+            self._tlog(f"OK: installed {_missing_deps}")
+        else:
+            self._tlog("OK: ffmpeg and portaudio already present — skipped")
 
         self.progress.emit(35, "Copying Omni…")
         self._tlog("STEP: copying Omni files")
@@ -932,19 +1031,71 @@ class InstallWorker(QThread):
         pip_cmd = str(venv_dir / "bin" / "pip")
         python_venv = str(venv_dir / "bin" / "python3")
         self._tlog("STEP: pip upgrade")
-        self._run_cmd([pip_cmd, "install", "--upgrade", "pip", "--quiet", "--no-cache-dir"], env=env)
+        self._run_cmd([pip_cmd, "install", "--upgrade", "pip", "--quiet"], env=env)
         self._tlog("OK: pip upgraded")
 
-        self.progress.emit(55, "Installing requirements…")
+        # Try to use uv for fast parallel package installation
+        uv_bin = shutil.which("uv", path=env.get("PATH")) or str(venv_dir / "bin" / "uv")
+        if not os.path.isfile(uv_bin) and not shutil.which("uv", path=env.get("PATH")):
+            self._tlog("STEP: pip install uv (fast installer)")
+            self.progress.emit(52, "Setting up fast installer…")
+            rc_uv, _, _ = self._run_cmd([pip_cmd, "install", "uv", "--quiet"], env=env)
+            self._tlog(f"{'OK' if rc_uv == 0 else 'WARN'}: uv install rc={rc_uv}")
+            uv_bin = str(venv_dir / "bin" / "uv") if rc_uv == 0 else None
+        use_uv = bool(uv_bin and os.path.isfile(uv_bin))
+        self._tlog(f"Package installer: {'uv' if use_uv else 'pip (fallback)'}")
+
+        # Kick off model download in background so it overlaps with pip install
+        import threading as _threading
+        _models_done  = _threading.Event()
+        _models_err   = [None]
+
+        def _download_models_bg():
+            self._tlog("STEP[bg]: download_models(model_names=[]) — base preprocessing models")
+            try:
+                rc, _, err = self._run_cmd(
+                    [python_venv, "-c",
+                     "from openwakeword.utils import download_models; download_models(model_names=[])"],
+                    env=env,
+                )
+                if rc != 0:
+                    _models_err[0] = err
+                    self._tlog(f"WARN[bg]: download_models rc={rc}: {err}")
+                else:
+                    self._tlog("OK[bg]: wakeword base models downloaded")
+            except Exception as e:
+                _models_err[0] = str(e)
+                self._tlog(f"WARN[bg]: download_models exception: {e}")
+            finally:
+                _models_done.set()
+
+        _models_thread = _threading.Thread(target=_download_models_bg, daemon=True)
+        _models_thread.start()
+        self._tlog("STEP: parallel — pip install (main) + model download (background)")
+
+        # pip/uv install with live streaming progress
         req_file = INSTALL_DIR / "requirements.txt"
-        self._tlog(f"STEP: pip install -r requirements.txt ({req_file})")
-        self._run_cmd([pip_cmd, "install", "-r", str(req_file), "--quiet", "--no-cache-dir"], env=env)
+        if use_uv:
+            self._tlog("STEP: uv pip install -r requirements.txt (streaming)")
+            self.progress.emit(55, "Installing requirements…")
+            uv_env = {**env, "VIRTUAL_ENV": str(venv_dir), "UV_NO_PROGRESS": "1"}
+            rc = self._run_uv_streaming(uv_bin, str(req_file), uv_env, 55, 88)
+        else:
+            self._tlog("STEP: pip install -r requirements.txt (streaming)")
+            self.progress.emit(55, "Installing requirements…")
+            rc = self._run_pip_streaming(pip_cmd, str(req_file), env, 55, 88)
+        if rc != 0:
+            _models_done.wait(timeout=10)
+            self.finished_err.emit("Requirements installation failed. Check your internet connection and try again.")
+            return
         self._tlog("OK: requirements installed")
 
-        self.progress.emit(90, "Downloading voice activation models…")
-        self._tlog("STEP: download_models(model_names=[]) — base preprocessing models only")
-        self._run_cmd([python_venv, "-c", "from openwakeword.utils import download_models; download_models(model_names=[])"], env=env)
-        self._tlog("OK: wakeword base models downloaded")
+        # Wait for background model download (usually already done since pip takes longer)
+        if not _models_done.is_set():
+            self.progress.emit(89, "Finishing model download…")
+            self._tlog("WAIT: model download still in progress…")
+            _models_done.wait()
+        self._tlog("OK: model download complete")
 
         self.progress.emit(93, "Compiling speech recognition engine…")
         self._tlog("STEP: swiftc compile streaming_asr")
@@ -1152,6 +1303,13 @@ class InstallPage(QWidget):
         v.addLayout(footer)
 
     def start_install(self):
+        # Reset any previous error/failure state
+        self.err_lbl.setText("")
+        self.step_lbl.setText("Starting…")
+        self.step_lbl.setStyleSheet(f"color: {TEXT_SEC}; font-size: 13px;")
+        self.prog_bar.set_value(0)
+        self.pct_lbl.setText("0%")
+        self.next_btn.setEnabled(False)
         self.back_btn.setEnabled(False)
         self.worker = InstallWorker()
         self.worker.progress.connect(self._on_progress)

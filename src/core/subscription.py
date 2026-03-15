@@ -103,6 +103,7 @@ def _fetch_status() -> dict:
     # RLS ensures they can only read their own row. This is the most reliable
     # source of truth and doesn't depend on the worker or KV being correct.
     supabase_auth_failed = False
+    supabase_plan = None  # set when Supabase responds OK (even for free users)
     if token:
         try:
             req = urllib.request.Request(
@@ -117,6 +118,7 @@ def _fetch_status() -> dict:
                 rows = json.loads(r.read())
             if rows and rows[0].get("plan") == "pro" and rows[0].get("status") == "active":
                 return {"plan": "pro", "daily_usage": 0, "daily_limit": 999, "error": None}
+            supabase_plan = "free"  # Supabase responded OK; user is on free plan
         except Exception as e:
             print(f"[subscription] supabase check failed: {e}")
             supabase_auth_failed = True
@@ -151,4 +153,6 @@ def _fetch_status() -> dict:
         }
     except Exception as e:
         logging.debug(f"[subscription] fetch failed: {e}")
-        return {"error": str(e)}
+        # Don't surface backend errors to the user — either we know their plan
+        # from Supabase already, or they're not logged in and a 403 is expected.
+        return {"plan": supabase_plan or "free", "daily_usage": 0, "daily_limit": 10, "error": None}

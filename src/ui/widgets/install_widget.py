@@ -231,6 +231,22 @@ class InstallProgressWidget(QWidget):
         if hasattr(self.window(), 'adjust_window_height'):
             self.window().adjust_window_height()
 
+    def reset(self):
+        """Reset widget to initial state so it can be reused for a retry."""
+        self._finished = False
+        display_name = self.app_name.replace('-', ' ').title()
+        self.icon_label.setText("📦")
+        self.title_label.setText(f"Installing {display_name}")
+        self.progress_bar._failure = False
+        self.progress_bar._success = False
+        self.progress_bar._indeterminate = True
+        self.progress_bar._timer.start(16)
+        self.progress_bar.update()
+        self.list_widget.clear()
+        self.list_widget.hide()
+        self._apply_theme()
+        self.status_label.setText("Preparing…")
+
     def on_candidate_selected(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
         self.candidate_confirmed.emit(data)

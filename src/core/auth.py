@@ -263,12 +263,18 @@ def sign_up(email: str, password: str) -> tuple[bool, str]:
         if data.get("error"):
             return False, data["error"].get("message", "Sign-up failed.")
 
-        # Email confirmation required
-        if not data.get("access_token"):
-            return True, "Check your email to confirm your account, then sign in."
+        # Got a token immediately (email confirmation disabled)
+        if data.get("access_token"):
+            _save_session(data["access_token"], data.get("refresh_token", ""), data.get("user", {}))
+            return True, "Account created!"
 
-        _save_session(data["access_token"], data.get("refresh_token", ""), data.get("user", {}))
-        return True, "Account created!"
+        # Email confirmation may be required — try signing in anyway.
+        # If the Supabase project has email confirmation disabled this will succeed.
+        ok, msg = sign_in(email.strip(), password)
+        if ok:
+            return True, "Account created!"
+
+        return True, "Check your email to confirm your account, then sign in."
     except Exception as e:
         return False, f"Connection error: {e}"
 
@@ -297,6 +303,8 @@ def sign_in(email: str, password: str) -> tuple[bool, str]:
             msg = body.get("error_description") or body.get("msg") or body.get("error") or "Sign-in failed."
         except Exception:
             msg = "Invalid email or password."
+        if "not confirmed" in msg.lower():
+            msg = "Email not confirmed — please check your inbox and click the confirmation link."
         return False, msg
     except Exception as e:
         return False, f"Connection error: {e}"

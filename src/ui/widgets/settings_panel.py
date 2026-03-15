@@ -263,53 +263,75 @@ class _TrustCapabilityPanel(QWidget):
             elif item.layout():
                 self._clear_layout(item.layout())
 
-        dark     = self._theme == "dark"
-        primary  = "#FFFFFF" if dark else "#111111"
-        secondary= "#AAAAAA" if dark else "#777777"
-        accent   = "#C084FC" if dark else "#7C3AED"
+        dark      = self._theme == "dark"
+        primary   = "#FFFFFF" if dark else "#111111"
+        secondary = "#999999" if dark else "#777777"
+        accent    = "#C084FC" if dark else "#7C3AED"
+        div_col   = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.08)"
+        badge_bg  = "rgba(192,132,252,0.15)" if dark else "rgba(124,58,237,0.10)"
+        badge_bd  = "rgba(192,132,252,0.38)" if dark else "rgba(124,58,237,0.32)"
 
-        def _lbl(text, font_family, size, color, bold=False, italic=False, wrap=False):
+        def _lbl(text, family, size, color, bold=False):
             l = QLabel(text)
-            f = QFont(font_family, size)
+            f = QFont(family, size)
             f.setBold(bold)
-            f.setItalic(italic)
             l.setFont(f)
             l.setStyleSheet(f"background: transparent; color: {color};")
-            if wrap:
-                l.setWordWrap(True)
             return l
-
-        def _row(icon, text, icon_color, text_color, font_size=10):
-            w = QWidget()
-            w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            h = QHBoxLayout(w)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(9)
-            dot = _lbl(icon, "Manrope", font_size, icon_color, bold=True)
-            dot.setFixedWidth(14)
-            cap = _lbl(text, "Manrope", font_size, text_color)
-            h.addWidget(dot)
-            h.addWidget(cap)
-            h.addStretch()
-            return w
 
         def _divider():
             f = QFrame()
             f.setFixedHeight(1)
-            f.setStyleSheet(
-                f"background: {'rgba(255,255,255,0.10)' if dark else 'rgba(0,0,0,0.08)'};"
-            )
+            f.setStyleSheet(f"background: {div_col};")
             return f
 
-        # Level name header
-        self._inner.addWidget(_lbl(_TRUST_NAMES[self._level], "Instrument Serif", 15, primary))
-        self._inner.addSpacing(12)
+        def _cap_row(text):
+            w = QWidget()
+            w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 3, 0, 3)
+            h.setSpacing(10)
+            check = _lbl("✓", "Manrope", 10, accent, bold=True)
+            check.setFixedWidth(12)
+            cap = _lbl(text, "Manrope", 10, primary)
+            cap.setWordWrap(True)
+            h.addWidget(check, 0, Qt.AlignmentFlag.AlignTop)
+            h.addWidget(cap, 1)
+            return w
 
-        # All enabled capabilities (cumulative)
+        # ── Header row: level name + badge ───────────────────────────
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(10)
+        hdr.addWidget(_lbl(_TRUST_NAMES[self._level], "Manrope", 13, primary, bold=True))
+        hdr.addStretch()
+        badge = _lbl(f"Level {self._level}", "Manrope", 9, accent, bold=True)
+        badge.setStyleSheet(
+            f"background: {badge_bg}; border: 1px solid {badge_bd}; "
+            f"border-radius: 5px; color: {accent}; padding: 2px 8px;"
+        )
+        hdr.addWidget(badge)
+        self._inner.addLayout(hdr)
+        self._inner.addSpacing(18)
+
+        # ── Capabilities grouped by level ─────────────────────────────
+        _GROUP_NAMES = {1: "Basic", 2: "Automation", 3: "Privileged"}
         for l in range(1, self._level + 1):
+            if l > 1:
+                self._inner.addSpacing(14)
+                self._inner.addWidget(_divider())
+                self._inner.addSpacing(12)
+
+            grp_lbl = _lbl(
+                f"Level {l}  ·  {_GROUP_NAMES.get(l, '')}",
+                "Manrope", 8, secondary, bold=True
+            )
+            self._inner.addWidget(grp_lbl)
+            self._inner.addSpacing(8)
+
             for cap in _ALL_CAPS[l]:
-                self._inner.addWidget(_row("✓", cap, accent, primary))
-                self._inner.addSpacing(5)
+                self._inner.addWidget(_cap_row(cap))
+                self._inner.addSpacing(4)
 
         self._inner.addStretch()
         self.adjustSize()
@@ -351,6 +373,14 @@ def _font(family: str, size: int, bold: bool = False, italic: bool = False) -> Q
     if italic:
         f.setItalic(True)
     return f
+
+
+def _section_header(text: str) -> QLabel:
+    """Small uppercase section label for grouping related settings."""
+    lbl = QLabel(text.upper())
+    lbl.setObjectName("SectionLabel")
+    lbl.setFont(_font("Manrope", 9, bold=True))
+    return lbl
 
 
 def _make_google_icon(size: int = 18) -> QIcon:
@@ -477,9 +507,9 @@ class _PlanCard(QWidget):
         super().__init__(parent)
         self._featured = featured
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(10)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(0)
         self._inner = lay
 
     def paintEvent(self, event):
@@ -504,7 +534,7 @@ class _UpgradeBox(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setContentsMargins(20, 18, 20, 18)
         lay.setSpacing(10)
         self._inner = lay
 
@@ -527,7 +557,7 @@ class _FeedbackFormCard(QWidget):
         self._dark = dark
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setContentsMargins(24, 22, 24, 22)
         lay.setSpacing(0)
         self._inner = lay
 
@@ -550,6 +580,149 @@ class _FeedbackFormCard(QWidget):
         p.fillPath(path, QBrush(bg))
         p.setPen(QPen(border, 1))
         p.drawPath(path)
+
+
+class _FbTypeCard(QWidget):
+    """Selectable type-option card for the feedback form (feature request / bug report)."""
+
+    clicked_sig = pyqtSignal()
+
+    _INDIGO_BORDER = QColor(99, 102, 241, 200)
+    _INDIGO_BG     = QColor(99, 102, 241,  28)
+    _ROSE_BORDER   = QColor(244,  63,  94, 200)
+    _ROSE_BG       = QColor(244,  63,  94,  28)
+
+    def __init__(self, icon: str, title: str, desc: str,
+                 fb_type: str, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._dark = dark
+        self._selected = False
+        self._fb_type = fb_type
+        if fb_type == "feature_request":
+            self._sel_border, self._sel_bg = self._INDIGO_BORDER, self._INDIGO_BG
+        else:
+            self._sel_border, self._sel_bg = self._ROSE_BORDER, self._ROSE_BG
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(90)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(5)
+
+        icon_lbl = QLabel(icon)
+        icon_lbl.setFont(_font("Manrope", 20))
+        icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        icon_lbl.setStyleSheet("background: transparent;")
+
+        self._title_lbl = QLabel(title)
+        self._title_lbl.setFont(_font("Manrope", 12, bold=True))
+        self._title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._title_lbl.setStyleSheet("background: transparent;")
+
+        self._desc_lbl = QLabel(desc)
+        self._desc_lbl.setFont(_font("Manrope", 10))
+        self._desc_lbl.setWordWrap(True)
+        self._desc_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._desc_lbl.setStyleSheet("background: transparent;")
+
+        lay.addWidget(icon_lbl)
+        lay.addWidget(self._title_lbl)
+        lay.addWidget(self._desc_lbl)
+        self._refresh_labels()
+
+    def set_selected(self, sel: bool):
+        self._selected = sel
+        self._refresh_labels()
+        self.update()
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self._refresh_labels()
+        self.update()
+
+    def _refresh_labels(self):
+        if self._selected:
+            tc = "#c7d2fe" if self._fb_type == "feature_request" else "#fda4af"
+            dc = ("rgba(199,210,254,0.65)" if self._fb_type == "feature_request"
+                  else "rgba(253,164,175,0.65)")
+        else:
+            tc = "rgba(255,255,255,0.85)" if self._dark else "rgba(17,17,17,0.80)"
+            dc = "rgba(255,255,255,0.42)" if self._dark else "rgba(17,17,17,0.42)"
+        self._title_lbl.setStyleSheet(f"color: {tc}; background: transparent;")
+        self._desc_lbl.setStyleSheet(f"color: {dc}; background: transparent;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked_sig.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 12, 12)
+        if self._selected:
+            p.fillPath(path, QBrush(self._sel_bg))
+            p.setPen(QPen(self._sel_border, 1.5))
+        else:
+            bg     = QColor(255, 255, 255,  9) if self._dark else QColor(0, 0, 0,  6)
+            border = QColor(255, 255, 255, 24) if self._dark else QColor(0, 0, 0, 28)
+            p.fillPath(path, QBrush(bg))
+            p.setPen(QPen(border, 1))
+        p.drawPath(path)
+
+
+class _FbFormCard(QWidget):
+    """Form card with a coloured top-accent strip that changes with feedback type."""
+
+    _INDIGO = QColor(99, 102, 241)
+    _ROSE   = QColor(244,  63,  94)
+
+    def __init__(self, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._dark = dark
+        self._accent = self._INDIGO
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._inner = lay
+
+    def set_accent(self, fb_type: str):
+        self._accent = self._INDIGO if fb_type == "feature_request" else self._ROSE
+        self.update()
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 14, 14)
+        if self._dark:
+            bg     = QColor(255, 255, 255, 13)
+            border = QColor(255, 255, 255, 30)
+        else:
+            bg     = QColor(0, 0, 0,  8)
+            border = QColor(0, 0, 0, 35)
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(border, 1))
+        p.drawPath(path)
+
+        # coloured top accent strip
+        accent = QColor(self._accent)
+        accent.setAlpha(220)
+        strip = QPainterPath()
+        strip.addRoundedRect(QRectF(r.left() + 1, r.top() + 1, r.width() - 2, 4), 2, 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.fillPath(strip, QBrush(accent))
 
 
 class _ReferralCard(QWidget):
@@ -668,11 +841,17 @@ class _MilestoneTrack(QWidget):
 
 # Button stylesheet constants — applied inline so parent cascade can't override
 _PLAN_BTN_SS = (
-    "QPushButton { background: #6366f1; border: none; border-radius: 8px; "
-    "color: #ffffff; font-family: 'Manrope'; font-size: 12px; font-weight: 600; padding: 0px 14px; } "
+    "QPushButton { background: #6366f1; border: none; border-radius: 10px; "
+    "color: #ffffff; font-family: 'Manrope'; font-size: 12px; font-weight: 700; padding: 0px 14px; } "
     "QPushButton:hover { background: #818cf8; } "
     "QPushButton:pressed { background: #4f46e5; } "
     "QPushButton:disabled { background: rgba(99,102,241,0.3); color: rgba(255,255,255,0.4); }"
+)
+_GHOST_PLAN_BTN_SS = (
+    "QPushButton { background: transparent; border: 1px solid rgba(255,255,255,0.18); border-radius: 10px; "
+    "color: rgba(255,255,255,0.70); font-family: 'Manrope'; font-size: 12px; font-weight: 700; padding: 0px 14px; } "
+    "QPushButton:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.32); color: rgba(255,255,255,0.95); } "
+    "QPushButton:pressed { background: rgba(255,255,255,0.04); }"
 )
 _PRIMARY_BTN_SS = (
     "QPushButton { background: #6366f1; border: none; border-radius: 10px; "
@@ -684,48 +863,678 @@ _PRIMARY_BTN_SS = (
 
 
 # ---------------------------------------------------------------------------
+# Radio dot — painted selection indicator
+# ---------------------------------------------------------------------------
+
+class _RadioDot(QWidget):
+    """Painted radio button dot: gradient-filled when selected, ring when not."""
+
+    def __init__(self, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._selected = False
+        self._dark = dark
+        self.setFixedSize(20, 20)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_selected(self, selected: bool, dark: bool = None):
+        self._selected = selected
+        if dark is not None:
+            self._dark = dark
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy, r = 10.0, 10.0, 8.0
+        if self._selected:
+            grad = QLinearGradient(0, 0, 20, 20)
+            grad.setColorAt(0, QColor("#6366f1"))
+            grad.setColorAt(1, QColor("#8b5cf6"))
+            p.setBrush(QBrush(grad))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+            p.setBrush(QColor(255, 255, 255))
+            p.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+        else:
+            col = QColor(255, 255, 255, 55) if self._dark else QColor(0, 0, 0, 40)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(col, 1.5))
+            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+
+# ---------------------------------------------------------------------------
+# Mode option row — selectable personality option
+# ---------------------------------------------------------------------------
+
+class _ModeOptionRow(QWidget):
+    """Full-width selectable mode row: radio dot + name + description."""
+    selected = pyqtSignal(str)
+
+    def __init__(self, mode: str, name: str, desc: str, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 16, 2, 16)
+        lay.setSpacing(14)
+
+        self._radio = _RadioDot(dark=dark)
+        lay.addWidget(self._radio, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        self._name_lbl = QLabel(name)
+        self._name_lbl.setFont(_font("Manrope", 12, bold=True))
+        self._name_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self._desc_lbl = QLabel(desc)
+        self._desc_lbl.setObjectName("DescLbl")
+        self._desc_lbl.setFont(_font("Manrope", 10))
+        self._desc_lbl.setWordWrap(True)
+        self._desc_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        text_col.addWidget(self._name_lbl)
+        text_col.addWidget(self._desc_lbl)
+        lay.addLayout(text_col, 1)
+
+    def set_active(self, active: bool):
+        self._radio.set_selected(active)
+
+    def set_dark(self, dark: bool):
+        self._radio.set_selected(self._radio._selected, dark)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(self._mode)
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Page header separator — gradient rule drawn in paintEvent
+# ---------------------------------------------------------------------------
+
+class _PageSep(QWidget):
+    """Thin gradient horizontal rule for the page header: indigo → purple → transparent."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(1)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        grad = QLinearGradient(0, 0, self.width(), 0)
+        grad.setColorAt(0.0,  QColor(99,  102, 241, 210))
+        grad.setColorAt(0.40, QColor(139,  92, 246, 110))
+        grad.setColorAt(1.0,  QColor(139,  92, 246,   0))
+        p.fillRect(self.rect(), QBrush(grad))
+
+
+# ---------------------------------------------------------------------------
+# Personality Card — painted selectable card
+# ---------------------------------------------------------------------------
+
+class _PersonalityCard(QWidget):
+    """Large painted card with icon, name, description. Selectable with indigo highlight."""
+    clicked = pyqtSignal()
+
+    def __init__(self, mode: str, icon: str, name: str, desc: str, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._icon = icon
+        self._name = name
+        self._desc = desc
+        self._dark = dark
+        self._selected = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(160)
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        self.update()
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self._dark
+        rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 16, 16)
+
+        if self._selected:
+            bg = QColor(99, 102, 241, 38)
+            border_col = QColor(99, 102, 241, 178)
+            border_w = 1.5
+        else:
+            bg = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 13)
+            border_col = QColor(255, 255, 255, 31) if dark else QColor(0, 0, 0, 31)
+            border_w = 1.0
+
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(border_col, border_w))
+        p.drawPath(path)
+
+        # Check dot at top-right when selected
+        if self._selected:
+            dot_x = self.width() - 24
+            dot_y = 20
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(99, 102, 241))
+            p.drawEllipse(QRectF(dot_x - 8, dot_y - 8, 16, 16))
+            # White checkmark
+            pen = QPen(QColor(255, 255, 255), 1.8)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(int(dot_x - 4), int(dot_y), int(dot_x - 1), int(dot_y + 3))
+            p.drawLine(int(dot_x - 1), int(dot_y + 3), int(dot_x + 4), int(dot_y - 3))
+
+        pad = 24
+        # Icon
+        icon_font = QFont("Manrope", 28)
+        p.setFont(icon_font)
+        p.setPen(QColor(255, 255, 255) if dark else QColor(40, 40, 40))
+        fm = p.fontMetrics()
+        p.drawText(pad, pad + fm.ascent(), self._icon)
+        icon_bottom = pad + fm.height()
+
+        # Name
+        name_font = QFont("Manrope", 13)
+        name_font.setWeight(QFont.Weight.Bold)
+        p.setFont(name_font)
+        name_color = QColor(255, 255, 255) if dark else QColor(17, 17, 17)
+        p.setPen(name_color)
+        fm2 = p.fontMetrics()
+        name_y = icon_bottom + 10 + fm2.ascent()
+        p.drawText(pad, name_y, self._name)
+
+        # Description — word-wrapped
+        desc_font = QFont("Manrope", 10)
+        p.setFont(desc_font)
+        desc_color = QColor(153, 153, 153) if dark else QColor(119, 119, 119)
+        p.setPen(desc_color)
+        desc_rect = QRectF(pad, name_y + 6, self.width() - pad * 2, self.height() - name_y - 12)
+        p.drawText(desc_rect, Qt.TextFlag.TextWordWrap, self._desc)
+
+
+# ---------------------------------------------------------------------------
+# Trust Checkpoint Track — horizontal 3-stop selector with drag
+# ---------------------------------------------------------------------------
+
+_TRUST_DESCS = {
+    1: "Chat, search & read-only access",
+    2: "Files, automation & computer control",
+    3: "Install apps & privileged commands",
+}
+
+class _TrustCheckpointWidget(QWidget):
+    """
+    Horizontal track with 3 checkpoint nodes. Click or drag to select a level.
+    Track fills left-to-right up to the active node; labels with desc below.
+    """
+    level_changed = pyqtSignal(int)
+
+    _TRACK_H = 6
+    _NODE_R  = 14
+    _PAD_X   = 52
+    _TRACK_Y = 36   # y of track centre
+
+    def __init__(self, level: int = 1, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._level    = level
+        self._dark     = dark
+        self._anim_t   = float(level - 1) / 2
+        self._hover    = 0   # 0 = none, 1/2/3 = hovered level
+        self._dragging = False
+        self._anim     = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setFixedHeight(110)
+
+    # ── Animated fill property ────────────────────────────────────────
+
+    @pyqtProperty(float)
+    def fill_t(self) -> float:
+        return self._anim_t
+
+    @fill_t.setter
+    def fill_t(self, v: float):
+        self._anim_t = v
+        self.update()
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def set_level(self, level: int, animate: bool = True):
+        if level == self._level and abs(self._anim_t - float(level - 1) / 2) < 0.01:
+            return
+        self._level = level
+        target = float(level - 1) / 2
+        if animate and not self._dragging:
+            if self._anim:
+                self._anim.stop()
+            self._anim = QPropertyAnimation(self, b"fill_t")
+            self._anim.setDuration(300)
+            self._anim.setStartValue(self._anim_t)
+            self._anim.setEndValue(target)
+            self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._anim.start()
+        else:
+            self._anim_t = target
+            self.update()
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    # ── Geometry ──────────────────────────────────────────────────────
+
+    def _node_x(self, level: int) -> float:
+        x0 = float(self._PAD_X)
+        x1 = float(self.width() - self._PAD_X)
+        return x0 + (level - 1) * (x1 - x0) / 2
+
+    def _nearest(self, x: float) -> int:
+        return min((abs(x - self._node_x(l)), l) for l in [1, 2, 3])[1]
+
+    # ── Mouse events ─────────────────────────────────────────────────
+
+    def _apply_x(self, x: float, emit: bool):
+        lvl = self._nearest(x)
+        self._anim_t = float(lvl - 1) / 2
+        if lvl != self._level:
+            self._level = lvl
+            if emit:
+                self.level_changed.emit(lvl)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._apply_x(event.position().x(), emit=True)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        hov = self._nearest(event.position().x())
+        if hov != self._hover:
+            self._hover = hov
+            self.update()
+        if self._dragging:
+            self._apply_x(event.position().x(), emit=True)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = 0
+        self.update()
+        super().leaveEvent(event)
+
+    # ── Paint ─────────────────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self._dark
+        ty   = float(self._TRACK_Y)
+        th   = float(self._TRACK_H)
+        nr   = float(self._NODE_R)
+        x0   = self._node_x(1)
+        x3   = self._node_x(3)
+        span = x3 - x0
+
+        # ── Track background ───────────────────────────────────────────
+        bg_path = QPainterPath()
+        bg_path.addRoundedRect(QRectF(x0, ty - th / 2, span, th), th / 2, th / 2)
+        p.fillPath(bg_path, QColor(255, 255, 255, 28 if dark else 50))
+
+        # ── Filled portion ─────────────────────────────────────────────
+        fill_w = self._anim_t * span
+        if fill_w > 1:
+            fill_path = QPainterPath()
+            fill_path.addRoundedRect(QRectF(x0, ty - th / 2, fill_w, th), th / 2, th / 2)
+            grad = QLinearGradient(x0, 0, x3, 0)
+            grad.setColorAt(0.0, QColor("#818cf8"))
+            grad.setColorAt(1.0, QColor("#6366f1"))
+            p.fillPath(fill_path, QBrush(grad))
+
+        # ── Nodes ──────────────────────────────────────────────────────
+        for l in [1, 2, 3]:
+            nx     = self._node_x(l)
+            active = l <= self._level
+            sel    = l == self._level
+            hov    = (l == self._hover and not sel)
+
+            # Glow ring (selected or hovered)
+            if sel:
+                gp = QPainterPath()
+                gp.addEllipse(QRectF(nx - nr - 7, ty - nr - 7, (nr + 7) * 2, (nr + 7) * 2))
+                p.fillPath(gp, QColor(99, 102, 241, 35))
+            elif hov:
+                gp = QPainterPath()
+                gp.addEllipse(QRectF(nx - nr - 4, ty - nr - 4, (nr + 4) * 2, (nr + 4) * 2))
+                p.fillPath(gp, QColor(99, 102, 241, 18))
+
+            # Node body
+            np_ = QPainterPath()
+            np_.addEllipse(QRectF(nx - nr, ty - nr, nr * 2, nr * 2))
+            if active:
+                node_col = QColor(129, 140, 248) if hov else QColor(99, 102, 241)
+                p.fillPath(np_, node_col)
+            else:
+                p.fillPath(np_, QColor(55, 55, 72) if dark else QColor(210, 210, 220))
+                p.setPen(QPen(QColor(255, 255, 255, 55 if dark else 110), 1.5))
+                p.drawEllipse(QRectF(nx - nr + 0.75, ty - nr + 0.75,
+                                     (nr - 0.75) * 2, (nr - 0.75) * 2))
+                p.setPen(Qt.PenStyle.NoPen)
+
+            # White inner dot (selected)
+            if sel:
+                ir = nr * 0.36
+                ip = QPainterPath()
+                ip.addEllipse(QRectF(nx - ir, ty - ir, ir * 2, ir * 2))
+                p.fillPath(ip, QColor(255, 255, 255))
+
+        # ── Labels ─────────────────────────────────────────────────────
+        label_top = ty + nr + 12
+        max_w     = 148.0
+        pad       = 4.0
+
+        for l in [1, 2, 3]:
+            nx     = self._node_x(l)
+            active = l <= self._level
+            sel    = l == self._level
+
+            # Level name — centred on node, clamped to widget
+            nf = QFont("Manrope", 12)
+            nf.setWeight(QFont.Weight.Bold if sel else QFont.Weight.DemiBold)
+            p.setFont(nf)
+            p.setPen(
+                (QColor(255, 255, 255) if active else QColor(100, 100, 118)) if dark
+                else (QColor(20, 20, 30) if active else QColor(150, 150, 162))
+            )
+            fm = p.fontMetrics()
+            name = _TRUST_NAMES[l]
+            fw   = fm.horizontalAdvance(name)
+            name_x = max(pad, min(nx - fw / 2, self.width() - fw - pad))
+            p.drawText(int(name_x), int(label_top + fm.ascent()), name)
+
+            # Short description — clamped rect, left/centre/right aligned per position
+            df = QFont("Manrope", 10)
+            p.setFont(df)
+            p.setPen(
+                QColor(129, 140, 248, 230) if sel
+                else (QColor(115, 115, 132) if dark else QColor(135, 135, 150))
+            )
+            fm2  = p.fontMetrics()
+            dx   = max(pad, min(nx - max_w / 2, self.width() - max_w - pad))
+            desc_rect = QRectF(dx, label_top + fm.height() + 4, max_w, fm2.height() * 3)
+            align = Qt.AlignmentFlag.AlignLeft if l == 1 else \
+                    Qt.AlignmentFlag.AlignRight if l == 3 else \
+                    Qt.AlignmentFlag.AlignHCenter
+            p.drawText(desc_rect, align | Qt.TextFlag.TextWordWrap, _TRUST_DESCS[l])
+
+
+# ---------------------------------------------------------------------------
+# Trust Level Card — painted selectable card for trust levels
+# ---------------------------------------------------------------------------
+
+class _TrustLevelCard(QWidget):
+    """Painted card for trust level selection with level indicator and capability bullets."""
+    clicked = pyqtSignal()
+
+    _BULLETS = {
+        1: ["Chat & web search", "File & semantic search", "Open files & apps"],
+        2: ["Create & move files", "Computer control", "System modifications"],
+        3: ["Install/uninstall apps", "Privileged commands", "Full sudo access"],
+    }
+
+    def __init__(self, level: int, name: str, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._level = level
+        self._name = name
+        self._dark = dark
+        self._selected = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(150)
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        self.update()
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self._dark
+        rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 16, 16)
+
+        if self._selected:
+            bg = QColor(99, 102, 241, 38)
+            border_col = QColor(99, 102, 241, 178)
+            border_w = 1.5
+        else:
+            bg = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 13)
+            border_col = QColor(255, 255, 255, 31) if dark else QColor(0, 0, 0, 31)
+            border_w = 1.0
+
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(border_col, border_w))
+        p.drawPath(path)
+
+        # Small indigo dot at top-right when selected
+        if self._selected:
+            dot_x = self.width() - 20
+            dot_y = 18
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(99, 102, 241))
+            p.drawEllipse(QRectF(dot_x - 5, dot_y - 5, 10, 10))
+
+        pad = 20
+        y = pad
+
+        # "Level N" small label at top
+        level_font = QFont("Manrope", 8)
+        level_font.setWeight(QFont.Weight.DemiBold)
+        p.setFont(level_font)
+        muted = QColor(120, 120, 120) if dark else QColor(130, 130, 130)
+        p.setPen(muted)
+        fm = p.fontMetrics()
+        p.drawText(pad, y + fm.ascent(), f"Level {self._level}")
+        y += fm.height() + 6
+
+        # Name large
+        name_font = QFont("Manrope", 14)
+        name_font.setWeight(QFont.Weight.Bold)
+        p.setFont(name_font)
+        name_color = QColor(255, 255, 255) if dark else QColor(17, 17, 17)
+        p.setPen(name_color)
+        fm2 = p.fontMetrics()
+        p.drawText(pad, y + fm2.ascent(), self._name)
+        y += fm2.height() + 12
+
+        # Bullets
+        blt_font = QFont("Manrope", 9)
+        p.setFont(blt_font)
+        p.setPen(muted)
+        fm3 = p.fontMetrics()
+        bullets = self._BULLETS.get(self._level, [])
+        for bullet in bullets:
+            p.drawText(pad, y + fm3.ascent(), f"·  {bullet}")
+            y += fm3.height() + 3
+
+
+# ---------------------------------------------------------------------------
+# Settings Row — label left, control(s) right, subtle bottom border
+# ---------------------------------------------------------------------------
+
+class _SettingsRow(QWidget):
+    """A settings row with a label column on the left and a right control area."""
+
+    def __init__(self, label: str, sublabel: str = None, dark: bool = True, parent=None):
+        super().__init__(parent)
+        self._dark = dark
+        self.setObjectName("SettingsRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 10, 0, 10)
+        outer.setSpacing(12)
+
+        label_col = QVBoxLayout()
+        label_col.setSpacing(2)
+        label_col.setContentsMargins(0, 0, 0, 0)
+
+        self._label_w = QLabel(label)
+        self._label_w.setFont(_font("Manrope", 12, bold=True))
+        self._label_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        label_col.addWidget(self._label_w)
+
+        if sublabel:
+            self._sublabel_w = QLabel(sublabel)
+            self._sublabel_w.setFont(_font("Manrope", 10))
+            self._sublabel_w.setObjectName("DescLbl")
+            self._sublabel_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            label_col.addWidget(self._sublabel_w)
+        else:
+            self._sublabel_w = None
+
+        outer.addLayout(label_col, 1)
+
+        self.right = QHBoxLayout()
+        self.right.setSpacing(8)
+        self.right.setContentsMargins(0, 0, 0, 0)
+        outer.addLayout(self.right)
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        dark = self._dark
+        div_col = QColor(255, 255, 255, 15) if dark else QColor(0, 0, 0, 13)
+        p.setPen(QPen(div_col, 1))
+        p.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+
+
+# ---------------------------------------------------------------------------
+# Avatar Widget — painted indigo circle with initial letter
+# ---------------------------------------------------------------------------
+
+class _AvatarWidget(QWidget):
+    """48px diameter indigo circle with white initial letter."""
+
+    def __init__(self, initial: str = "?", parent=None):
+        super().__init__(parent)
+        self._initial = initial
+        self.setObjectName("AvatarWidget")
+        self.setFixedSize(48, 48)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_initial(self, initial: str):
+        self._initial = initial[:1].upper() if initial else "?"
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(0, 0, 48, 48)
+        path = QPainterPath()
+        path.addEllipse(r)
+        p.fillPath(path, QBrush(QColor(99, 102, 241, 50)))
+        p.setPen(QPen(QColor(99, 102, 241, 100), 1))
+        p.drawPath(path)
+        font = QFont("Manrope", 18)
+        font.setWeight(QFont.Weight.Bold)
+        p.setFont(font)
+        p.setPen(QColor(160, 170, 255))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, self._initial)
+
+
+# ---------------------------------------------------------------------------
 # Settings Page Base
 # ---------------------------------------------------------------------------
 
 class SettingsPage(QWidget):
     """
-    Base class for a settings page content area with built-in scrolling.
+    Base class for a settings page: fixed title header + scrollable content area.
     """
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, subtitle: str = "", parent=None):
         super().__init__(parent)
-        
-        # Main layout for the page
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
-        # Scroll Area
+
+        # ── Scrollable content area (title scrolls with content) ──────
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setStyleSheet("background: transparent; border: none;")
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
-        # Content Widget
+
         self.content_widget = QWidget()
         self.content_widget.setObjectName("SettingsPageContent")
-        
-        # Content Layout
+
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(30, 30, 30, 30)
-        self.content_layout.setSpacing(15)
+        self.content_layout.setContentsMargins(32, 28, 32, 32)
+        self.content_layout.setSpacing(0)
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Title
+        # ── Page header (scrolls with content) ───────────────────────
         self.title_lbl = QLabel(title)
         self.title_lbl.setObjectName("PageTitle")
-        self.title_lbl.setFont(_font("Instrument Serif", 24))
+        self.title_lbl.setFont(_font("Instrument Serif", 26))
         self.content_layout.addWidget(self.title_lbl)
-        
-        # Spacer after title
-        self.content_layout.addSpacing(10)
-        
+
+        if subtitle:
+            self.content_layout.addSpacing(5)
+            self.subtitle_lbl = QLabel(subtitle)
+            self.subtitle_lbl.setObjectName("PageSubtitle")
+            self.subtitle_lbl.setFont(_font("Manrope", 11))
+            self.subtitle_lbl.setWordWrap(True)
+            self.content_layout.addWidget(self.subtitle_lbl)
+            self.content_layout.addSpacing(18)
+        else:
+            self.content_layout.addSpacing(15)
+
+        self.content_layout.addWidget(_PageSep())
+        self.content_layout.addSpacing(20)
+
+        # Switch to per-item spacing from here on
+        self.content_layout.setSpacing(16)
+
         self.scroll.setWidget(self.content_widget)
         main_layout.addWidget(self.scroll)
 
@@ -807,24 +1616,35 @@ class SettingsPanel(QWidget):
         sidebar_col.setSpacing(0)
         sidebar_col.addWidget(self.sidebar)
 
-        ver_row = QHBoxLayout()
-        ver_row.setContentsMargins(16, 4, 8, 12)
-        ver_row.setSpacing(8)
+        ver_widget = QWidget()
+        ver_widget.setFixedWidth(200)
+        ver_widget.setObjectName("SidebarFooter")
+        ver_col = QVBoxLayout(ver_widget)
+        ver_col.setContentsMargins(0, 0, 0, 0)
+        ver_col.setSpacing(0)
+
+        footer_sep = QFrame()
+        footer_sep.setFrameShape(QFrame.Shape.HLine)
+        footer_sep.setObjectName("SidebarFooterSep")
+        ver_col.addWidget(footer_sep)
+
+        ver_inner = QVBoxLayout()
+        ver_inner.setContentsMargins(16, 8, 16, 12)
+        ver_inner.setSpacing(3)
 
         self._version_label = QLabel(f"v{APP_VERSION}")
-        self._version_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        ver_row.addWidget(self._version_label)
+        self._version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._version_label.setFont(_font("Manrope", 10))
+        ver_inner.addWidget(self._version_label)
 
-        self._check_update_btn = QPushButton("Check for Updates")
+        self._check_update_btn = QPushButton("Check for updates")
         self._check_update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._check_update_btn.setFixedHeight(22)
+        self._check_update_btn.setFlat(True)
+        self._check_update_btn.setFont(_font("Manrope", 10))
         self._check_update_btn.clicked.connect(self._on_check_update)
-        ver_row.addWidget(self._check_update_btn)
-        ver_row.addStretch()
+        ver_inner.addWidget(self._check_update_btn)
 
-        ver_widget = QWidget()
-        ver_widget.setLayout(ver_row)
-        ver_widget.setContentsMargins(0, 0, 0, 0)
+        ver_col.addLayout(ver_inner)
         sidebar_col.addWidget(ver_widget)
 
         root.addLayout(sidebar_col)
@@ -846,184 +1666,191 @@ class SettingsPanel(QWidget):
     # ── Section builders ─────────────────────────────────────────────
 
     def _build_model(self) -> QWidget:
-        page = SettingsPage("AI Model")
+        page = SettingsPage("AI Model", "Choose how Omni communicates with you.")
 
-        page.add_spacing(4)
+        page.add_spacing(16)
+        page.add_widget(_section_header("Personality Mode"))
+        page.add_spacing(12)
 
-        # ── Personality card ─────────────────────────────────────────
-        self._model_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
-        mc = self._model_card._inner
-        mc.setSpacing(0)
-
-        mc_title = QLabel("Personality")
-        mc_title.setFont(_font("Manrope", 15, bold=True))
-        mc.addWidget(mc_title)
-
-        mc.addSpacing(4)
-
-        mc_sub = QLabel("Choose how Omni communicates with you.")
-        mc_sub.setObjectName("DescLbl")
-        mc_sub.setFont(_font("Manrope", 11))
-        mc.addWidget(mc_sub)
-
-        mc.addSpacing(18)
-
-        # Toggle pill
-        self.mode_container = QFrame()
-        self.mode_container.setObjectName("ModeContainer")
-        self.mode_container.setFixedHeight(44)
-        mode_layout = QHBoxLayout(self.mode_container)
-        mode_layout.setContentsMargins(4, 4, 4, 4)
-        mode_layout.setSpacing(0)
-
-        self.personality_group = QButtonGroup(self)
-        self.personality_prof_btn = QPushButton("Professional")
-        self.personality_unf_btn  = QPushButton("Unfiltered")
-
-        for btn in (self.personality_prof_btn, self.personality_unf_btn):
-            btn.setObjectName("ModeBtn")
-            btn.setCheckable(True)
-            btn.setFixedHeight(36)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            mode_layout.addWidget(btn)
-
-        self.personality_prof_btn.setProperty("mode", "professional")
-        self.personality_unf_btn.setProperty("mode", "unfiltered")
-
-        self.personality_group.setExclusive(True)
-        self.personality_group.addButton(self.personality_prof_btn)
-        self.personality_group.addButton(self.personality_unf_btn)
-
+        dark = self.current_theme == "dark"
         saved_mode = settings_store.get("personality_mode", "professional")
-        if saved_mode == "unfiltered":
-            self.personality_unf_btn.setChecked(True)
-        else:
-            self.personality_prof_btn.setChecked(True)
 
-        self.personality_group.buttonClicked.connect(self._on_personality_changed)
-        mc.addWidget(self.mode_container)
-        self._apply_personality_toggle_theme(self.current_theme == "dark")
+        _MODES = [
+            ("professional", "✦", "Professional",
+             "Polished, focused, and precise. Best for work and productivity."),
+            ("unfiltered",   "⚡", "Unfiltered",
+             "Direct, unfiltered, and uncensored. No guardrails, no sugarcoating."),
+        ]
 
-        mc.addSpacing(16)
+        cards_row = QHBoxLayout()
+        cards_row.setContentsMargins(0, 0, 0, 0)
+        cards_row.setSpacing(12)
 
-        # Mode descriptions
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setObjectName("SepLine")
-        mc.addWidget(sep)
-        mc.addSpacing(14)
+        self._mode_options: dict[str, _PersonalityCard] = {}
+        for mode, icon, name, desc in _MODES:
+            card = _PersonalityCard(mode=mode, icon=icon, name=name, desc=desc, dark=dark)
+            card.set_selected(saved_mode == mode)
+            card.clicked.connect(lambda m=mode: self._on_personality_mode_selected(m))
+            cards_row.addWidget(card)
+            self._mode_options[mode] = card
 
-        prof_row = QHBoxLayout()
-        prof_row.setContentsMargins(0, 0, 0, 0)
-        prof_row.setSpacing(10)
-        prof_dot = QLabel("●")
-        prof_dot.setFont(_font("Manrope", 8))
-        prof_dot.setStyleSheet("color: #6366f1;")
-        prof_dot.setFixedWidth(12)
-        prof_body = QVBoxLayout()
-        prof_body.setSpacing(1)
-        prof_name = QLabel("Professional")
-        prof_name.setFont(_font("Manrope", 11, bold=True))
-        prof_desc = QLabel("Polished, focused, and precise. Best for work and productivity.")
-        prof_desc.setObjectName("DescLbl")
-        prof_desc.setFont(_font("Manrope", 10))
-        prof_desc.setWordWrap(True)
-        prof_body.addWidget(prof_name)
-        prof_body.addWidget(prof_desc)
-        prof_row.addWidget(prof_dot, 0, Qt.AlignmentFlag.AlignTop)
-        prof_row.addLayout(prof_body)
-        mc.addLayout(prof_row)
-
-        mc.addSpacing(12)
-
-        unf_row = QHBoxLayout()
-        unf_row.setContentsMargins(0, 0, 0, 0)
-        unf_row.setSpacing(10)
-        unf_dot = QLabel("●")
-        unf_dot.setFont(_font("Manrope", 8))
-        unf_dot.setStyleSheet("color: rgba(255,255,255,0.3);")
-        unf_dot.setFixedWidth(12)
-        unf_body = QVBoxLayout()
-        unf_body.setSpacing(1)
-        unf_name = QLabel("Unfiltered")
-        unf_name.setFont(_font("Manrope", 11, bold=True))
-        unf_desc = QLabel("Direct, unfiltered, and uncensored. No guardrails, no sugarcoating.")
-        unf_desc.setObjectName("DescLbl")
-        unf_desc.setFont(_font("Manrope", 10))
-        unf_desc.setWordWrap(True)
-        unf_body.addWidget(unf_name)
-        unf_body.addWidget(unf_desc)
-        unf_row.addWidget(unf_dot, 0, Qt.AlignmentFlag.AlignTop)
-        unf_row.addLayout(unf_body)
-        mc.addLayout(unf_row)
-
-        page.add_widget(self._model_card)
+        page.add_layout(cards_row)
         page.add_stretch()
         return page
 
     def _build_trust(self) -> QWidget:
-        page = SettingsPage("Trust")
-
-        page.add_widget(self._desc(
-            "Control what Omni is allowed to do on your behalf. "
-            "You can always grant one-time permission for a single action "
-            "without changing the global level."
-        ))
-        page.add_spacing(20)
+        page = SettingsPage("Trust",
+            "Control what Omni is allowed to do on your behalf.")
 
         saved_level = settings_store.get("trust_level", 1)
+        dark = self.current_theme == "dark"
 
-        self._trust_slider = _TrustSlider(level=saved_level, theme=self.current_theme)
-        self._trust_slider.level_changed.connect(self._on_trust_changed)
-        page.add_widget(self._trust_slider)
+        # ── Checkpoint track ──────────────────────────────────────────
+        track_card = _FeedbackFormCard(dark=dark)
+        tc = track_card._inner
+        tc.setContentsMargins(16, 20, 16, 20)
+        tc.setSpacing(0)
 
-        page.add_spacing(20)
+        self._trust_track = _TrustCheckpointWidget(level=saved_level, dark=dark)
+        self._trust_track.level_changed.connect(self._on_trust_changed)
+        tc.addWidget(self._trust_track)
+        page.add_widget(track_card)
 
-        self._trust_cap_panel = _TrustCapabilityPanel(level=saved_level, theme=self.current_theme)
-        page.add_widget(self._trust_cap_panel)
+        # ── Capabilities card ─────────────────────────────────────────
+        self._trust_cap_card = _FeedbackFormCard(dark=dark)
+        cap_inner = self._trust_cap_card._inner
+        cap_inner.setContentsMargins(20, 14, 20, 8)
+        cap_inner.setSpacing(0)
+
+        cap_hdr = _section_header("UNLOCKED CAPABILITIES")
+        cap_inner.addWidget(cap_hdr)
+        cap_inner.addSpacing(10)
+
+        self._cap_rows_layout = QVBoxLayout()
+        self._cap_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._cap_rows_layout.setSpacing(0)
+        cap_inner.addLayout(self._cap_rows_layout)
+
+        page.add_widget(self._trust_cap_card)
+        self._rebuild_cap_rows(saved_level)
+
+        # Compat stubs
+        self._trust_slider     = None
+        self._trust_cap_panel  = None
+        self._trust_level_cards = {}
 
         page.add_stretch()
         return page
 
+    def _rebuild_cap_rows(self, level: int):
+        """Clear and rebuild capability rows for the given trust level."""
+        if not hasattr(self, "_cap_rows_layout"):
+            return
+        lay = self._cap_rows_layout
+        dark = self.current_theme == "dark"
+        while lay.count():
+            item = lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        primary = "#FFFFFF" if dark else "#111111"
+        accent = "#6366f1"
+
+        for lvl in range(1, level + 1):
+            for cap in _ALL_CAPS[lvl]:
+                row_w = QWidget()
+                row_w.setObjectName("CapRow")
+                row_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                row_h = QHBoxLayout(row_w)
+                row_h.setContentsMargins(0, 8, 0, 8)
+                row_h.setSpacing(8)
+
+                check_lbl = QLabel("✓")
+                check_lbl.setFont(_font("Manrope", 10, bold=True))
+                check_lbl.setStyleSheet(f"color: {accent}; background: transparent;")
+                check_lbl.setFixedWidth(14)
+                row_h.addWidget(check_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+                cap_lbl = QLabel(cap)
+                cap_lbl.setFont(_font("Manrope", 10))
+                cap_lbl.setStyleSheet(f"color: {primary}; background: transparent;")
+                cap_lbl.setWordWrap(True)
+                row_h.addWidget(cap_lbl, 1)
+
+                # Subtle bottom border via a thin frame
+                col_wrap = QWidget()
+                col_wrap.setObjectName("CapRow")
+                col_wrap.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                col_vlay = QVBoxLayout(col_wrap)
+                col_vlay.setContentsMargins(0, 0, 0, 0)
+                col_vlay.setSpacing(0)
+                col_vlay.addWidget(row_w)
+
+                div_col = "rgba(255,255,255,0.06)" if dark else "rgba(0,0,0,0.05)"
+                divider = QFrame()
+                divider.setObjectName("CapRowDivider")
+                divider.setFixedHeight(1)
+                divider.setStyleSheet(f"background: {div_col}; border: none;")
+                col_vlay.addWidget(divider)
+
+                lay.addWidget(col_wrap)
+
+    def _on_trust_level_label_update(self, level: int):
+        """Update the trust level name/desc labels in the slider card header."""
+        _level_descs = {
+            1: "Read-only · Chat, search, open files and apps.",
+            2: "Automation · Create files, control the computer, modify system settings.",
+            3: "Full Control · Install apps, run privileged commands.",
+        }
+        if hasattr(self, "_trust_level_name_lbl"):
+            self._trust_level_name_lbl.setText(_TRUST_NAMES[level])
+        if hasattr(self, "_trust_level_desc_lbl"):
+            self._trust_level_desc_lbl.setText(_level_descs[level])
+        if hasattr(self, "_trust_level_badge"):
+            self._trust_level_badge.setText(f"Level {level}")
+
     def _build_files(self) -> QWidget:
         import json, subprocess, sys, os
-        page = SettingsPage("Files")
-
-        page.add_widget(self._desc(
+        page = SettingsPage("Files",
             "Omni indexes your files to enable semantic search. "
-            "Indexing runs once in the background and resumes automatically if interrupted."
-        ))
-        page.add_spacing(20)
+            "Indexing runs once in the background and resumes automatically if interrupted.")
 
-        # ── Status card ───────────────────────────────────────────────
-        dark = self.current_theme == "dark"
-        status_card = _FeedbackFormCard(dark=dark)
-        lay = status_card._inner
-        lay.setSpacing(10)
+        page.add_spacing(16)
+        page.add_widget(_section_header("Index Status"))
+        page.add_spacing(16)
 
-        # Status row
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(0, 0, 0, 0)
-        status_row.setSpacing(10)
+        # ── Big status row: dot + label ───────────────────────────────
+        status_top_row = QHBoxLayout()
+        status_top_row.setContentsMargins(0, 0, 0, 0)
+        status_top_row.setSpacing(12)
 
         self._files_dot = QLabel("●")
-        self._files_dot.setFont(_font("Manrope", 14))
-        self._files_dot.setFixedWidth(18)
+        self._files_dot.setFont(_font("Manrope", 24))
+        self._files_dot.setFixedWidth(30)
+        self._files_dot.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._files_status_lbl = QLabel()
-        self._files_status_lbl.setFont(_font("Manrope", 13, bold=True))
+        self._files_status_lbl.setFont(_font("Manrope", 20, bold=True))
 
-        status_row.addWidget(self._files_dot)
-        status_row.addWidget(self._files_status_lbl)
-        status_row.addStretch()
-        lay.addLayout(status_row)
+        status_top_row.addWidget(self._files_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_top_row.addWidget(self._files_status_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_top_row.addStretch()
+        page.add_layout(status_top_row)
+        page.add_spacing(8)
 
+        # ── Detail label ──────────────────────────────────────────────
         self._files_detail_lbl = QLabel()
         self._files_detail_lbl.setObjectName("DescLbl")
         self._files_detail_lbl.setFont(_font("Manrope", 10))
         self._files_detail_lbl.setWordWrap(True)
-        lay.addWidget(self._files_detail_lbl)
+        page.add_widget(self._files_detail_lbl)
+        page.add_spacing(16)
 
-        # Progress bar (visible only while indexing)
+        # ── Progress bar row ──────────────────────────────────────────
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(10)
+
         self._files_progress_bar = QProgressBar()
         self._files_progress_bar.setRange(0, 100)
         self._files_progress_bar.setValue(0)
@@ -1037,22 +1864,34 @@ class SettingsPanel(QWidget):
             }
             QProgressBar::chunk {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #8B5CF6, stop:1 #3B82F6);
+                    stop:0 #6366f1, stop:0.5 #8b5cf6, stop:1 #3b82f6);
                 border-radius: 3px;
             }
         """)
         self._files_progress_bar.hide()
-        lay.addWidget(self._files_progress_bar)
 
-        lay.addSpacing(4)
+        self._files_pct_lbl = QLabel("")
+        self._files_pct_lbl.setFont(_font("Manrope", 10))
+        self._files_pct_lbl.setObjectName("DescLbl")
+        self._files_pct_lbl.setFixedWidth(36)
+        self._files_pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # Button row: action button + pause button
+        progress_row.addWidget(self._files_progress_bar, 1)
+        progress_row.addWidget(self._files_pct_lbl)
+        page.add_layout(progress_row)
+        page.add_spacing(20)
+
+        # ── Gradient divider ──────────────────────────────────────────
+        page.add_widget(_PageSep())
+        page.add_spacing(20)
+
+        # ── Button row ────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(8)
+        btn_row.setSpacing(10)
 
         self._files_btn = QPushButton()
-        self._files_btn.setFixedHeight(38)
+        self._files_btn.setFixedHeight(42)
         self._files_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._files_btn.setFont(_font("Manrope", 11, bold=True))
         self._files_btn.setObjectName("FilesActionBtn")
@@ -1060,8 +1899,8 @@ class SettingsPanel(QWidget):
         self._files_btn.clicked.connect(self._on_files_btn_clicked)
 
         self._files_pause_btn = QPushButton("Pause")
-        self._files_pause_btn.setFixedHeight(38)
-        self._files_pause_btn.setFixedWidth(90)
+        self._files_pause_btn.setFixedHeight(42)
+        self._files_pause_btn.setFixedWidth(96)
         self._files_pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._files_pause_btn.setFont(_font("Manrope", 11, bold=True))
         self._files_pause_btn.setStyleSheet(
@@ -1075,9 +1914,9 @@ class SettingsPanel(QWidget):
 
         btn_row.addWidget(self._files_btn)
         btn_row.addWidget(self._files_pause_btn)
-        lay.addLayout(btn_row)
+        btn_row.addStretch()
+        page.add_layout(btn_row)
 
-        page.add_widget(status_card)
         page.add_stretch()
 
         # State
@@ -1150,8 +1989,13 @@ class SettingsPanel(QWidget):
         if state == "running":
             self._files_progress_bar.setValue(overall_pct)
             self._files_progress_bar.show()
+            if hasattr(self, "_files_pct_lbl"):
+                self._files_pct_lbl.setText(f"{overall_pct}%")
+                self._files_pct_lbl.show()
         else:
             self._files_progress_bar.hide()
+            if hasattr(self, "_files_pct_lbl"):
+                self._files_pct_lbl.hide()
             if state not in ("preparing",):
                 self._files_poll_timer.stop()
 
@@ -1200,7 +2044,7 @@ class SettingsPanel(QWidget):
         self._files_poll_timer.start()
 
     def _build_account(self) -> QWidget:
-        page = SettingsPage("Account")
+        page = SettingsPage("Account", "Manage your Omni account and subscription.")
 
         # ── Auth stack (logged-out / logged-in) ───────────────────────
         self.account_stack = QStackedWidget()
@@ -1402,109 +2246,119 @@ class SettingsPanel(QWidget):
     # ── Developer page ────────────────────────────────────────────────
 
     def _build_feedback(self) -> QWidget:
-        page = SettingsPage("Feedback")
+        page = SettingsPage("Feedback",
+            "Your input shapes what Omni becomes. We read every submission personally.")
 
-        page.add_widget(self._desc(
-            "Your input shapes what Omni becomes. "
-            "We read every submission personally."
-        ))
-        page.add_spacing(20)
-
-        # ── Main form card ─────────────────────────────────────────
         dark = self.current_theme == "dark"
-        self._fb_card = _FeedbackFormCard(dark=dark)
-        lay = self._fb_card._inner
-
-        # Card header row
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-
-        icon_lbl = QLabel("✉️")
-        icon_lbl.setFont(_font("Manrope", 20))
-        icon_lbl.setFixedWidth(30)
-
-        heading = QLabel("Send us feedback")
-        heading.setFont(_font("Manrope", 15, bold=True))
-
-        header_row.addWidget(icon_lbl)
-        header_row.addWidget(heading)
-        header_row.addStretch()
-        lay.addLayout(header_row)
-
-        lay.addSpacing(4)
-
-        subhead = QLabel("Your ideas and bug reports are invaluable — thank you.")
-        subhead.setObjectName("DescLbl")
-        subhead.setFont(_font("Manrope", 11))
-        lay.addWidget(subhead)
-
-        lay.addSpacing(18)
-
-        # ── Type selector pill ─────────────────────────────────────
         self._feedback_type = "feature_request"
 
-        self._fb_pill = QFrame()
-        self._fb_pill.setFixedHeight(40)
-        pill_lay = QHBoxLayout(self._fb_pill)
-        pill_lay.setContentsMargins(3, 3, 3, 3)
-        pill_lay.setSpacing(0)
+        # ── Type selection cards ──────────────────────────────────────
+        self._fb_feature_card = _FbTypeCard(
+            "💡", "Feature request",
+            "Share an idea or improvement you'd love to see.",
+            "feature_request", dark,
+        )
+        self._fb_bug_card = _FbTypeCard(
+            "🐛", "Bug report",
+            "Tell us about something that isn't working right.",
+            "bug_report", dark,
+        )
+        self._fb_feature_card.set_selected(True)
+        self._fb_feature_card.clicked_sig.connect(
+            lambda: self._on_feedback_card_selected("feature_request"))
+        self._fb_bug_card.clicked_sig.connect(
+            lambda: self._on_feedback_card_selected("bug_report"))
 
-        self._fb_feature_btn = QPushButton("💡  Feature idea")
-        self._fb_feature_btn.setCheckable(True)
-        self._fb_feature_btn.setChecked(True)
-        self._fb_feature_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._fb_feature_btn.setFont(_font("Manrope", 11))
-        self._fb_feature_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        type_row = QHBoxLayout()
+        type_row.setContentsMargins(0, 0, 0, 0)
+        type_row.setSpacing(10)
+        type_row.addWidget(self._fb_feature_card)
+        type_row.addWidget(self._fb_bug_card)
+        page.add_layout(type_row)
+        page.add_spacing(14)
 
-        self._fb_bug_btn = QPushButton("🐛  Bug report")
-        self._fb_bug_btn.setCheckable(True)
-        self._fb_bug_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._fb_bug_btn.setFont(_font("Manrope", 11))
-        self._fb_bug_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # ── Form card with accent top strip ──────────────────────────
+        form_card = _FbFormCard(dark=dark)
+        self._fb_form_card = form_card
+        fc = form_card._inner
+        fc.setContentsMargins(0, 0, 0, 0)
+        fc.setSpacing(0)
 
-        self._fb_type_group = QButtonGroup()
-        self._fb_type_group.setExclusive(True)
-        self._fb_type_group.addButton(self._fb_feature_btn, 0)
-        self._fb_type_group.addButton(self._fb_bug_btn, 1)
-        self._fb_type_group.idToggled.connect(self._on_feedback_type_changed)
+        # Padded content wrapper (sits below the 4 px accent strip)
+        content_w = QWidget()
+        content_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        cw = QVBoxLayout(content_w)
+        cw.setContentsMargins(20, 14, 20, 16)
+        cw.setSpacing(0)
+        fc.addWidget(content_w)
 
-        pill_lay.addWidget(self._fb_feature_btn)
-        pill_lay.addWidget(self._fb_bug_btn)
-        lay.addWidget(self._fb_pill)
-        self._apply_fb_pill_theme(dark)
+        def _field_tag(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFont(_font("Manrope", 9, bold=True))
+            lbl.setStyleSheet(
+                "color: rgba(255,255,255,0.32); letter-spacing: 1px; background: transparent;"
+                if dark else
+                "color: rgba(0,0,0,0.38); letter-spacing: 1px; background: transparent;"
+            )
+            return lbl
 
-        lay.addSpacing(16)
+        # -- TITLE field label + input
+        self._fb_title_tag = _field_tag("TITLE")
+        cw.addWidget(self._fb_title_tag)
+        cw.addSpacing(3)
 
-        # ── Title ──────────────────────────────────────────────────
-        title_field_lbl = QLabel("Title")
-        title_field_lbl.setObjectName("FieldLbl")
-        title_field_lbl.setFont(_font("Manrope", 10, bold=True))
-        lay.addWidget(title_field_lbl)
-        lay.addSpacing(5)
+        self._fb_title = QLineEdit()
+        self._fb_title.setPlaceholderText("Give it a brief title…")
+        self._fb_title.setFont(_font("Manrope", 13, bold=True))
+        self._fb_title.setFixedHeight(36)
+        self._fb_title.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; "
+            "color: rgba(255,255,255,0.90); font-family: 'Manrope'; font-size: 13px; font-weight: 700; padding: 0 2px; } "
+            "QLineEdit::placeholder { color: rgba(255,255,255,0.22); }"
+            if dark else
+            "QLineEdit { background: transparent; border: none; "
+            "color: rgba(17,17,17,0.90); font-family: 'Manrope'; font-size: 13px; font-weight: 700; padding: 0 2px; } "
+            "QLineEdit::placeholder { color: rgba(17,17,17,0.28); }"
+        )
+        cw.addWidget(self._fb_title)
+        cw.addSpacing(8)
 
-        self._fb_title = self._edit("Brief summary of your idea or issue…")
-        lay.addWidget(self._fb_title)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setObjectName("SepLine")
+        cw.addWidget(sep1)
+        cw.addSpacing(10)
 
-        lay.addSpacing(14)
-
-        # ── Description ────────────────────────────────────────────
-        body_field_lbl = QLabel("Description")
-        body_field_lbl.setObjectName("FieldLbl")
-        body_field_lbl.setFont(_font("Manrope", 10, bold=True))
-        lay.addWidget(body_field_lbl)
-        lay.addSpacing(5)
+        # -- DESCRIPTION field label + textarea
+        self._fb_desc_tag = _field_tag("DESCRIPTION")
+        cw.addWidget(self._fb_desc_tag)
+        cw.addSpacing(3)
 
         self._fb_body = QTextEdit()
-        self._fb_body.setPlaceholderText("Describe in as much detail as you like…")
+        self._fb_body.setPlaceholderText("Describe your idea or bug in as much detail as you like…")
         self._fb_body.setFont(_font("Manrope", 11))
-        self._fb_body.setFixedHeight(120)
+        self._fb_body.setMinimumHeight(110)
+        self._fb_body.setMaximumHeight(200)
         self._fb_body.setObjectName("FeedbackBody")
-        lay.addWidget(self._fb_body)
+        self._fb_body.setStyleSheet(
+            "QTextEdit { background: transparent; border: none; "
+            "color: rgba(255,255,255,0.85); font-family: 'Manrope'; font-size: 11px; padding: 2px; } "
+            "QTextEdit::placeholder { color: rgba(255,255,255,0.22); }"
+            if dark else
+            "QTextEdit { background: transparent; border: none; "
+            "color: rgba(17,17,17,0.85); font-family: 'Manrope'; font-size: 11px; padding: 2px; } "
+            "QTextEdit::placeholder { color: rgba(17,17,17,0.28); }"
+        )
+        cw.addWidget(self._fb_body)
+        cw.addSpacing(10)
 
-        lay.addSpacing(16)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setObjectName("SepLine")
+        cw.addWidget(sep2)
+        cw.addSpacing(10)
 
-        # ── Bottom row: status + submit ────────────────────────────
+        # -- Bottom row: status label + submit button
         bottom_row = QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 0, 0)
         bottom_row.setSpacing(12)
@@ -1516,115 +2370,73 @@ class SettingsPanel(QWidget):
         bottom_row.addWidget(self._fb_status_lbl, 1)
 
         self._fb_submit_btn = QPushButton("Send feedback  →")
-        self._fb_submit_btn.setFixedHeight(38)
+        self._fb_submit_btn.setFixedHeight(36)
+        self._fb_submit_btn.setFixedWidth(162)
         self._fb_submit_btn.setStyleSheet(_PRIMARY_BTN_SS)
         self._fb_submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fb_submit_btn.setFont(_font("Manrope", 11, bold=True))
         self._fb_submit_btn.clicked.connect(self._submit_feedback)
         bottom_row.addWidget(self._fb_submit_btn)
 
-        lay.addLayout(bottom_row)
+        cw.addLayout(bottom_row)
 
-        page.add_widget(self._fb_card)
+        page.add_widget(form_card)
         page.add_stretch()
         return page
 
-    def _apply_personality_toggle_theme(self, dark: bool):
-        """Apply inline stylesheets to the personality pill toggle."""
-        if not hasattr(self, "mode_container"):
-            return
-        if dark:
-            track_bg     = "rgba(0,0,0,0.35)"
-            track_border = "rgba(255,255,255,0.10)"
-            sel_bg       = "rgba(255,255,255,0.14)"
-            sel_border   = "rgba(255,255,255,0.22)"
-            text_on      = "#ffffff"
-            text_off     = "rgba(255,255,255,0.45)"
-        else:
-            track_bg     = "rgba(0,0,0,0.07)"
-            track_border = "rgba(0,0,0,0.12)"
-            sel_bg       = "#ffffff"
-            sel_border   = "rgba(0,0,0,0.14)"
-            text_on      = "#18181b"
-            text_off     = "rgba(0,0,0,0.40)"
+    def _on_feedback_card_selected(self, fb_type: str):
+        self._feedback_type = fb_type
+        if hasattr(self, "_fb_feature_card"):
+            self._fb_feature_card.set_selected(fb_type == "feature_request")
+        if hasattr(self, "_fb_bug_card"):
+            self._fb_bug_card.set_selected(fb_type == "bug_report")
+        if hasattr(self, "_fb_form_card") and isinstance(self._fb_form_card, _FbFormCard):
+            self._fb_form_card.set_accent(fb_type)
 
-        self.mode_container.setStyleSheet(f"""
-            QFrame {{
-                background: {track_bg};
-                border-radius: 11px;
-                border: 1px solid {track_border};
-            }}
-        """)
-        btn_ss = f"""
-            QPushButton {{
-                background: transparent;
-                border: none;
-                border-radius: 9px;
-                color: {text_off};
-                font-family: "Manrope";
-                font-size: 12px;
-                padding: 0px 10px;
-            }}
-            QPushButton:hover {{ color: {text_on}; }}
-            QPushButton:checked {{
-                background: {sel_bg};
-                border: 1px solid {sel_border};
-                color: {text_on};
-                font-weight: 600;
-            }}
-        """
-        self.personality_prof_btn.setStyleSheet(btn_ss)
-        self.personality_unf_btn.setStyleSheet(btn_ss)
+    def _apply_personality_toggle_theme(self, dark: bool):
+        """Propagate dark/light theme to personality cards."""
+        if not hasattr(self, "_mode_options"):
+            return
+        for card in self._mode_options.values():
+            card.set_dark(dark)
 
     def _apply_fb_pill_theme(self, dark: bool):
-        """Apply inline stylesheets to the feedback type toggle so they render correctly
-        inside the painted card regardless of the parent stylesheet cascade."""
-        if not hasattr(self, "_fb_pill"):
-            return
-        if dark:
-            track_bg     = "rgba(0,0,0,0.35)"
-            track_border = "rgba(255,255,255,0.10)"
-            sel_bg       = "rgba(255,255,255,0.14)"
-            sel_border   = "rgba(255,255,255,0.22)"
-            text_on      = "#ffffff"
-            text_off     = "rgba(255,255,255,0.45)"
-        else:
-            track_bg     = "rgba(0,0,0,0.07)"
-            track_border = "rgba(0,0,0,0.12)"
-            sel_bg       = "#ffffff"
-            sel_border   = "rgba(0,0,0,0.14)"
-            text_on      = "#18181b"
-            text_off     = "rgba(0,0,0,0.40)"
-
-        self._fb_pill.setStyleSheet(f"""
-            QFrame {{
-                background: {track_bg};
-                border-radius: 11px;
-                border: 1px solid {track_border};
-            }}
-        """)
-        btn_ss = f"""
-            QPushButton {{
-                background: transparent;
-                border: none;
-                border-radius: 9px;
-                color: {text_off};
-                font-family: "Manrope";
-                font-size: 11px;
-                padding: 0px 10px;
-            }}
-            QPushButton:hover {{
-                color: {text_on};
-            }}
-            QPushButton:checked {{
-                background: {sel_bg};
-                border: 1px solid {sel_border};
-                color: {text_on};
-                font-weight: 600;
-            }}
-        """
-        self._fb_feature_btn.setStyleSheet(btn_ss)
-        self._fb_bug_btn.setStyleSheet(btn_ss)
+        """Propagate dark/light theme to feedback type cards and form card."""
+        for attr in ("_fb_feature_card", "_fb_bug_card"):
+            card = getattr(self, attr, None)
+            if card:
+                card.set_dark(dark)
+        if hasattr(self, "_fb_form_card") and isinstance(self._fb_form_card, _FbFormCard):
+            self._fb_form_card.set_dark(dark)
+        tag_color = ("color: rgba(255,255,255,0.32); letter-spacing: 1px; background: transparent;"
+                     if dark else
+                     "color: rgba(0,0,0,0.38); letter-spacing: 1px; background: transparent;")
+        for attr in ("_fb_title_tag", "_fb_desc_tag"):
+            lbl = getattr(self, attr, None)
+            if lbl:
+                lbl.setStyleSheet(tag_color)
+        title_ss = (
+            "QLineEdit { background: transparent; border: none; "
+            "color: rgba(255,255,255,0.90); font-family: 'Manrope'; font-size: 13px; font-weight: 700; padding: 0 2px; } "
+            "QLineEdit::placeholder { color: rgba(255,255,255,0.22); }"
+            if dark else
+            "QLineEdit { background: transparent; border: none; "
+            "color: rgba(17,17,17,0.90); font-family: 'Manrope'; font-size: 13px; font-weight: 700; padding: 0 2px; } "
+            "QLineEdit::placeholder { color: rgba(17,17,17,0.28); }"
+        )
+        if hasattr(self, "_fb_title"):
+            self._fb_title.setStyleSheet(title_ss)
+        body_ss = (
+            "QTextEdit { background: transparent; border: none; "
+            "color: rgba(255,255,255,0.85); font-family: 'Manrope'; font-size: 11px; padding: 2px; } "
+            "QTextEdit::placeholder { color: rgba(255,255,255,0.22); }"
+            if dark else
+            "QTextEdit { background: transparent; border: none; "
+            "color: rgba(17,17,17,0.85); font-family: 'Manrope'; font-size: 11px; padding: 2px; } "
+            "QTextEdit::placeholder { color: rgba(17,17,17,0.28); }"
+        )
+        if hasattr(self, "_fb_body"):
+            self._fb_body.setStyleSheet(body_ss)
 
     def _on_feedback_type_changed(self, btn_id: int, checked: bool):
         if checked:
@@ -1698,67 +2510,192 @@ class SettingsPanel(QWidget):
         if msg:
             QTimer.singleShot(8000, lambda: self._fb_status_lbl.setText(""))
 
+    # ── Plan card factory ─────────────────────────────────────────────
+
+    def _make_plan_card(self, featured: bool) -> tuple:
+        """Build a professional plan card. Returns (card_widget, cta_button)."""
+        card = _PlanCard(featured=featured)
+        inner = card._inner
+
+        # Name + badge row
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_lbl = QLabel("Yearly" if featured else "Monthly")
+        name_lbl.setFont(_font("Manrope", 11, bold=True))
+        name_row.addWidget(name_lbl)
+        if featured:
+            badge = QLabel("Best value")
+            badge.setObjectName("BestValueBadge")
+            badge.setFont(_font("Manrope", 8, bold=True))
+            badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            name_row.addWidget(badge)
+        name_row.addStretch()
+        inner.addLayout(name_row)
+        inner.addSpacing(10)
+
+        # Price display
+        price_row = QHBoxLayout()
+        price_row.setSpacing(3)
+        price_row.setContentsMargins(0, 0, 0, 0)
+        price_val = QLabel("$6" if featured else "$9")
+        price_val.setFont(_font("Manrope", 26, bold=True))
+        per_lbl = QLabel("/mo")
+        per_lbl.setFont(_font("Manrope", 11))
+        per_lbl.setObjectName("PlanCardDesc")
+        per_lbl.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        price_row.addWidget(price_val)
+        price_row.addWidget(per_lbl)
+        price_row.addStretch()
+        inner.addLayout(price_row)
+
+        billing_lbl = QLabel("$72 billed yearly" if featured else "billed monthly")
+        billing_lbl.setFont(_font("Manrope", 9))
+        billing_lbl.setObjectName("PlanCardDesc")
+        inner.addWidget(billing_lbl)
+        inner.addSpacing(12)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setObjectName("SepLine")
+        inner.addWidget(sep)
+        inner.addSpacing(10)
+
+        # Features
+        features = ["Unlimited AI queries", "No daily limits", "Sync across devices"]
+        if featured:
+            features.append("Save 33% vs monthly")
+        for feat in features:
+            feat_row = QHBoxLayout()
+            feat_row.setSpacing(6)
+            feat_row.setContentsMargins(0, 0, 0, 0)
+            check = QLabel("✓")
+            check.setFont(_font("Manrope", 10))
+            check.setStyleSheet("color: #818cf8; background: transparent;")
+            check.setFixedWidth(14)
+            feat_lbl = QLabel(feat)
+            feat_lbl.setFont(_font("Manrope", 10))
+            feat_lbl.setWordWrap(True)
+            feat_row.addWidget(check)
+            feat_row.addWidget(feat_lbl, 1)
+            inner.addLayout(feat_row)
+            inner.addSpacing(4)
+
+        inner.addStretch()
+        inner.addSpacing(12)
+
+        # CTA button
+        cta = QPushButton("Get Yearly" if featured else "Get Monthly")
+        cta.setFixedHeight(36)
+        cta.setFont(_font("Manrope", 11, bold=True))
+        cta.setStyleSheet(_PLAN_BTN_SS if featured else _GHOST_PLAN_BTN_SS)
+        cta.setCursor(Qt.CursorShape.PointingHandCursor)
+        inner.addWidget(cta)
+
+        return card, cta
+
     # ── Logged-out: sign-in / sign-up form ───────────────────────────
 
     def _build_auth_form(self) -> QWidget:
+        dark = self.current_theme == "dark"
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, 8, 0, 0)
         lay.setSpacing(14)
 
         # ── Sign-in card ─────────────────────────────────────────────
-        self._auth_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        self._auth_card = _FeedbackFormCard(dark=dark)
         ac = self._auth_card._inner
+        ac.setContentsMargins(28, 28, 28, 28)
         ac.setSpacing(0)
 
+        # Header — logo mark + title
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr_row.setSpacing(10)
+        logo_mark = QLabel("✦")
+        logo_mark.setFont(_font("Manrope", 16))
+        logo_mark.setStyleSheet("color: #818cf8; background: transparent;")
         ac_title = QLabel("Sign in to Omni")
-        ac_title.setFont(_font("Manrope", 15, bold=True))
-        ac.addWidget(ac_title)
-
+        ac_title.setFont(_font("Manrope", 16, bold=True))
+        hdr_row.addWidget(logo_mark)
+        hdr_row.addWidget(ac_title)
+        hdr_row.addStretch()
+        ac.addLayout(hdr_row)
         ac.addSpacing(4)
 
-        ac_sub = QLabel("Already paid? Sign in with your checkout email to activate Pro.")
+        ac_sub = QLabel("Access your account and manage your subscription.")
         ac_sub.setObjectName("DescLbl")
         ac_sub.setFont(_font("Manrope", 10))
         ac_sub.setWordWrap(True)
         ac.addWidget(ac_sub)
+        ac.addSpacing(20)
 
-        ac.addSpacing(14)
+        # Google OAuth — primary action at top
+        self.google_btn = QPushButton("  Continue with Google")
+        self.google_btn.setFixedHeight(42)
+        self.google_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.google_btn.setIcon(_make_google_icon(18))
+        self.google_btn.setIconSize(QSize(18, 18))
+        self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.google_btn.setFont(_font("Manrope", 12))
+        self.google_btn.setStyleSheet(_GOOGLE_BTN_SS)
+        self.google_btn.clicked.connect(lambda: self._do_oauth("google"))
+        ac.addWidget(self.google_btn)
+        ac.addSpacing(18)
 
-        self.auth_email_edit = self._edit("Email")
+        # "or sign in with email" divider
+        sep_row = QHBoxLayout()
+        sep_row.setContentsMargins(0, 0, 0, 0)
+        sep_row.setSpacing(10)
+        sep_l = QFrame()
+        sep_l.setFrameShape(QFrame.Shape.HLine)
+        sep_l.setObjectName("SepLine")
+        sep_r = QFrame()
+        sep_r.setFrameShape(QFrame.Shape.HLine)
+        sep_r.setObjectName("SepLine")
+        sep_lbl = QLabel("or sign in with email")
+        sep_lbl.setObjectName("DescLbl")
+        sep_lbl.setFont(_font("Manrope", 9))
+        sep_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sep_row.addWidget(sep_l, 1)
+        sep_row.addWidget(sep_lbl)
+        sep_row.addWidget(sep_r, 1)
+        ac.addLayout(sep_row)
+        ac.addSpacing(16)
+
+        # Email field (placeholder only — no label needed)
+        self.auth_email_edit = self._edit("your@email.com")
         self.auth_email_edit.textChanged.connect(lambda: self._set_auth_error(""))
         ac.addWidget(self.auth_email_edit)
-
         ac.addSpacing(8)
 
-        self.auth_pass_edit = self._edit("Password", password=True)
+        # Password field
+        self.auth_pass_edit = self._edit("••••••••", password=True)
         self.auth_pass_edit.textChanged.connect(lambda: self._set_auth_error(""))
         self.auth_pass_edit.returnPressed.connect(self._do_sign_in)
         ac.addWidget(self.auth_pass_edit)
+        ac.addSpacing(6)
 
-        ac.addSpacing(10)
+        # Forgot password — right-aligned link
+        forgot_row = QHBoxLayout()
+        forgot_row.setContentsMargins(0, 0, 0, 0)
+        forgot_row.addStretch()
+        self.forgot_pw_btn = QPushButton("Forgot password?")
+        self.forgot_pw_btn.setFlat(True)
+        self.forgot_pw_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forgot_pw_btn.setStyleSheet(
+            "QPushButton { color: rgba(255,255,255,0.35); background: transparent; border: none; "
+            "font-family: Manrope; font-size: 10px; text-align: right; padding: 0; } "
+            "QPushButton:hover { color: #818cf8; }"
+        )
+        self.forgot_pw_btn.clicked.connect(self._do_forgot_password)
+        forgot_row.addWidget(self.forgot_pw_btn)
+        ac.addLayout(forgot_row)
+        ac.addSpacing(14)
 
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(8)
-
-        self.sign_in_btn = QPushButton("Sign In")
-        self.sign_in_btn.setFixedHeight(38)
-        self.sign_in_btn.setStyleSheet(_PRIMARY_BTN_SS)
-        self.sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sign_in_btn.clicked.connect(self._do_sign_in)
-
-        self.sign_up_btn = QPushButton("Sign Up")
-        self.sign_up_btn.setObjectName("ResetBtn")
-        self.sign_up_btn.setFixedHeight(38)
-        self.sign_up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sign_up_btn.clicked.connect(self._do_sign_up)
-
-        btn_row.addWidget(self.sign_in_btn)
-        btn_row.addWidget(self.sign_up_btn)
-        btn_row.addStretch()
-        ac.addLayout(btn_row)
-
+        # Error label
         self.auth_error_lbl = QLabel("")
         self.auth_error_lbl.setFont(_font("Manrope", 10))
         self.auth_error_lbl.setStyleSheet("color: #f87171; background: transparent;")
@@ -1766,68 +2703,42 @@ class SettingsPanel(QWidget):
         self.auth_error_lbl.setVisible(False)
         ac.addWidget(self.auth_error_lbl)
 
-        self.forgot_pw_btn = QPushButton("Forgot password?")
-        self.forgot_pw_btn.setFlat(True)
-        self.forgot_pw_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.forgot_pw_btn.setStyleSheet(
-            "QPushButton { color: rgba(255,255,255,0.38); background: transparent; border: none; "
-            "font-family: Manrope; font-size: 10px; text-align: left; padding: 0; } "
-            "QPushButton:hover { color: rgba(255,255,255,0.65); }"
+        # Sign In — full-width primary
+        self.sign_in_btn = QPushButton("Sign In")
+        self.sign_in_btn.setFixedHeight(42)
+        self.sign_in_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.sign_in_btn.setStyleSheet(_PRIMARY_BTN_SS)
+        self.sign_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_in_btn.setFont(_font("Manrope", 12, bold=True))
+        self.sign_in_btn.clicked.connect(self._do_sign_in)
+        ac.addWidget(self.sign_in_btn)
+        ac.addSpacing(14)
+
+        # Create account — inline text link row
+        signup_row = QHBoxLayout()
+        signup_row.setContentsMargins(0, 0, 0, 0)
+        signup_row.setSpacing(0)
+        signup_row.addStretch()
+        no_acct_lbl = QLabel("Don't have an account?")
+        no_acct_lbl.setFont(_font("Manrope", 10))
+        no_acct_lbl.setObjectName("DescLbl")
+        signup_row.addWidget(no_acct_lbl)
+        signup_row.addSpacing(5)
+        self.sign_up_btn = QPushButton("Create one →")
+        self.sign_up_btn.setObjectName("ResetBtn")
+        self.sign_up_btn.setFlat(True)
+        self.sign_up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_up_btn.setFont(_font("Manrope", 10, bold=True))
+        self.sign_up_btn.setStyleSheet(
+            "QPushButton { color: #818cf8; background: transparent; border: none; padding: 0; } "
+            "QPushButton:hover { color: #a5b4fc; }"
         )
-        self.forgot_pw_btn.clicked.connect(self._do_forgot_password)
-        ac.addWidget(self.forgot_pw_btn)
+        self.sign_up_btn.clicked.connect(self._do_sign_up)
+        signup_row.addWidget(self.sign_up_btn)
+        signup_row.addStretch()
+        ac.addLayout(signup_row)
 
-        ac.addSpacing(12)
-
-        # ── Usage bar (shown when not logged in) ─────────────────────
-        self._login_usage_section = QWidget()
-        lus = QVBoxLayout(self._login_usage_section)
-        lus.setContentsMargins(0, 0, 0, 8)
-        lus.setSpacing(0)
-
-        lus_sep = QFrame(); lus_sep.setFrameShape(QFrame.Shape.HLine); lus_sep.setObjectName("SepLine")
-        lus.addWidget(lus_sep)
-        lus.addSpacing(10)
-
-        self.login_usage_bar = _UsageBar()
-        lus.addWidget(self.login_usage_bar)
-        lus.addSpacing(4)
-
-        self.login_usage_lbl = QLabel("0 / 10 requests today")
-        self.login_usage_lbl.setObjectName("UsageLbl")
-        self.login_usage_lbl.setFont(_font("Manrope", 10))
-        lus.addWidget(self.login_usage_lbl)
-
-        ac.addWidget(self._login_usage_section)
-
-        ac.addSpacing(12)
-
-        sep_row = QHBoxLayout()
-        sep_row.setContentsMargins(0, 0, 0, 0)
-        sep_l = QFrame(); sep_l.setFrameShape(QFrame.Shape.HLine); sep_l.setObjectName("SepLine")
-        sep_r = QFrame(); sep_r.setFrameShape(QFrame.Shape.HLine); sep_r.setObjectName("SepLine")
-        sep_lbl = QLabel("or")
-        sep_lbl.setObjectName("DescLbl")
-        sep_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sep_lbl.setFixedWidth(24)
-        sep_row.addWidget(sep_l)
-        sep_row.addWidget(sep_lbl)
-        sep_row.addWidget(sep_r)
-        ac.addLayout(sep_row)
-
-        ac.addSpacing(10)
-
-        self.google_btn = QPushButton("  Continue with Google")
-        self.google_btn.setFixedHeight(40)
-        self.google_btn.setIcon(_make_google_icon(18))
-        self.google_btn.setIconSize(QSize(18, 18))
-        self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.google_btn.setStyleSheet(_GOOGLE_BTN_SS)
-        self.google_btn.clicked.connect(lambda: self._do_oauth("google"))
-        ac.addWidget(self.google_btn)
-
-        ac.addSpacing(6)
-
+        # Hidden compat widgets
         self.github_btn = QPushButton("Continue with GitHub")
         self.github_btn.setObjectName("OAuthBtn")
         self.github_btn.setFixedHeight(38)
@@ -1835,63 +2746,82 @@ class SettingsPanel(QWidget):
         self.github_btn.clicked.connect(lambda: self._do_oauth("github"))
         self.github_btn.setVisible(False)
 
+        # Placeholder spacer so the card layout doesn't shift — real usage card is below
+        _spacer = QWidget()
+        _spacer.setVisible(False)
+        ac.addWidget(_spacer)
+
         lay.addWidget(self._auth_card)
 
-        # ── Upgrade CTA ──────────────────────────────────────────────
+        # ── Usage card (shown for free logged-out users) ───────────────
+        self._login_usage_section = _FeedbackFormCard(dark=dark)
+        self._login_usage_section.setVisible(False)
+        lus = self._login_usage_section._inner
+        lus.setContentsMargins(20, 14, 20, 14)
+        lus.setSpacing(6)
+
+        usage_hdr_row = QHBoxLayout()
+        usage_hdr_lbl = QLabel("DAILY USAGE")
+        usage_hdr_lbl.setObjectName("SectionHeader")
+        usage_hdr_lbl.setFont(_font("Manrope", 9, bold=True))
+        usage_hdr_row.addWidget(usage_hdr_lbl)
+        usage_hdr_row.addStretch()
+        self.login_usage_lbl = QLabel("0 / 10 requests today")
+        self.login_usage_lbl.setObjectName("UsageLbl")
+        self.login_usage_lbl.setFont(_font("Manrope", 10))
+        usage_hdr_row.addWidget(self.login_usage_lbl)
+        lus.addLayout(usage_hdr_row)
+
+        self.login_usage_bar = _UsageBar()
+        lus.addWidget(self.login_usage_bar)
+        lay.addWidget(self._login_usage_section)
+
+        # ── Plans section ─────────────────────────────────────────────
         self.upgrade_box_login = _UpgradeBox()
-        ub = self.upgrade_box_login._inner
+        ub_login = self.upgrade_box_login._inner
+        ub_login.setContentsMargins(20, 18, 20, 18)
+        ub_login.setSpacing(0)
 
+        ub_hdr = QHBoxLayout()
+        ub_hdr.setSpacing(8)
+        ub_icon = QLabel("✦")
+        ub_icon.setFont(_font("Manrope", 13))
+        ub_icon.setStyleSheet("color: #818cf8; background: transparent;")
         ub_title = QLabel("Upgrade to Pro")
-        ub_title.setFont(_font("Manrope", 15, bold=True))
-        ub.addWidget(ub_title)
+        ub_title.setFont(_font("Manrope", 13, bold=True))
+        ub_hdr.addWidget(ub_icon)
+        ub_hdr.addWidget(ub_title)
+        ub_hdr.addStretch()
+        ub_login.addLayout(ub_hdr)
+        ub_login.addSpacing(4)
 
-        tagline = QLabel("Unlimited AI queries, no daily limits.")
-        tagline.setObjectName("DescLbl")
-        tagline.setFont(_font("Manrope", 11))
-        ub.addWidget(tagline)
+        ub_tagline = QLabel("Unlimited AI queries, no daily limits. Cancel anytime.")
+        ub_tagline.setObjectName("DescLbl")
+        ub_tagline.setFont(_font("Manrope", 10))
+        ub_tagline.setWordWrap(True)
+        ub_login.addWidget(ub_tagline)
+        ub_login.addSpacing(14)
 
-        ub.addSpacing(4)
+        plan_cards_row = QHBoxLayout()
+        plan_cards_row.setContentsMargins(0, 0, 0, 0)
+        plan_cards_row.setSpacing(10)
 
-        monthly_card = _PlanCard(featured=False)
-        mc = monthly_card._inner
-        mc_info = QVBoxLayout(); mc_info.setSpacing(2)
-        mc_name = QLabel("Monthly"); mc_name.setFont(_font("Manrope", 12, bold=True))
-        mc_desc = QLabel("$9 / mo — billed monthly"); mc_desc.setObjectName("PlanCardDesc")
-        mc_info.addWidget(mc_name); mc_info.addWidget(mc_desc)
-        mc.addLayout(mc_info); mc.addStretch()
-        self.upgrade_monthly_btn_login = QPushButton("Choose  →")
-        self.upgrade_monthly_btn_login.setFixedHeight(34)
-        self.upgrade_monthly_btn_login.setFixedWidth(110)
-        self.upgrade_monthly_btn_login.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_monthly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        monthly_plan, self.upgrade_monthly_btn_login = self._make_plan_card(featured=False)
         self.upgrade_monthly_btn_login.clicked.connect(lambda: self._start_checkout("monthly"))
-        mc.addWidget(self.upgrade_monthly_btn_login)
-        ub.addWidget(monthly_card)
+        plan_cards_row.addWidget(monthly_plan)
 
-        yearly_card = _PlanCard(featured=True)
-        yc = yearly_card._inner
-        yc_info = QVBoxLayout(); yc_info.setSpacing(2)
-        yc_name_row = QHBoxLayout(); yc_name_row.setSpacing(6); yc_name_row.setContentsMargins(0,0,0,0)
-        yc_name = QLabel("Yearly"); yc_name.setFont(_font("Manrope", 12, bold=True))
-        yc_badge = QLabel("Best value"); yc_badge.setObjectName("BestValueBadge"); yc_badge.setFont(_font("Manrope", 9, bold=True))
-        yc_name_row.addWidget(yc_name); yc_name_row.addWidget(yc_badge); yc_name_row.addStretch()
-        yc_desc = QLabel("$6 / mo — billed $72 / year"); yc_desc.setObjectName("PlanCardDesc")
-        yc_info.addLayout(yc_name_row); yc_info.addWidget(yc_desc)
-        yc.addLayout(yc_info); yc.addStretch()
-        self.upgrade_yearly_btn_login = QPushButton("Choose  →")
-        self.upgrade_yearly_btn_login.setFixedHeight(34)
-        self.upgrade_yearly_btn_login.setFixedWidth(110)
-        self.upgrade_yearly_btn_login.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_yearly_btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        yearly_plan, self.upgrade_yearly_btn_login = self._make_plan_card(featured=True)
         self.upgrade_yearly_btn_login.clicked.connect(lambda: self._start_checkout("yearly"))
-        yc.addWidget(self.upgrade_yearly_btn_login)
-        ub.addWidget(yearly_card)
+        plan_cards_row.addWidget(yearly_plan)
+
+        ub_login.addLayout(plan_cards_row)
+        ub_login.addSpacing(6)
 
         self.upgrade_status_lbl_login = QLabel("")
         self.upgrade_status_lbl_login.setObjectName("DescLbl")
         self.upgrade_status_lbl_login.setFont(_font("Manrope", 10))
         self.upgrade_status_lbl_login.setWordWrap(True)
-        ub.addWidget(self.upgrade_status_lbl_login)
+        ub_login.addWidget(self.upgrade_status_lbl_login)
 
         lay.addWidget(self.upgrade_box_login)
 
@@ -1904,223 +2834,121 @@ class SettingsPanel(QWidget):
         return f
 
     def _build_account_info(self) -> QWidget:
+        dark = self.current_theme == "dark"
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(14)
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(12)
 
-        # ── Profile card ─────────────────────────────────────────────
-        self._profile_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
+        # ── Profile hero card ─────────────────────────────────────────
+        self._profile_card = _FeedbackFormCard(dark=dark)
         pc = self._profile_card._inner
+        pc.setContentsMargins(20, 18, 20, 18)
         pc.setSpacing(0)
 
-        # Row: email + plan badge + refresh
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        profile_row.setSpacing(14)
+
+        self._profile_avatar = _AvatarWidget(initial="?")
+        profile_row.addWidget(self._profile_avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        info_col = QVBoxLayout()
+        info_col.setSpacing(5)
+        info_col.setContentsMargins(0, 0, 0, 0)
 
         self.account_email_lbl = QLabel("")
-        self.account_email_lbl.setFont(_font("Manrope", 12, bold=True))
+        self.account_email_lbl.setFont(_font("Manrope", 13, bold=True))
+        info_col.addWidget(self.account_email_lbl)
 
         self.plan_badge = QLabel("FREE")
         self.plan_badge.setObjectName("PlanBadgeFree")
-        self.plan_badge.setFont(_font("Manrope", 10, bold=True))
-        self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.plan_badge.setFixedHeight(24)
-        self.plan_badge.setFixedWidth(52)
+        self.plan_badge.setFont(_font("Manrope", 9, bold=True))
+        self.plan_badge.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.plan_badge.setFixedHeight(20)
+        self.plan_badge.setContentsMargins(8, 0, 8, 0)
+        self.plan_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        info_col.addWidget(self.plan_badge)
+
+        profile_row.addLayout(info_col, 1)
 
         self.refresh_btn = QPushButton("↻")
         self.refresh_btn.setObjectName("RefreshBtn")
-        self.refresh_btn.setFixedSize(28, 28)
+        self.refresh_btn.setFixedSize(30, 30)
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh_btn.setToolTip("Refresh plan status")
         self.refresh_btn.clicked.connect(self.refresh_account)
+        profile_row.addWidget(self.refresh_btn, 0, Qt.AlignmentFlag.AlignTop)
 
-        top_row.addWidget(self.account_email_lbl)
-        top_row.addStretch()
-        top_row.addWidget(self.plan_badge)
-        top_row.addWidget(self.refresh_btn)
-        pc.addLayout(top_row)
+        pc.addLayout(profile_row)
+        lay.addWidget(self._profile_card)
 
-        # ── Usage section (hidden for Pro) ───────────────────────────
-        self._usage_section = QWidget()
-        us = QVBoxLayout(self._usage_section)
-        us.setContentsMargins(0, 14, 0, 0)
-        us.setSpacing(0)
+        # Legacy refs kept for other methods
+        self._security_card = self._profile_card
+        self.secure_box = self._profile_card
 
-        us.addWidget(self._sep())
-        us.addSpacing(12)
+        # ── Usage card (hidden for Pro) ───────────────────────────────
+        self._usage_section = _FeedbackFormCard(dark=dark)
+        us_inner = self._usage_section._inner
+        us_inner.setContentsMargins(20, 14, 20, 14)
+        us_inner.setSpacing(8)
 
-        self.usage_bar = _UsageBar()
-        us.addWidget(self.usage_bar)
-
-        us.addSpacing(5)
-
+        usage_hdr_row = QHBoxLayout()
+        usage_hdr_row.setContentsMargins(0, 0, 0, 0)
+        usage_hdr_row.addWidget(_section_header("DAILY USAGE"))
+        usage_hdr_row.addStretch()
         self.usage_lbl = QLabel("0 / 10 requests today")
         self.usage_lbl.setObjectName("UsageLbl")
         self.usage_lbl.setFont(_font("Manrope", 10))
-        us.addWidget(self.usage_lbl)
+        self.usage_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        usage_hdr_row.addWidget(self.usage_lbl)
+        us_inner.addLayout(usage_hdr_row)
 
-        pc.addWidget(self._usage_section)
+        self.usage_bar = _UsageBar()
+        us_inner.addWidget(self.usage_bar)
+        lay.addWidget(self._usage_section)
 
-        # ── Sync row ──────────────────────────────────────────────────
-        pc.addSpacing(14)
-        pc.addWidget(self._sep())
-        pc.addSpacing(12)
-
-        sync_row = QHBoxLayout()
-        sync_row.setContentsMargins(0, 0, 0, 0)
-        sync_row.setSpacing(8)
-
-        self.sync_status_lbl = QLabel("Memory sync: —")
-        self.sync_status_lbl.setObjectName("UsageLbl")
-        self.sync_status_lbl.setFont(_font("Manrope", 10))
-
-        self.sync_btn = QPushButton("Sync Now")
-        self.sync_btn.setObjectName("ResetBtn")
-        self.sync_btn.setFixedHeight(28)
-        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sync_btn.clicked.connect(self._do_sync_now)
-
-        sync_row.addWidget(self.sync_status_lbl)
-        sync_row.addStretch()
-        sync_row.addWidget(self.sync_btn)
-        pc.addLayout(sync_row)
-
-        # ── Sign out row ──────────────────────────────────────────────
-        pc.addSpacing(14)
-        pc.addWidget(self._sep())
-        pc.addSpacing(12)
-
-        sign_out_row = QHBoxLayout()
-        sign_out_row.setContentsMargins(0, 0, 0, 0)
-        sign_out_row.addStretch()
-        self.sign_out_btn = QPushButton("Sign Out")
-        self.sign_out_btn.setObjectName("ResetBtn")
-        self.sign_out_btn.setFixedHeight(34)
-        self.sign_out_btn.setFixedWidth(100)
-        self.sign_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sign_out_btn.clicked.connect(self._do_sign_out)
-        sign_out_row.addWidget(self.sign_out_btn)
-        pc.addLayout(sign_out_row)
-
-        lay.addWidget(self._profile_card)
-
-        # ── Security card ─────────────────────────────────────────────
-        self._security_card = _FeedbackFormCard(dark=(self.current_theme == "dark"))
-        sc = self._security_card._inner
-        sc.setSpacing(0)
-
-        sec_title_row = QHBoxLayout()
-        sec_title_row.setContentsMargins(0, 0, 0, 0)
-        sec_title_row.setSpacing(8)
-        sec_icon = QLabel("🔒")
-        sec_icon.setFont(_font("Manrope", 14))
-        sec_icon.setFixedWidth(22)
-        sec_heading = QLabel("Account Security")
-        sec_heading.setFont(_font("Manrope", 14, bold=True))
-        sec_title_row.addWidget(sec_icon)
-        sec_title_row.addWidget(sec_heading)
-        sec_title_row.addStretch()
-        sc.addLayout(sec_title_row)
-
-        sc.addSpacing(6)
-
-        secure_desc = QLabel("Set a password or connect Google so you can sign in without a magic link.")
-        secure_desc.setObjectName("DescLbl")
-        secure_desc.setFont(_font("Manrope", 10))
-        secure_desc.setWordWrap(True)
-        sc.addWidget(secure_desc)
-
-        sc.addSpacing(16)
-
-        self.new_password_edit = QLineEdit()
-        self.new_password_edit.setObjectName("SettingsEdit")
-        self.new_password_edit.setPlaceholderText("New password (min. 6 chars)")
-        self.new_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.new_password_edit.setFixedHeight(38)
-        self.new_password_edit.returnPressed.connect(self._do_set_password)
-        sc.addWidget(self.new_password_edit)
-
-        sc.addSpacing(10)
-
-        secure_btns = QHBoxLayout()
-        secure_btns.setContentsMargins(0, 0, 0, 0)
-        secure_btns.setSpacing(8)
-
-        self.set_password_btn = QPushButton("Set Password")
-        self.set_password_btn.setObjectName("SaveBtn")
-        self.set_password_btn.setFixedHeight(36)
-        self.set_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.set_password_btn.clicked.connect(self._do_set_password)
-
-        self.link_google_btn = QPushButton("  Connect Google")
-        self.link_google_btn.setFixedHeight(36)
-        self.link_google_btn.setIcon(_make_google_icon(16))
-        self.link_google_btn.setIconSize(QSize(16, 16))
-        self.link_google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.link_google_btn.setStyleSheet(_GOOGLE_BTN_SS)
-        self.link_google_btn.clicked.connect(lambda: self._do_oauth("google"))
-
-        secure_btns.addWidget(self.set_password_btn)
-        secure_btns.addWidget(self.link_google_btn)
-        secure_btns.addStretch()
-        sc.addLayout(secure_btns)
-
-        # keep secure_box ref pointing to the card for legacy callers
-        self.secure_box = self._security_card
-
-        lay.addWidget(self._security_card)
-
-        # ── Upgrade CTA (hidden for Pro) ──────────────────────────────
+        # ── Upgrade CTA card (hidden for Pro) ─────────────────────────
         self.upgrade_box = _UpgradeBox()
         ub = self.upgrade_box._inner
+        ub.setContentsMargins(20, 18, 20, 18)
+        ub.setSpacing(0)
 
+        ub_hdr_row = QHBoxLayout()
+        ub_hdr_row.setContentsMargins(0, 0, 0, 0)
+        ub_hdr_row.setSpacing(8)
+        ub_icon2 = QLabel("✦")
+        ub_icon2.setFont(_font("Manrope", 14))
+        ub_icon2.setStyleSheet("color: #818cf8; background: transparent;")
         ub_title = QLabel("Upgrade to Pro")
-        ub_title.setFont(_font("Manrope", 15, bold=True))
-        ub.addWidget(ub_title)
-
-        tagline = QLabel("Unlimited AI queries, no daily limits.")
-        tagline.setObjectName("DescLbl")
-        tagline.setFont(_font("Manrope", 11))
-        ub.addWidget(tagline)
-
+        ub_title.setFont(_font("Manrope", 14, bold=True))
+        ub_hdr_row.addWidget(ub_icon2)
+        ub_hdr_row.addWidget(ub_title)
+        ub_hdr_row.addStretch()
+        ub.addLayout(ub_hdr_row)
         ub.addSpacing(4)
 
-        monthly_card = _PlanCard(featured=False)
-        mc = monthly_card._inner
-        mc_info = QVBoxLayout(); mc_info.setSpacing(2)
-        mc_name = QLabel("Monthly"); mc_name.setFont(_font("Manrope", 12, bold=True))
-        mc_desc = QLabel("$9 / mo — billed monthly"); mc_desc.setObjectName("PlanCardDesc")
-        mc_info.addWidget(mc_name); mc_info.addWidget(mc_desc)
-        mc.addLayout(mc_info); mc.addStretch()
-        self.upgrade_monthly_btn = QPushButton("Choose  →")
-        self.upgrade_monthly_btn.setFixedHeight(34)
-        self.upgrade_monthly_btn.setFixedWidth(110)
-        self.upgrade_monthly_btn.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_monthly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
-        mc.addWidget(self.upgrade_monthly_btn)
-        ub.addWidget(monthly_card)
+        tagline = QLabel("Unlimited AI queries, no daily limits. Cancel anytime.")
+        tagline.setObjectName("DescLbl")
+        tagline.setFont(_font("Manrope", 10))
+        tagline.setWordWrap(True)
+        ub.addWidget(tagline)
+        ub.addSpacing(14)
 
-        yearly_card = _PlanCard(featured=True)
-        yc = yearly_card._inner
-        yc_info = QVBoxLayout(); yc_info.setSpacing(2)
-        yc_name_row = QHBoxLayout(); yc_name_row.setSpacing(6); yc_name_row.setContentsMargins(0,0,0,0)
-        yc_name = QLabel("Yearly"); yc_name.setFont(_font("Manrope", 12, bold=True))
-        yc_badge = QLabel("Best value"); yc_badge.setObjectName("BestValueBadge"); yc_badge.setFont(_font("Manrope", 9, bold=True))
-        yc_name_row.addWidget(yc_name); yc_name_row.addWidget(yc_badge); yc_name_row.addStretch()
-        yc_desc = QLabel("$6 / mo — billed $72 / year"); yc_desc.setObjectName("PlanCardDesc")
-        yc_info.addLayout(yc_name_row); yc_info.addWidget(yc_desc)
-        yc.addLayout(yc_info); yc.addStretch()
-        self.upgrade_yearly_btn = QPushButton("Choose  →")
-        self.upgrade_yearly_btn.setFixedHeight(34)
-        self.upgrade_yearly_btn.setFixedWidth(110)
-        self.upgrade_yearly_btn.setStyleSheet(_PLAN_BTN_SS)
-        self.upgrade_yearly_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        plan_row2 = QHBoxLayout()
+        plan_row2.setSpacing(10)
+        plan_row2.setContentsMargins(0, 0, 0, 0)
+
+        mc2, self.upgrade_monthly_btn = self._make_plan_card(featured=False)
+        self.upgrade_monthly_btn.clicked.connect(lambda: self._start_checkout("monthly"))
+        plan_row2.addWidget(mc2)
+
+        yc2, self.upgrade_yearly_btn = self._make_plan_card(featured=True)
         self.upgrade_yearly_btn.clicked.connect(lambda: self._start_checkout("yearly"))
-        yc.addWidget(self.upgrade_yearly_btn)
-        ub.addWidget(yearly_card)
+        plan_row2.addWidget(yc2)
+
+        ub.addLayout(plan_row2)
+        ub.addSpacing(6)
 
         self.upgrade_status_lbl = QLabel("")
         self.upgrade_status_lbl.setObjectName("DescLbl")
@@ -2130,13 +2958,83 @@ class SettingsPanel(QWidget):
 
         lay.addWidget(self.upgrade_box)
 
+        # ── Account settings card ─────────────────────────────────────
+        settings_card = _FeedbackFormCard(dark=dark)
+        sc = settings_card._inner
+        sc.setContentsMargins(20, 16, 20, 4)
+        sc.setSpacing(0)
+
+        sc.addWidget(_section_header("ACCOUNT SETTINGS"))
+        sc.addSpacing(8)
+
+        # Memory sync row
+        sync_row = _SettingsRow("Memory sync", dark=dark)
+        self.sync_status_lbl = QLabel("—")
+        self.sync_status_lbl.setObjectName("UsageLbl")
+        self.sync_status_lbl.setFont(_font("Manrope", 10))
+        sync_row.right.addWidget(self.sync_status_lbl)
+        self.sync_btn = QPushButton("Sync Now")
+        self.sync_btn.setObjectName("ResetBtn")
+        self.sync_btn.setFixedHeight(30)
+        self.sync_btn.setFixedWidth(84)
+        self.sync_btn.setFont(_font("Manrope", 10))
+        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_btn.clicked.connect(self._do_sync_now)
+        sync_row.right.addWidget(self.sync_btn)
+        sc.addWidget(sync_row)
+
+        # Change password row
+        pw_row = _SettingsRow("Change password", dark=dark)
+        self.new_password_edit = self._edit("New password", password=True)
+        self.new_password_edit.setFixedHeight(32)
+        self.new_password_edit.setFixedWidth(172)
+        self.new_password_edit.returnPressed.connect(self._do_set_password)
+        pw_row.right.addWidget(self.new_password_edit)
+        self.set_password_btn = QPushButton("Update")
+        self.set_password_btn.setObjectName("SaveBtn")
+        self.set_password_btn.setFixedHeight(32)
+        self.set_password_btn.setFont(_font("Manrope", 10))
+        self.set_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_password_btn.clicked.connect(self._do_set_password)
+        pw_row.right.addWidget(self.set_password_btn)
+        sc.addWidget(pw_row)
+
+        # Connected accounts row
+        conn_row = _SettingsRow("Google account", dark=dark)
+        self.link_google_btn = QPushButton("  Connect Google")
+        self.link_google_btn.setFixedHeight(32)
+        self.link_google_btn.setIcon(_make_google_icon(15))
+        self.link_google_btn.setIconSize(QSize(15, 15))
+        self.link_google_btn.setFont(_font("Manrope", 10))
+        self.link_google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.link_google_btn.setStyleSheet(_GOOGLE_BTN_SS)
+        self.link_google_btn.clicked.connect(lambda: self._do_oauth("google"))
+        conn_row.right.addWidget(self.link_google_btn)
+        sc.addWidget(conn_row)
+
+        lay.addWidget(settings_card)
+
+        # ── Sign out ──────────────────────────────────────────────────
+        sign_out_outer = QHBoxLayout()
+        sign_out_outer.setContentsMargins(0, 4, 0, 0)
+        sign_out_outer.addStretch()
+        self.sign_out_btn = QPushButton("Sign Out")
+        self.sign_out_btn.setObjectName("ResetBtn")
+        self.sign_out_btn.setFixedHeight(32)
+        self.sign_out_btn.setFixedWidth(88)
+        self.sign_out_btn.setFont(_font("Manrope", 10))
+        self.sign_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sign_out_btn.clicked.connect(self._do_sign_out)
+        sign_out_outer.addWidget(self.sign_out_btn)
+        lay.addLayout(sign_out_outer)
+
         return w
     # ── Widget factories ─────────────────────────────────────────────
 
     def _desc(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setObjectName("DescLbl")
-        lbl.setFont(_font("Manrope", 10))
+        lbl.setFont(_font("Manrope", 11))
         lbl.setWordWrap(True)
         return lbl
 
@@ -2147,10 +3045,34 @@ class SettingsPanel(QWidget):
         return lbl
 
     def _edit(self, placeholder: str, password: bool = False) -> QLineEdit:
+        dark = self.current_theme == "dark"
+        bg       = "#2e2e3e" if dark else "#ebebf0"
+        bg_focus = "#363648" if dark else "#e0e0e8"
+        border   = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.15)"
+        color    = "rgba(255,255,255,0.90)" if dark else "rgba(0,0,0,0.85)"
+        ph_color = "rgba(255,255,255,0.35)" if dark else "rgba(0,0,0,0.35)"
         edit = QLineEdit()
         edit.setObjectName("SettingsEdit")
         edit.setPlaceholderText(placeholder)
         edit.setFixedHeight(40)
+        edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 0px 13px;
+                color: {color};
+                font-family: "Manrope";
+                font-size: 13px;
+            }}
+            QLineEdit:focus {{
+                background: {bg_focus};
+                border: 1px solid #818cf8;
+            }}
+            QLineEdit::placeholder {{
+                color: {ph_color};
+            }}
+        """)
         if password:
             edit.setEchoMode(QLineEdit.EchoMode.Password)
         return edit
@@ -2173,17 +3095,22 @@ class SettingsPanel(QWidget):
 
     def _on_trust_changed(self, level: int):
         settings_store.set("trust_level", level)
-        if hasattr(self, "_trust_slider"):
-            self._trust_slider.set_level(level)
-        if hasattr(self, "_trust_cap_panel"):
-            self._trust_cap_panel.set_level(level)
+        if hasattr(self, "_trust_track") and self._trust_track is not None:
+            self._trust_track.set_level(level)
+        if hasattr(self, "_cap_rows_layout"):
+            self._rebuild_cap_rows(level)
 
     def _on_personality_changed(self):
-        btn = self.personality_group.checkedButton()
-        if btn is None:
-            return
-        mode = btn.property("mode") or "professional"
+        # Legacy — kept for safety; new path goes through _on_personality_mode_selected
+        pass
+
+    def _on_personality_mode_selected(self, mode: str):
         settings_store.set("personality_mode", mode)
+        for m, card in self._mode_options.items():
+            if isinstance(card, _PersonalityCard):
+                card.set_selected(m == mode)
+            else:
+                card.set_active(m == mode)
 
     # ── Account tab ──────────────────────────────────────────────────
 
@@ -2214,7 +3141,10 @@ class SettingsPanel(QWidget):
 
         if logged_in:
             user = auth.get_user() or {}
-            self.account_email_lbl.setText(user.get("email", ""))
+            email = user.get("email", "")
+            self.account_email_lbl.setText(email)
+            if hasattr(self, "_profile_avatar") and isinstance(self._profile_avatar, _AvatarWidget):
+                self._profile_avatar.set_initial(email[:1].upper() if email else "?")
             self.refresh_btn.setEnabled(False)
             self.refresh_btn.setText("…")
             providers = (user.get("app_metadata") or {}).get("providers") or []
@@ -2695,13 +3625,13 @@ class SettingsPanel(QWidget):
         last = state.get("last_synced")
         err  = state.get("error")
         if s == "syncing":
-            self.sync_status_lbl.setText("Memory sync: syncing…")
+            self.sync_status_lbl.setText("Syncing…")
         elif s == "synced" and last:
-            self.sync_status_lbl.setText(f"Memory sync: last synced {last}")
+            self.sync_status_lbl.setText(f"Last synced {last}")
         elif s == "error":
-            self.sync_status_lbl.setText(f"Memory sync: {err or 'error'}")
+            self.sync_status_lbl.setText(err or "Error")
         else:
-            self.sync_status_lbl.setText("Memory sync: —")
+            self.sync_status_lbl.setText("—")
 
     # ── Auth actions ─────────────────────────────────────────────────
 
@@ -2881,8 +3811,8 @@ class SettingsPanel(QWidget):
         selection  = t["selection_bg"]
         scrollbar  = t["scrollbar_handle"]
 
-        field_bg       = "rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.08)"
-        field_bg_focus = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.12)"
+        field_bg       = "#2e2e3e" if dark else "#ebebf0"
+        field_bg_focus = "#363648" if dark else "#e0e0e8"
         btn_bg         = "rgba(255,255,255,0.15)" if dark else "rgba(0,0,0,0.10)"
         btn_hover      = "rgba(255,255,255,0.20)" if dark else "rgba(0,0,0,0.15)"
         btn_press      = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.05)"
@@ -2898,32 +3828,44 @@ class SettingsPanel(QWidget):
 
         reset_color    = secondary
         combo_popup_bg = "#1c1c1c" if dark else "#f3f3f3"
+        cap_div_col    = "rgba(255,255,255,0.06)" if dark else "rgba(0,0,0,0.05)"
 
         # Propagate theme to trust widgets
-        if hasattr(self, "_trust_slider"):
-            self._trust_slider.set_theme(theme_name)
-        if hasattr(self, "_trust_cap_panel"):
-            self._trust_cap_panel.set_theme(theme_name)
+        if hasattr(self, "_trust_track") and self._trust_track is not None:
+            self._trust_track.set_dark(dark)
         if hasattr(self, "_model_card"):
             self._model_card.set_dark(dark)
         self._apply_personality_toggle_theme(dark)
         if hasattr(self, "_fb_card"):
             self._fb_card.set_dark(dark)
+        self._apply_fb_pill_theme(dark)
+        # Rebuild cap rows to pick up new colors
+        if hasattr(self, "_cap_rows_layout"):
+            saved_level = settings_store.get("trust_level", 1)
+            self._rebuild_cap_rows(saved_level)
+        # Update _SettingsRow dark state
+        if hasattr(self, "_profile_card"):
+            self._profile_card.set_dark(dark)
         if hasattr(self, "_version_label"):
-            self._version_label.setStyleSheet(f"color: {secondary}; font-size: 11px; background: transparent;")
+            self._version_label.setStyleSheet(
+                f"color: {'rgba(255,255,255,0.25)' if dark else 'rgba(0,0,0,0.28)'}; background: transparent;"
+            )
         if hasattr(self, "_check_update_btn"):
             self._check_update_btn.setStyleSheet(f"""
                 QPushButton {{
-                    color: {secondary};
+                    color: {'rgba(99,102,241,0.65)' if dark else 'rgba(79,70,229,0.7)'};
+                    font-family: 'Manrope';
                     font-size: 10px;
                     background: transparent;
-                    border: 1px solid {"rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.12)"};
-                    border-radius: 4px;
-                    padding: 1px 6px;
+                    border: none;
+                    padding: 0;
+                    text-align: center;
                 }}
                 QPushButton:hover {{
-                    color: {primary};
-                    border-color: {"rgba(255,255,255,0.25)" if dark else "rgba(0,0,0,0.25)"};
+                    color: {'#818cf8' if dark else '#4f46e5'};
+                }}
+                QPushButton:pressed {{
+                    color: {'rgba(99,102,241,0.5)' if dark else 'rgba(79,70,229,0.5)'};
                 }}
             """)
         if hasattr(self, "_profile_card"):
@@ -2937,6 +3879,8 @@ class SettingsPanel(QWidget):
         # Apply to pages
         for name, page in self._pages.items():
             page.title_lbl.setStyleSheet(f"color: {primary};")
+            if hasattr(page, "subtitle_lbl"):
+                page.subtitle_lbl.setStyleSheet(f"color: {secondary}; background: transparent;")
             
         self.setStyleSheet(f"""
             QWidget {{ background: transparent; }}
@@ -2966,6 +3910,16 @@ class SettingsPanel(QWidget):
                 font-weight: bold;
             }}
             
+            /* Sidebar footer */
+            QWidget#SidebarFooter {{
+                background: transparent;
+            }}
+            QFrame#SidebarFooterSep {{
+                border: none;
+                border-top: 1px solid {border};
+                margin: 0;
+            }}
+
             /* Content Area */
             QWidget#SettingsContent {{
                 background: transparent;
@@ -2973,6 +3927,12 @@ class SettingsPanel(QWidget):
 
             /* labels */
             QLabel {{ background: transparent; color: {primary}; }}
+            QLabel#PageSubtitle {{
+                color: {secondary};
+            }}
+            QLabel#SectionLabel {{
+                color: {secondary};
+            }}
             QLabel#DescLbl, QLabel#FieldLbl, QLabel#PrivacyBody {{
                 color: {secondary};
             }}
@@ -3260,6 +4220,34 @@ class SettingsPanel(QWidget):
                 color: #a5b4fc;
             }}
             QPushButton#ToggleBtn:hover {{ background: {btn_hover}; }}
+
+            /* Capability rows */
+            QWidget#CapRow {{ background: transparent; }}
+            QFrame#CapRowDivider {{ background: {cap_div_col}; border: none; }}
+
+            /* Settings rows */
+            QWidget#SettingsRow {{ background: transparent; }}
+
+            /* Avatar */
+            QWidget#AvatarWidget {{ background: transparent; }}
+
+            /* Plan card buttons */
+            QPushButton#PlanChooseBtn {{
+                background: #6366f1;
+                border: none;
+                border-radius: 8px;
+                color: #ffffff;
+                font-family: "Manrope";
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0px 14px;
+            }}
+            QPushButton#PlanChooseBtn:hover {{ background: #818cf8; }}
+            QPushButton#PlanChooseBtn:pressed {{ background: #4f46e5; }}
+            QPushButton#PlanChooseBtn:disabled {{
+                background: rgba(99,102,241,0.3);
+                color: rgba(255,255,255,0.4);
+            }}
         """)
         # Update usage bar dark mode
         if hasattr(self, "usage_bar"):
@@ -3270,26 +4258,33 @@ class SettingsPanel(QWidget):
         btn.setEnabled(False)
         btn.setText("Checking…")
 
-        import threading
+        from PyQt6.QtCore import QThread
 
-        def _run():
-            from src.core.updater import check_update
-            try:
-                tag, url, body = check_update(APP_VERSION)
-            except Exception:
-                tag, url, body = None, None, None
+        class _Worker(QThread):
+            done = pyqtSignal(object, object, object)
 
-            def _done():
-                btn.setEnabled(True)
-                btn.setText("Check for Updates")
-                if tag:
-                    from src.ui.update_dialog import UpdateDialog
-                    dlg = UpdateDialog(APP_VERSION, tag, url, body, parent=self)
-                    dlg.exec()
-                else:
-                    btn.setText("Up to date!")
-                    QTimer.singleShot(2500, lambda: btn.setText("Check for Updates"))
+            def run(self):
+                from src.core.updater import check_update
+                try:
+                    tag, url, body = check_update(APP_VERSION)
+                except Exception:
+                    tag, url, body = None, None, None
+                self.done.emit(tag, url, body)
 
-            QTimer.singleShot(0, _done)
+        worker = _Worker(self)
 
-        threading.Thread(target=_run, daemon=True).start()
+        def _on_done(tag, url, body):
+            btn.setEnabled(True)
+            btn.setText("Check for Updates")
+            if tag:
+                from src.ui.update_dialog import UpdateDialog
+                dlg = UpdateDialog(APP_VERSION, tag, url, body, parent=self)
+                dlg.exec()
+            else:
+                btn.setText("Up to date!")
+                QTimer.singleShot(2500, lambda: btn.setText("Check for Updates"))
+            worker.deleteLater()
+
+        worker.done.connect(_on_done)
+        worker.start()
+        self._update_worker = worker  # prevent GC

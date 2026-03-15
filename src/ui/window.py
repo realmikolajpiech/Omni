@@ -229,7 +229,7 @@ class OmniWindow(QWidget):
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self.input_container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         input_layout = QHBoxLayout(self.input_container)
-        input_layout.setContentsMargins(24, 4, 24, 4) # Increased left margin
+        input_layout.setContentsMargins(18, 4, 10, 4)
         input_layout.setSpacing(12)
 
         self.logo_label = RotatingLabel()
@@ -1765,6 +1765,7 @@ class OmniWindow(QWidget):
         if self.is_settings_mode:
             return
         self.is_settings_mode = True
+        self.input_container.layout().setContentsMargins(18, 4, 20, 4)
 
         # Apply current theme to settings panel before showing
         self.settings_panel.set_theme(self.current_theme)
@@ -1809,6 +1810,7 @@ class OmniWindow(QWidget):
         if not self.is_settings_mode:
             return
         self.is_settings_mode = False
+        self.input_container.layout().setContentsMargins(18, 4, 10, 4)
 
         # Fade out settings panel
         current_effect = self.settings_panel.graphicsEffect()
@@ -1847,7 +1849,10 @@ class OmniWindow(QWidget):
             self.list_widget.show()
             self.setMaximumHeight(16777215)
             self.refresh_list(self.input_field.text(), animate=False)
+            self.input_field.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
             self.input_field.setFocus()
+            self.input_field.style().unpolish(self.input_field)
+            self.input_field.style().polish(self.input_field)
 
         self._settings_shrink_anim.start()
 
@@ -1942,6 +1947,7 @@ class OmniWindow(QWidget):
             self.reset_to_search_mode(animate=False, clear=True)
 
         self.is_clipboard_mode = True
+        self.input_container.layout().setContentsMargins(18, 4, 20, 4)
 
         # Swap input bar to clipboard title
         self.input_field.hide()
@@ -1963,6 +1969,7 @@ class OmniWindow(QWidget):
             return
         self.is_clipboard_mode = False
         self.is_entry_animating = False  # ensure adjust_window_height isn't blocked
+        self.input_container.layout().setContentsMargins(18, 4, 10, 4)
 
         if hasattr(self, 'anim_group') and self.anim_group.state() == QPropertyAnimation.State.Running:
             self.anim_group.stop()
@@ -3276,10 +3283,20 @@ class OmniWindow(QWidget):
     def start_install(self, app_name, source_widget=None):
         if not source_widget:
             self.list_widget.clear()
+        else:
+            # Remove any stale install_progress items (e.g. from a previous failed attempt)
+            for i in reversed(range(self.list_widget.count())):
+                item = self.list_widget.item(i)
+                if item and item.data(Qt.ItemDataRole.UserRole) == "install_progress":
+                    w = self.list_widget.itemWidget(item)
+                    if hasattr(w, 'content_widget'):
+                        w = w.content_widget
+                    if w is not source_widget:
+                        self.list_widget.takeItem(i)
         # Do NOT touch input_field text — it would create ghost user bubbles
         self.input_field.setDisabled(True)
         self._installing_app_name = app_name
-        
+
         # Add Progress Widget
         current_theme = getattr(self, '_current_theme', 'dark')
         self.install_widget = InstallProgressWidget(app_name, theme=current_theme)
@@ -3350,6 +3367,9 @@ class OmniWindow(QWidget):
             )
         
     def on_install_candidate_confirmed(self, pkg_data):
+        # Reset widget state before restarting (clears any previous failure styling)
+        if hasattr(self, 'install_widget'):
+            self.install_widget.reset()
         # Restart orchestrator with forced package
         self.install_worker = InstallOrchestrator(pkg_data['name'], forced_package=pkg_data)
         self.install_worker.status_update.connect(self.install_widget.update_status)
