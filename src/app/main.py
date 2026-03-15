@@ -537,6 +537,23 @@ def _init_omni(app, timer, hidden_mode, skip_ax_prompt=False, early_voice_proc=N
             if not skip_ax_prompt:
                 QTimer.singleShot(500, _request_ax_permission)
 
+            # Request Microphone permission so the voice listener can access audio.
+            # On first launch, this triggers the macOS "wants to access the microphone"
+            # system prompt. If already granted/denied, it's a no-op.
+            def _request_mic_permission():
+                import threading
+                def _trigger():
+                    try:
+                        import sounddevice as sd
+                        # Just constructing an InputStream triggers the TCC prompt
+                        s = sd.InputStream(channels=1, samplerate=16000, blocksize=512)
+                        s.close()
+                    except Exception:
+                        pass
+                threading.Thread(target=_trigger, daemon=True).start()
+
+            QTimer.singleShot(1500, _request_mic_permission)
+
             # macOS: Use Native NSEvent for reliable global hotkeys (requires Accessibility permissions)
             try:
                 import AppKit

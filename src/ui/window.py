@@ -1050,6 +1050,103 @@ class OmniWindow(QWidget):
         except Exception as e:
             logging.error(f"UDP Error: {e}")
 
+    def _check_microphone_permission(self):
+        """Check macOS microphone permission via AVFoundation.
+        Returns 'authorized', 'denied', 'not_determined', or 'unknown'."""
+        if sys.platform != "darwin":
+            return "authorized"
+        try:
+            import ctypes, ctypes.util
+            # Must load AVFoundation framework so AVCaptureDevice class is available
+            ctypes.CDLL("/System/Library/Frameworks/AVFoundation.framework/AVFoundation")
+            libobjc = ctypes.CDLL(ctypes.util.find_library("objc"))
+            libobjc.objc_getClass.restype = ctypes.c_void_p
+            libobjc.objc_getClass.argtypes = [ctypes.c_char_p]
+            libobjc.sel_registerName.restype = ctypes.c_void_p
+            libobjc.sel_registerName.argtypes = [ctypes.c_char_p]
+            cls = libobjc.objc_getClass(b"AVCaptureDevice")
+            if not cls:
+                return "unknown"
+            sel = libobjc.sel_registerName(b"authorizationStatusForMediaType:")
+            # Build NSString for AVMediaTypeAudio ("soun")
+            msg_str = libobjc.objc_msgSend
+            msg_str.restype = ctypes.c_void_p
+            msg_str.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+            audio_type = msg_str(libobjc.objc_getClass(b"NSString"),
+                                 libobjc.sel_registerName(b"stringWithUTF8String:"), b"soun")
+            msg = libobjc.objc_msgSend
+            msg.restype = ctypes.c_long
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            status = msg(cls, sel, audio_type)
+            # 0=notDetermined, 1=restricted, 2=denied, 3=authorized
+            return {3: "authorized", 0: "not_determined"}.get(status, "denied")
+        except Exception as e:
+            logging.debug(f"[mic permission check] {e}")
+            return "unknown"
+
+    def _try_open_microphone(self):
+        """Actually try to open the microphone. Returns True if it works, False if denied.
+        Uses InputStream constructor only (no start) — enough to trigger TCC prompt."""
+        try:
+            import sounddevice as sd
+            stream = sd.InputStream(channels=1, samplerate=16000, blocksize=512)
+            stream.close()
+            return True
+        except Exception as e:
+            logging.warning(f"[mic test] Cannot open microphone: {e}")
+            return False
+
+    def _show_mic_permission_dialog(self):
+        """Show a dialog guiding the user to enable microphone access in System Settings."""
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Microphone Access Required")
+        msg.setText("Omni needs microphone access for voice input.\n\n"
+                    "Please enable it in System Settings:\n"
+                    "Privacy & Security → Microphone → enable Omni (or Python)")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        open_btn = msg.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == open_btn:
+            subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"])
+
+    def _restart_voice_listener(self):
+        """Kill and restart the voice listener subprocess (e.g. after mic permission granted)."""
+        try:
+            app = QApplication.instance()
+            if hasattr(app, '_omni_voice') and app._omni_voice:
+                try:
+                    app._omni_voice.terminate()
+                except Exception:
+                    pass
+            if sys.platform == "darwin":
+                subprocess.run(["pkill", "-f", "services/voice/listener.py"], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def _start_new_listener():
+                try:
+                    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    _listener_script = os.path.join(_project_root, "src", "services", "voice", "listener.py")
+                    _log_dir = os.path.join(_project_root, "logs")
+                    os.makedirs(_log_dir, exist_ok=True)
+                    _voice_log = open(os.path.join(_log_dir, "listener.log"), "w")
+                    proc = subprocess.Popen(
+                        [sys.executable, _listener_script],
+                        cwd=_project_root,
+                        stdout=_voice_log, stderr=_voice_log,
+                        start_new_session=True,
+                    )
+                    app._omni_voice = proc
+                    logging.info("Voice listener restarted after mic permission change.")
+                except Exception as e:
+                    logging.error(f"Failed to start new voice listener: {e}")
+
+            # Small delay for the old process to fully exit
+            QTimer.singleShot(300, _start_new_listener)
+        except Exception as e:
+            logging.error(f"Failed to restart voice listener: {e}")
+
     def toggle_listening(self):
         if self.mic_widget.active:
             # Stop listening -> Commit Audio (Process what was said)
@@ -1058,6 +1155,28 @@ class OmniWindow(QWidget):
             # Since user manually recorded, we treat this as a voice query for TTS purposes
             self.voice_triggered_query = True
         else:
+            if sys.platform == "darwin":
+                mic_status = self._check_microphone_permission()
+                if mic_status == "denied":
+                    self._show_mic_permission_dialog()
+                    return
+                if mic_status != "authorized":
+                    # not_determined or unknown — try opening mic to trigger the system prompt
+                    if not self._try_open_microphone():
+                        self._show_mic_permission_dialog()
+                        return
+                # Check if the voice listener subprocess is alive; restart if dead
+                app = QApplication.instance()
+                voice_proc = getattr(app, '_omni_voice', None)
+                if voice_proc and voice_proc.poll() is not None:
+                    # Process has exited — restart it
+                    logging.info("Voice listener process is dead, restarting...")
+                    self._restart_voice_listener()
+                    def _start_after_restart():
+                        self.send_udp_command("SET_MODE:LISTENING")
+                    QTimer.singleShot(1500, _start_after_restart)
+                    self.mic_widget.set_active(True)
+                    return
             # Start listening -> Go to LISTENING
             self.send_udp_command("SET_MODE:LISTENING")
             self.mic_widget.set_active(True)
@@ -1082,6 +1201,9 @@ class OmniWindow(QWidget):
             self._stop_transcribing_dots()
             self.mic_widget.set_active(False)
             self.input_field.setPlaceholderText(self._idle_placeholder())
+        elif status == "MIC_DENIED":
+            self.mic_widget.set_active(False)
+            self._show_mic_permission_dialog()
 
     def _start_transcribing_dots(self):
         """Animate the placeholder text: Transcribing → Transcribing. → Transcribing.. → Transcribing..."""
