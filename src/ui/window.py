@@ -1458,8 +1458,8 @@ class OmniWindow(QWidget):
                 # Use already-set sizeHint (cached by update_item_size / setSizeHint)
                 # instead of recomputing via the widget's sizeHint() method
                 list_h += item.sizeHint().height() + 6 # Add margin-bottom from CSS
-            
-            base_h = 84 
+
+            base_h = 84
             # Account for QListWidget vertical padding (12px top + 12px bottom)
             # plus a tiny safety buffer to avoid "just barely" showing a scrollbar.
             extra_padding = 28
@@ -1480,8 +1480,8 @@ class OmniWindow(QWidget):
             # We use 800 as a reasonable absolute max, but constrain by screen space
             list_h = min(list_h, 800, max_h_limit)
             
-            # Add padding for list borders/margins (12px top + 12px bottom = 24px) + safety
-            new_h = base_h + list_h + extra_padding 
+            # Add padding for list borders/margins + safety
+            new_h = base_h + list_h + extra_padding
         else:
             self.divider.hide()
             self.list_widget.hide()
@@ -1765,11 +1765,16 @@ class OmniWindow(QWidget):
                 if i > 0 and self.chat_history[i-1].get('role') == 'user':
                     user_query = self.chat_history[i-1].get('content', '')
 
-                if not first:
+                if not first and not use_chat_mode:
                     self.add_list_item(SeparatorWidget(), "separator", animation="instant")
 
                 thinking_text = msg.get('thinking', '')
-                w = AnswerWidget(content, query_text=user_query, thinking_text=thinking_text, chat_mode=use_chat_mode)
+                # First turn (bottom of list = last in reversed iteration) shows names,
+                # subsequent turns hide them — left/right alignment is enough.
+                is_first_turn = first
+                w = AnswerWidget(content, query_text=user_query, thinking_text=thinking_text,
+                                 chat_mode=use_chat_mode,
+                                 show_user_name=is_first_turn, show_ai_name=is_first_turn)
                 w.set_query_visible(use_chat_mode)
                 if thinking_text:
                     w.set_thinking_collapsed(True)
@@ -3745,11 +3750,10 @@ class OmniWindow(QWidget):
             # Upgrade any leftover simple answer widgets to chat bubbles (first follow-up transition)
             self._upgrade_to_chat_bubbles()
 
-            # Chat mode: show user bubble + AI area
-            if self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
-
-            answer_widget = AnswerWidget("", query_text=query, chat_mode=True)
+            # Hide name labels on follow-up turns — the first turn establishes who's who,
+            # and the left/right alignment makes it clear after that.
+            answer_widget = AnswerWidget("", query_text=query, chat_mode=True,
+                                         show_user_name=False, show_ai_name=False)
             answer_widget.set_query_visible(True)
             self._streaming_answer_widget = answer_widget
             # instant = bubbles visible immediately, no fade delay
@@ -3811,9 +3815,8 @@ class OmniWindow(QWidget):
 
         # In follow-up / chat mode: just add an answer widget with no user bubble
         if self.is_history_mode:
-            if self.list_widget.count() > 0:
-                self.insert_list_item(0, SeparatorWidget(), "separator", animation="instant")
-            answer_widget = AnswerWidget("", query_text=None, chat_mode=True)
+            answer_widget = AnswerWidget("", query_text=None, chat_mode=True,
+                                         show_ai_name=False)
             answer_widget.set_query_visible(False)
             self._streaming_answer_widget = answer_widget
             self.insert_list_item(0, answer_widget, "answer", animation="instant")
@@ -3865,6 +3868,18 @@ class OmniWindow(QWidget):
         if isinstance(widget, SmoothEntryWidget):
             return widget.content_widget
         return widget
+
+    def _last_chat_sender(self):
+        """Return the sender of the most recent chat bubble ('user' or 'ai'), or None.
+        Used to decide whether to show name labels (only on sender change)."""
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            w = self._unwrap_answer_widget(item)
+            if isinstance(w, AnswerWidget) and w.chat_mode:
+                # The top-most AnswerWidget has user bubble on top, AI bubble below.
+                # The last visible sender in the conversation is the AI (since it replied last).
+                return "ai"
+        return None
 
     def on_partial_response(self, data):
         """Handle partial streaming: show thinking in collapsible (gray), answer in main. Collapse thinking when answer starts."""

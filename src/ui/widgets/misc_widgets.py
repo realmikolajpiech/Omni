@@ -189,37 +189,15 @@ class ThinkingWidget(QWidget):
 
 
 class SeparatorWidget(QWidget):
-    """Thin divider between chat turns; extra height so follow-ups read clearly."""
+    """Lightweight spacer between chat turns. No visible line — just breathing room."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._height = 28
+        self._height = 2
         self.setFixedHeight(self._height)
         self.current_theme = "light"
 
     def set_theme(self, theme):
         self.current_theme = theme
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        t = THEMES.get(self.current_theme, THEMES["light"])
-        divider_color = QColor(t['divider'])
-
-        grad = QLinearGradient(40, 0, self.width() - 40, 0)
-        c = divider_color
-        transparent = QColor(c.red(), c.green(), c.blue(), 0)
-        grad.setColorAt(0, transparent)
-        grad.setColorAt(0.2, c)
-        grad.setColorAt(0.8, c)
-        grad.setColorAt(1, transparent)
-
-        pen = QPen(QBrush(grad), 1)
-        painter.setPen(pen)
-
-        y = self.height() // 2
-        painter.drawLine(40, y, self.width() - 40, y)
 
     def sizeHint(self):
         return QSize(660, self._height)
@@ -409,7 +387,7 @@ class CollapsibleThinkingWidget(QWidget):
         # system emoji font (Apple Color Emoji / Segoe UI Emoji).
         _btn_font = QFont()
         _btn_font.setFamilies(["Manrope", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"])
-        _btn_font.setPointSize(11)
+        _btn_font.setPointSize(10)
         _btn_font.setWeight(QFont.Weight.DemiBold)
         self.header_button.setFont(_btn_font)
         header_row.addWidget(self.header_button)
@@ -480,8 +458,8 @@ class CollapsibleThinkingWidget(QWidget):
             QPushButton {{
                 background: {badge_bg};
                 border: 1px solid {badge_border};
-                border-radius: 10px;
-                padding: 3px 10px 3px 9px;
+                border-radius: 9px;
+                padding: 2px 8px 2px 7px;
                 text-align: left;
                 color: {badge_color};
             }}
@@ -632,12 +610,13 @@ class _BubbleWidget(QWidget):
     BUBBLE_RADIUS = 20
     MAX_BUBBLE_WIDTH_FRACTION = 0.78  # bubble uses at most 78% of available width
 
-    def __init__(self, text, sender="user", is_markdown=False, parent=None):
+    def __init__(self, text, sender="user", is_markdown=False, show_name=True, parent=None):
         super().__init__(parent)
         self.sender = sender          # "user" or "ai"
         self.is_markdown = is_markdown
         self.current_theme = "light"
         self._text = text
+        self._show_name = show_name
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -650,6 +629,7 @@ class _BubbleWidget(QWidget):
             self.name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         else:
             self.name_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.name_label.setVisible(show_name)
         outer.addWidget(self.name_label)
 
         # Bubble row (align bubble left or right)
@@ -687,6 +667,10 @@ class _BubbleWidget(QWidget):
         self.name_label.setStyleSheet(f"color: {name_color}; background: transparent; letter-spacing: 0.3px;")
         self.bubble.set_theme(self.current_theme)
 
+    def set_name_visible(self, visible):
+        self._show_name = visible
+        self.name_label.setVisible(visible)
+
     def set_theme(self, theme):
         self.current_theme = theme
         self.update_style()
@@ -700,7 +684,7 @@ class _BubbleWidget(QWidget):
             if parent_layout:
                 m = parent_layout.contentsMargins()
                 w -= m.left() + m.right()
-        name_h = self.name_label.sizeHint().height() + 3
+        name_h = (self.name_label.sizeHint().height() + 3) if self._show_name else 0
         bubble_h = self.bubble.sizeHint_for_width(w).height()
         return QSize(w, name_h + bubble_h + 2)
 
@@ -708,9 +692,9 @@ class _BubbleWidget(QWidget):
 class _BubbleInner(QWidget):
     """Draws the rounded rect background and hosts the text inside."""
 
-    PADDING_H = 16
-    PADDING_V = 11
-    RADIUS = 20
+    PADDING_H = 14
+    PADDING_V = 9
+    RADIUS = 18
     MAX_FRACTION = 0.78
 
     def __init__(self, sender, is_markdown, parent=None):
@@ -1094,11 +1078,15 @@ class AnswerWidget(QWidget):
                        Used for the initial (first) query.
     """
 
-    def __init__(self, text, query_text=None, thinking_text=None, chat_mode=False, parent=None):
+    def __init__(self, text, query_text=None, thinking_text=None, chat_mode=False, show_user_name=True, show_ai_name=True, parent=None):
         super().__init__(parent)
         self.outer_layout = QVBoxLayout(self)
-        self.outer_layout.setContentsMargins(16, 8, 16, 8)
-        self.outer_layout.setSpacing(10)
+        if chat_mode:
+            self.outer_layout.setContentsMargins(16, 2, 16, 2)
+            self.outer_layout.setSpacing(4)
+        else:
+            self.outer_layout.setContentsMargins(16, 8, 16, 8)
+            self.outer_layout.setSpacing(10)
         self.current_theme = "light"
         self.chat_mode = chat_mode
         self._query_text = query_text or ""
@@ -1108,7 +1096,7 @@ class AnswerWidget(QWidget):
 
         # ── USER BUBBLE (chat mode only) ───────────────────────────────
         if chat_mode:
-            self.user_bubble = _BubbleWidget(self._query_text, sender="user")
+            self.user_bubble = _BubbleWidget(self._query_text, sender="user", show_name=show_user_name)
             self._show_user_bubble = bool(self._query_text) and not self._query_text.startswith("[SYSTEM]")
             self.user_bubble.setVisible(self._show_user_bubble)
             self.outer_layout.addWidget(self.user_bubble)
@@ -1117,7 +1105,7 @@ class AnswerWidget(QWidget):
 
         # ── AI CONTENT (created before thinking so thinking can be inserted inside) ──
         if chat_mode:
-            self.ai_bubble = _BubbleWidget("", sender="ai", is_markdown=True)
+            self.ai_bubble = _BubbleWidget("", sender="ai", is_markdown=True, show_name=show_ai_name)
             self.outer_layout.addWidget(self.ai_bubble)
             self.text_edit = self.ai_bubble.bubble.edit
         else:
