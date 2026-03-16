@@ -78,7 +78,11 @@ TOOL_SCHEMAS = [
             "description": (
                 "Semantically search user's local files and documents stored on the "
                 "computer. Use when asked about personal notes, journals, code files, "
-                "PDFs, spreadsheets, or any content that might be saved locally."
+                "PDFs, spreadsheets, certificates, official documents, invoices, tax "
+                "forms, contracts, resumes, or any content that might be saved locally. "
+                "Also use when the user's query implies they want to FIND or LOCATE a "
+                "document, even if they don't explicitly say 'find my file'. Works with "
+                "queries in any language."
             ),
             "parameters": {
                 "type": "object",
@@ -480,6 +484,28 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_file",
+            "description": (
+                "Read the content of any file — plain text, PDF, DOCX, XLSX, CSV, PPTX, RTF, code, etc. "
+                "Use this whenever the user asks you to read, summarise, analyse, or answer questions about a specific file. "
+                "Pass the exact path returned by find_file or search_files. "
+                "Returns the extracted text content (truncated to 12 000 chars if very long)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the file, e.g. '/Users/mikolaj/Downloads/report.pdf'.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_file",
             "description": (
                 "Find files or folders on the user's Mac by name or partial name. "
@@ -642,6 +668,8 @@ def execute_tool(name: str, arguments: dict) -> str:
                 arguments.get("old_text", ""),
                 arguments.get("new_text", ""),
             )
+        elif name == "read_file":
+            return _tool_read_file(arguments.get("path", ""))
         elif name == "find_file":
             return _tool_find_file(
                 arguments.get("name", ""),
@@ -873,7 +901,7 @@ def _find_brew() -> str | None:
 
 def _tool_install_app(name: str) -> str:
     import subprocess, os
-    name = name.strip().lower()
+    name = name.strip()
     if not name:
         return "Error: empty app name."
 
@@ -888,16 +916,28 @@ def _tool_install_app(name: str) -> str:
         })
         return "[Permission required] 'Full Control' trust is needed to install software."
 
-    brew = _find_brew()
-    if not brew:
-        return "Error: Homebrew not found. Install it from https://brew.sh"
-    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
+    from src.services.system.installer import generate_install_plan
+    plan = generate_install_plan(name)
+    if plan["method"] == "failed":
+        return f"Error: {plan['description']}"
+
+    commands = plan.get("commands", [])
+    if not commands:
+        return f"Error: no install command found for '{name}'."
+
+    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1",
+           "PATH": "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")}
     try:
         result = subprocess.run(
-            f"{brew} install --cask {name} || {brew} install {name}",
-            shell=True, capture_output=True, text=True, timeout=300, env=env
+            commands[0], shell=True, capture_output=True, text=True, timeout=300, env=env
         )
         output = (result.stdout + "\n" + result.stderr).strip()
+        # Refresh app cache so the newly installed app is discoverable immediately
+        try:
+            import src.services.system.app_launcher as _al
+            _al.APP_CACHE = None
+        except Exception:
+            pass
         return output[:1200] if output else f"Installed {name}"
     except subprocess.TimeoutExpired:
         return "Error: install timed out after 5 minutes."
@@ -907,7 +947,7 @@ def _tool_install_app(name: str) -> str:
 
 def _tool_uninstall_app(name: str) -> str:
     import subprocess, os
-    name = name.strip().lower()
+    name = name.strip()
     if not name:
         return "Error: empty app name."
 
@@ -922,16 +962,30 @@ def _tool_uninstall_app(name: str) -> str:
         })
         return "[Permission required] 'Full Control' trust is needed to uninstall software."
 
-    brew = _find_brew()
-    if not brew:
-        return "Error: Homebrew not found."
-    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1"}
+    from src.services.system.installer import generate_uninstall_plan
+    plan = generate_uninstall_plan(name)
+    if plan["method"] == "failed":
+        return f"Error: {plan['description']}"
+    if plan["method"] == "not_installed":
+        return plan["description"]
+
+    commands = plan.get("commands", [])
+    if not commands:
+        return f"Error: no uninstall command found for '{name}'."
+
+    env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1", "NONINTERACTIVE": "1",
+           "PATH": "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")}
     try:
         result = subprocess.run(
-            f"{brew} uninstall --cask {name} || {brew} uninstall {name}",
-            shell=True, capture_output=True, text=True, timeout=120, env=env
+            commands[0], shell=True, capture_output=True, text=True, timeout=120, env=env
         )
         output = (result.stdout + "\n" + result.stderr).strip()
+        # Refresh app cache so the uninstalled app is no longer discoverable
+        try:
+            import src.services.system.app_launcher as _al
+            _al.APP_CACHE = None
+        except Exception:
+            pass
         return output[:1200] if output else f"Uninstalled {name}"
     except subprocess.TimeoutExpired:
         return "Error: uninstall timed out."
@@ -1092,6 +1146,47 @@ def _tool_edit_file(path: str, old_text: str, new_text: str) -> str:
         return f"Edited: {path}"
     except Exception as e:
         return f"Error writing file: {e}"
+
+
+def _tool_read_file(path: str) -> str:
+    """Read and return the text content of any supported file type."""
+    import os
+    path = os.path.expanduser(path.strip())
+    if not path:
+        return "Error: no path provided."
+    if not os.path.exists(path):
+        return f"Error: file not found: {path}"
+    if os.path.isdir(path):
+        return f"Error: '{path}' is a directory, not a file."
+    if os.path.getsize(path) > 20 * 1024 * 1024:
+        return "Error: file is too large to read (>20 MB)."
+
+    from src.services.search.utils import _CONTENT_READERS, strip_rtf
+    _, ext = os.path.splitext(path)
+    ext = ext.lower()
+
+    try:
+        reader = _CONTENT_READERS.get(ext)
+        if reader:
+            content = reader(path)
+        elif ext == ".rtf":
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = strip_rtf(f.read())
+        else:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+    if not content or not content.strip():
+        return "File is empty or its content could not be extracted."
+
+    max_chars = 12000
+    truncated = len(content) > max_chars
+    result = content[:max_chars]
+    if truncated:
+        result += f"\n\n[... truncated — showing first {max_chars} of {len(content)} characters]"
+    return result
 
 
 def _tool_find_file(name: str, folder: str = "", include_dirs: bool = True) -> str:

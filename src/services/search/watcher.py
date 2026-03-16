@@ -106,7 +106,7 @@ class IndexHandler(FileSystemEventHandler):
 
         filename = parts[-1]
         _, ext = os.path.splitext(filename)
-        if ext.lower() in BLOCKED_EXTENSIONS:
+        if ext.lower() in BLOCKED_EXTENSIONS and not is_image_file(path):
             return True
         return False
 

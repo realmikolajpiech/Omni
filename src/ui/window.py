@@ -2599,15 +2599,15 @@ class OmniWindow(QWidget):
                         return SearchActionWidget(q)
                     return LinkActionWidget(a['title'], a['url'], a['description'])
                 elif a.get('type') == 'install':
-                    w = InstallActionWidget(a['name'], a.get('website'))
-                    def _make_install_fast_cb(name, _w):
+                    w = InstallActionWidget(a['name'], a.get('website'), a.get('desc', ''))
+                    def _make_install_fast_cb(name, url, _w):
                         def _cb(n, _widget):
                             self._check_trust_or_prompt(
                                 3, f"install {name}",
-                                lambda: self.start_install(name, source_widget=_w),
+                                lambda: self.start_install(name, source_widget=_w, website_url=url),
                             )
                         return _cb
-                    w.install_accepted.connect(_make_install_fast_cb(a['name'], w))
+                    w.install_accepted.connect(_make_install_fast_cb(a['name'], a.get('website', ''), w))
                     return w
                 elif a.get('type') == 'uninstall':
                     w = UninstallActionWidget(a['name'])
@@ -3259,7 +3259,10 @@ class OmniWindow(QWidget):
                 QDesktopServices.openUrl(QUrl(url))
                 self.animate_close()
             elif data.get('type') == 'install':
-                # Installation is now handled interactively by the InstallActionWidget's yes/no buttons.
+                # Enter confirms the install — same as clicking "Yes, Install"
+                container = self.list_widget.itemWidget(item)
+                if hasattr(container, 'content_widget') and isinstance(container.content_widget, InstallActionWidget):
+                    container.content_widget.accept_install()
                 return
             elif data.get('type') == 'uninstall':
                 # Uninstallation is handled interactively by the UninstallActionWidget's yes/no buttons.
@@ -3433,7 +3436,7 @@ class OmniWindow(QWidget):
         self.animate_close()
         QTimer.singleShot(500, _run)
 
-    def start_install(self, app_name, source_widget=None):
+    def start_install(self, app_name, source_widget=None, website_url=""):
         if not source_widget:
             self.list_widget.clear()
         else:
@@ -3452,7 +3455,7 @@ class OmniWindow(QWidget):
 
         # Add Progress Widget
         current_theme = getattr(self, '_current_theme', 'dark')
-        self.install_widget = InstallProgressWidget(app_name, theme=current_theme)
+        self.install_widget = InstallProgressWidget(app_name, website_url=website_url, theme=current_theme)
         self.install_widget.candidate_confirmed.connect(self.on_install_candidate_confirmed)
         
         if source_widget:
@@ -3509,6 +3512,12 @@ class OmniWindow(QWidget):
         app_name = getattr(self, '_installing_app_name', 'the app')
         display_name = app_name.replace('-', ' ').title()
         if success:
+            # Refresh app cache so the newly installed app is discoverable immediately
+            try:
+                import src.services.system.app_launcher as _al
+                _al.APP_CACHE = None
+            except Exception:
+                pass
             self.perform_silent_ai_query(
                 f"[SYSTEM] Installation of {display_name} has just completed successfully. "
                 f"Confirm this to the user in one short friendly sentence and suggest a next step (e.g. open the app)."
@@ -4170,16 +4179,16 @@ class OmniWindow(QWidget):
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'install':
-                            w = InstallActionWidget(act['name'], act.get('website'))
-                            def _make_install_cb(name, _w):
+                            w = InstallActionWidget(act['name'], act.get('website'), act.get('desc', ''))
+                            def _make_install_cb(name, url, _w):
                                 def _cb(n, _widget):
                                     self._check_trust_or_prompt(
                                         3,
                                         f"install {name}",
-                                        lambda: self.start_install(name, source_widget=_w),
+                                        lambda: self.start_install(name, source_widget=_w, website_url=url),
                                     )
                                 return _cb
-                            w.install_accepted.connect(_make_install_cb(act['name'], w))
+                            w.install_accepted.connect(_make_install_cb(act['name'], act.get('website', ''), w))
                             self.insert_list_item(insert_pos, w, act, animation="fade")
                             insert_pos += 1
                         elif act.get('type') == 'uninstall':
@@ -4697,8 +4706,8 @@ class OmniWindow(QWidget):
                     )
                     add_item(w, act, anim="pop")
                 elif act.get('type') == 'install':
-                    w = InstallActionWidget(act['name'], act.get('website'))
-                    w.install_accepted.connect(lambda name, widget, _w=w: self.start_install(name, source_widget=_w))
+                    w = InstallActionWidget(act['name'], act.get('website'), act.get('desc', ''))
+                    w.install_accepted.connect(lambda name, widget, _w=w, _u=act.get('website', ''): self.start_install(name, source_widget=_w, website_url=_u))
                     add_item(w, act, anim="fade")
                 elif act.get('type') == 'uninstall':
                     w = UninstallActionWidget(act['name'])

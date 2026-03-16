@@ -66,7 +66,7 @@ IGNORE_DIRS = {
     ".gemini", ".antigravity", ".vscode", ".idea",
     "target", "build", "dist", "out", "bin", "obj",
     # macOS user dirs unlikely to contain useful documents
-    "Movies", "Music", "Pictures", "Public",
+    "Movies", "Music", "Public",
     # Dev tools / package caches
     ".docker", ".gradle", ".m2", ".ivy2", ".sbt",
     ".conda", "miniconda3", "miniforge3",

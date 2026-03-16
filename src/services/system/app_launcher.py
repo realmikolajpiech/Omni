@@ -398,19 +398,26 @@ def find_and_launch_app(query):
     return False, "App not found"
 
 def resolve_app_metadata(app_name):
+    # Fast path: Homebrew catalog (covers all casks/formulas with official homepages)
+    try:
+        from src.services.system.installer import get_package_metadata
+        meta = get_package_metadata(app_name)
+        if meta and meta.get("homepage"):
+            return {"image": None, "website": meta["homepage"], "desc": meta.get("desc", "")}
+    except Exception:
+        pass
+
+    # Fallback: DuckDuckGo web search
     try:
         url = "https://html.duckduckgo.com/html/"
         params = {"q": f"{app_name} official website"}
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.post(url, data=params, headers=headers, timeout=5)
-
         if resp.status_code == 200:
             import re
             match = re.search(r'class="result__a" href="([^"]+)"', resp.text)
             if match:
-                return {
-                    "image": None,
-                    "website": match.group(1)
-                }
-    except: pass
+                return {"image": None, "website": match.group(1), "desc": ""}
+    except Exception:
+        pass
     return None

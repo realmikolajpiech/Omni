@@ -4,8 +4,15 @@ import shutil
 import sys
 import os
 import time
+import json
+import threading
+import difflib
+import requests
+from pathlib import Path
 from datetime import datetime
 
+
+# ── Logging helper ─────────────────────────────────────────────────────────────
 
 def log_debug(msg):
     try:
@@ -16,6 +23,8 @@ def log_debug(msg):
     except Exception as e:
         print(f"LOG DEBUG FAILED: {e}", file=sys.stderr)
 
+
+# ── Homebrew binary ────────────────────────────────────────────────────────────
 
 def _brew_path():
     """Find the full path to brew — handles Intel (/usr/local) and Apple Silicon (/opt/homebrew)."""
@@ -43,7 +52,6 @@ def _run(cmd, timeout=20):
         res = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=timeout, env=_env(),
-            # Ensure child processes are killed on timeout too
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None
         )
         return res.returncode, res.stdout.strip(), res.stderr.strip()
@@ -58,56 +66,153 @@ def _homebrew_available():
     return os.path.isfile(BREW)
 
 
-def _brew_search(app_name):
-    """Search Homebrew — cask first (GUI apps), then formula (CLI tools)."""
-    rc, out, _ = _run(["brew", "search", "--cask", app_name], timeout=20)
-    if rc == 0 and out.strip():
-        lines = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith("==>")]
-        if lines:
-            return "cask", lines[0]
-    rc, out, _ = _run(["brew", "search", "--formula", app_name], timeout=20)
-    if rc == 0 and out.strip():
-        lines = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith("==>")]
-        if lines:
-            return "formula", lines[0]
-    return None, None
+# ── Homebrew catalog (cask + formula JSON API) ─────────────────────────────────
+
+_CACHE_DIR = Path.home() / ".local" / "share" / "omni" / "brew_cache"
+_CASK_CACHE_PATH = _CACHE_DIR / "casks.json"
+_FORMULA_CACHE_PATH = _CACHE_DIR / "formulas.json"
+_CACHE_MAX_AGE_S = 86400  # 24 hours
+
+_CASK_API_URL = "https://formulae.brew.sh/api/cask.json"
+_FORMULA_API_URL = "https://formulae.brew.sh/api/formula.json"
+
+_catalog_lock = threading.Lock()
+_cask_catalog: list | None = None
+_formula_catalog: list | None = None
+_catalog_ready = threading.Event()
 
 
-# Well-known apps — checked FIRST to avoid slow network calls
-KNOWN = {
-    "steam": ("cask", "steam"),
-    "discord": ("cask", "discord"),
-    "spotify": ("cask", "spotify"),
-    "chrome": ("cask", "google-chrome"),
-    "google-chrome": ("cask", "google-chrome"),
-    "vscode": ("cask", "visual-studio-code"),
-    "visual-studio-code": ("cask", "visual-studio-code"),
-    "firefox": ("cask", "firefox"),
-    "slack": ("cask", "slack"),
-    "zoom": ("cask", "zoom"),
-    "vlc": ("cask", "vlc"),
-    "libreoffice": ("cask", "libreoffice"),
-    "notion": ("cask", "notion"),
-    "figma": ("cask", "figma"),
-    "telegram": ("cask", "telegram"),
-    "whatsapp": ("cask", "whatsapp"),
-    "1password": ("cask", "1password"),
-    "alfred": ("cask", "alfred"),
-    "iterm2": ("cask", "iterm2"),
-    "git": ("formula", "git"),
-    "node": ("formula", "node"),
-    "python": ("formula", "python@3.12"),
-    "ffmpeg": ("formula", "ffmpeg"),
-    "wget": ("formula", "wget"),
-    "cursor": ("cask", "cursor"),
-    "arc": ("cask", "arc"),
-    "obsidian": ("cask", "obsidian"),
-    "raycast": ("cask", "raycast"),
-    "warp": ("cask", "warp"),
-}
+def _cache_fresh(path: Path) -> bool:
+    return path.exists() and (time.time() - path.stat().st_mtime) < _CACHE_MAX_AGE_S
 
 
-def generate_install_plan(app_name):
+def _load_or_fetch(url: str, cache_path: Path, label: str) -> list:
+    if _cache_fresh(cache_path):
+        try:
+            data = json.loads(cache_path.read_text())
+            log_debug(f"Loaded {len(data)} {label} from disk cache")
+            return data
+        except Exception:
+            pass
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            cache_path.write_text(r.text)
+            log_debug(f"Fetched {len(data)} {label} from Homebrew API")
+            return data
+    except Exception as e:
+        log_debug(f"Failed to fetch {label}: {e}")
+    return []
+
+
+def _fetch_catalog():
+    global _cask_catalog, _formula_catalog
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    casks = _load_or_fetch(_CASK_API_URL, _CASK_CACHE_PATH, "casks")
+    formulas = _load_or_fetch(_FORMULA_API_URL, _FORMULA_CACHE_PATH, "formulas")
+    with _catalog_lock:
+        _cask_catalog = casks
+        _formula_catalog = formulas
+    _catalog_ready.set()
+    log_debug(f"Catalog ready: {len(casks)} casks, {len(formulas)} formulas")
+
+
+# Start loading catalog in background immediately on module import
+threading.Thread(target=_fetch_catalog, daemon=True, name="brew-catalog-loader").start()
+
+
+def _ensure_catalog():
+    """Block until catalog is ready (max 20s on first cold start)."""
+    _catalog_ready.wait(timeout=20)
+
+
+def _norm(s: str) -> str:
+    return s.lower().strip().replace(" ", "-").replace("_", "-")
+
+
+def _match_package(app_name: str):
+    """
+    Find best package match in Homebrew catalog.
+    Returns (kind, token, homepage, desc) or None.
+    Prefers casks (GUI apps) over formulas.
+    """
+    _ensure_catalog()
+    with _catalog_lock:
+        casks = _cask_catalog or []
+        formulas = _formula_catalog or []
+
+    query = _norm(app_name)
+
+    def cask_result(c):
+        return ("cask", c["token"], c.get("homepage", ""), c.get("desc", ""))
+
+    def formula_result(f):
+        return ("formula", f["name"], f.get("homepage", ""), f.get("desc", ""))
+
+    # 1. Exact cask token
+    for c in casks:
+        if c["token"] == query:
+            return cask_result(c)
+
+    # 2. Exact cask name (names array)
+    for c in casks:
+        for n in c.get("name", []):
+            if _norm(n) == query:
+                return cask_result(c)
+
+    # 3. Exact formula name / full_name
+    for f in formulas:
+        if f["name"] == query or _norm(f.get("full_name", "")) == query:
+            return formula_result(f)
+
+    # 4. Formula alias
+    for f in formulas:
+        for a in f.get("aliases", []):
+            if _norm(a) == query:
+                return formula_result(f)
+
+    # 5. Fuzzy cask token (cutoff 0.82 avoids spurious matches)
+    cask_tokens = [c["token"] for c in casks]
+    close = difflib.get_close_matches(query, cask_tokens, n=1, cutoff=0.82)
+    if close:
+        for c in casks:
+            if c["token"] == close[0]:
+                return cask_result(c)
+
+    # 6. Substring match in cask token (for short but distinctive queries)
+    if len(query) >= 4:
+        for c in casks:
+            if query in c["token"] or any(query in _norm(n) for n in c.get("name", [])):
+                return cask_result(c)
+
+    # 7. Fuzzy formula name
+    formula_names = [f["name"] for f in formulas]
+    close = difflib.get_close_matches(query, formula_names, n=1, cutoff=0.82)
+    if close:
+        for f in formulas:
+            if f["name"] == close[0]:
+                return formula_result(f)
+
+    return None
+
+
+def get_package_metadata(app_name: str) -> dict | None:
+    """
+    Return Homebrew metadata for an app: {kind, token, homepage, desc}.
+    Uses the cached catalog — no subprocess calls.
+    Returns None if not found.
+    """
+    result = _match_package(app_name)
+    if result:
+        kind, token, homepage, desc = result
+        return {"kind": kind, "token": token, "homepage": homepage, "desc": desc}
+    return None
+
+
+# ── Install plan ───────────────────────────────────────────────────────────────
+
+def generate_install_plan(app_name: str) -> dict:
     """Generate a macOS-native install plan using Homebrew."""
     logging.info(f"Generating Install Plan for: {app_name}")
     t0 = time.monotonic()
@@ -118,71 +223,63 @@ def generate_install_plan(app_name):
 
     if not _homebrew_available():
         return {
-            "method": "brew_install_required",
-            "description": "Homebrew not found. Install Homebrew first.",
-            "commands": [
-                '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-            ]
+            "method": "failed",
+            "description": "Homebrew is not installed. Please install it from brew.sh first.",
+            "commands": []
         }
 
-    brew_name = app_name.lower().replace(" ", "-").replace("_", "-")
-
-    # 1. Check KNOWN map first (fast, no network)
-    t1 = time.monotonic()
-    matched = KNOWN.get(brew_name) or KNOWN.get(app_name.lower())
-    log_debug(f"  [step 1] KNOWN lookup: {time.monotonic()-t1:.3f}s → matched={matched}")
-    if matched:
-        kind, pkg = matched
+    # Fast path: catalog lookup (no subprocess, no network after initial load)
+    match = _match_package(app_name)
+    if match:
+        kind, token, homepage, desc = match
         flag = "--cask " if kind == "cask" else ""
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN hit)")
+        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (catalog hit: {kind}/{token})")
         return {
             "method": f"brew_{kind}",
-            "description": f"Installing '{pkg}' via Homebrew",
-            "commands": [f"{BREW} install {flag}{pkg}"]
+            "description": desc or f"Install {token} via Homebrew",
+            "homepage": homepage,
+            "token": token,
+            "commands": [f"{BREW} install {flag}{token}"]
         }
 
-    # 2. Try exact cask match (reduced timeout to keep total latency reasonable)
-    t2 = time.monotonic()
-    rc, out, _ = _run(["brew", "info", "--cask", brew_name], timeout=10)
-    log_debug(f"  [step 2] brew info --cask: {time.monotonic()-t2:.3f}s → rc={rc}")
-    if rc == 0:
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask hit)")
-        return {
-            "method": "brew_cask",
-            "description": f"Installing '{brew_name}' via Homebrew Cask",
-            "commands": [f"{BREW} install --cask {brew_name}"]
-        }
+    # Slow fallback: brew search (handles taps and packages added after catalog was cached)
+    log_debug(f"  Catalog miss — falling back to brew search")
+    brew_name = _norm(app_name)
+    rc, out, _ = _run(["brew", "search", "--cask", brew_name], timeout=20)
+    if rc == 0 and out.strip():
+        lines = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith("==>")]
+        if lines:
+            token = lines[0]
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (brew search cask: {token})")
+            return {
+                "method": "brew_cask",
+                "description": f"Installing '{token}' via Homebrew Cask",
+                "homepage": "",
+                "token": token,
+                "commands": [f"{BREW} install --cask {token}"]
+            }
 
-    # 3. Try exact formula match
-    t3 = time.monotonic()
-    rc, out, _ = _run(["brew", "info", "--formula", brew_name], timeout=10)
-    log_debug(f"  [step 3] brew info --formula: {time.monotonic()-t3:.3f}s → rc={rc}")
-    if rc == 0:
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula hit)")
-        return {
-            "method": "brew_formula",
-            "description": f"Installing '{brew_name}' via Homebrew",
-            "commands": [f"{BREW} install {brew_name}"]
-        }
-
-    # 4. Fuzzy search (last resort, can be slow)
-    t4 = time.monotonic()
-    kind, pkg = _brew_search(brew_name)
-    log_debug(f"  [step 4] brew search (cask+formula): {time.monotonic()-t4:.3f}s → kind={kind}, pkg={pkg}")
-    if pkg:
-        flag = "--cask " if kind == "cask" else ""
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (search hit)")
-        return {
-            "method": f"brew_{kind}",
-            "description": f"Found '{pkg}' in Homebrew",
-            "commands": [f"{BREW} install {flag}{pkg}"]
-        }
+    rc, out, _ = _run(["brew", "search", "--formula", brew_name], timeout=20)
+    if rc == 0 and out.strip():
+        lines = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith("==>")]
+        if lines:
+            token = lines[0]
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (brew search formula: {token})")
+            return {
+                "method": "brew_formula",
+                "description": f"Found '{token}' in Homebrew",
+                "homepage": "",
+                "token": token,
+                "commands": [f"{BREW} install {token}"]
+            }
 
     log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (not found)")
     return {"method": "failed", "description": f"Could not find '{app_name}' in Homebrew.", "commands": []}
 
 
-def generate_uninstall_plan(app_name):
+# ── Uninstall plan ─────────────────────────────────────────────────────────────
+
+def generate_uninstall_plan(app_name: str) -> dict:
     """Generate a macOS-native uninstall plan using Homebrew."""
     logging.info(f"Generating Uninstall Plan for: {app_name}")
     t0 = time.monotonic()
@@ -194,38 +291,34 @@ def generate_uninstall_plan(app_name):
     if not _homebrew_available():
         return {"method": "failed", "description": "Homebrew not found. Cannot uninstall.", "commands": []}
 
-    brew_name = app_name.lower().replace(" ", "-").replace("_", "-")
-
-    # 1. Resolve canonical name via KNOWN map, then verify it's actually installed
-    t1 = time.monotonic()
-    matched = KNOWN.get(brew_name) or KNOWN.get(app_name.lower())
-    log_debug(f"  [step 1] KNOWN lookup: {time.monotonic()-t1:.3f}s → matched={matched}")
-    if matched:
-        kind, pkg = matched
+    # Resolve canonical token from catalog
+    match = _match_package(app_name)
+    if match:
+        kind, token, _, _ = match
         flag = "--cask " if kind == "cask" else ""
         list_flag = ["--cask"] if kind == "cask" else []
-        t1b = time.monotonic()
-        rc, out, _ = _run(["brew", "list"] + list_flag + ["--versions", pkg], timeout=8)
-        log_debug(f"  [step 1b] brew list --versions: {time.monotonic()-t1b:.3f}s → rc={rc}, installed={bool(rc==0 and out.strip())}")
+        rc, out, _ = _run(["brew", "list"] + list_flag + ["--versions", token], timeout=8)
+        log_debug(f"  brew list check: rc={rc}, out={out!r}")
         if rc == 0 and out.strip():
-            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN+installed)")
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (catalog + installed)")
             return {
                 "method": f"brew_{kind}_uninstall",
-                "description": f"Uninstalling '{pkg}' via Homebrew",
-                "commands": [f"{BREW} uninstall {flag}{pkg}"]
+                "description": f"Uninstalling '{token}' via Homebrew",
+                "commands": [f"{BREW} uninstall {flag}{token}"]
             }
         else:
-            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (KNOWN but not installed)")
+            log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (catalog hit but not installed)")
             return {
                 "method": "not_installed",
                 "description": f"'{app_name}' does not appear to be installed via Homebrew.",
                 "commands": []
             }
 
-    # 2. Check if installed as cask
-    t2 = time.monotonic()
+    # Fallback: check by normalized name directly
+    brew_name = _norm(app_name)
+
     rc, out, _ = _run(["brew", "list", "--cask", "--versions", brew_name], timeout=8)
-    log_debug(f"  [step 2] brew list --cask --versions: {time.monotonic()-t2:.3f}s → rc={rc}")
+    log_debug(f"  brew list --cask: rc={rc}")
     if rc == 0 and out.strip():
         log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask installed)")
         return {
@@ -234,10 +327,8 @@ def generate_uninstall_plan(app_name):
             "commands": [f"{BREW} uninstall --cask {brew_name}"]
         }
 
-    # 3. Check if installed as formula
-    t3 = time.monotonic()
     rc, out, _ = _run(["brew", "list", "--versions", brew_name], timeout=8)
-    log_debug(f"  [step 3] brew list --versions: {time.monotonic()-t3:.3f}s → rc={rc}")
+    log_debug(f"  brew list: rc={rc}")
     if rc == 0 and out.strip():
         log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula installed)")
         return {
@@ -246,29 +337,5 @@ def generate_uninstall_plan(app_name):
             "commands": [f"{BREW} uninstall {brew_name}"]
         }
 
-    # 4. Try cask info (exists in brew but may not be installed)
-    t4 = time.monotonic()
-    rc, _, _ = _run(["brew", "info", "--cask", brew_name], timeout=10)
-    log_debug(f"  [step 4] brew info --cask: {time.monotonic()-t4:.3f}s → rc={rc}")
-    if rc == 0:
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (cask exists, not installed)")
-        return {
-            "method": "not_installed",
-            "description": f"'{app_name}' does not appear to be installed via Homebrew.",
-            "commands": []
-        }
-
-    # 5. Try formula info
-    t5 = time.monotonic()
-    rc, _, _ = _run(["brew", "info", "--formula", brew_name], timeout=10)
-    log_debug(f"  [step 5] brew info --formula: {time.monotonic()-t5:.3f}s → rc={rc}")
-    if rc == 0:
-        log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (formula exists, not installed)")
-        return {
-            "method": "not_installed",
-            "description": f"'{app_name}' does not appear to be installed via Homebrew.",
-            "commands": []
-        }
-
     log_debug(f"  TOTAL: {time.monotonic()-t0:.3f}s (not found)")
-    return {"method": "failed", "description": f"Could not find '{app_name}' in Homebrew.", "commands": []}
+    return {"method": "failed", "description": f"Could not find '{app_name}' installed via Homebrew.", "commands": []}

@@ -1283,7 +1283,7 @@ class InstallActionWidget(QWidget):
     install_accepted = pyqtSignal(str, QWidget)
     icon_downloaded = pyqtSignal(object)
     
-    def __init__(self, name, website_url, parent=None):
+    def __init__(self, name, website_url, desc="", parent=None):
         super().__init__(parent)
         self.app_name = name
         self.website_url = website_url
@@ -1336,7 +1336,8 @@ class InstallActionWidget(QWidget):
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         
-        self.desc_label = QLabel(f"Do you want to install {display_name} using the system package manager?")
+        desc_text = desc if desc else f"Install {display_name} using Homebrew."
+        self.desc_label = QLabel(desc_text)
         self.desc_label.setFont(QFont("Manrope", 11))
         self.desc_label.setStyleSheet("color: #555555; background: transparent;")
         self.desc_label.setWordWrap(True)

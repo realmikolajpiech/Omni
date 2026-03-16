@@ -14,7 +14,7 @@ from src.services.llm.chat import process_chat_request, perform_calculation, sho
 from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
 from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata, get_app_cache
-from src.services.system.installer import generate_install_plan, log_debug, KNOWN
+from src.services.system.installer import generate_install_plan, log_debug, get_package_metadata
 
 api_bp = Blueprint('api', __name__)
 
@@ -719,15 +719,13 @@ Instructions:
         elif "INSTALL:" in line:
             app = line.split("INSTALL:")[1].strip()
             metadata = resolve_app_metadata(app)
-            if metadata:
-                actions.append({
-                    "type": "install",
-                    "name": app,
-                    "website": metadata.get("website"),
-                    "image": metadata.get("image")
-                })
-            else:
-                actions.append({"type": "install", "name": app})
+            actions.append({
+                "type": "install",
+                "name": app,
+                "website": metadata.get("website") if metadata else None,
+                "image": metadata.get("image") if metadata else None,
+                "desc": metadata.get("desc", "") if metadata else "",
+            })
 
         elif "OPEN:" in line:
             url = line.split("OPEN:")[1].strip()
@@ -751,15 +749,13 @@ Instructions:
             else:
                 logging.info(f"OPEN_APP: '{app}' not found, suggesting install")
                 metadata = resolve_app_metadata(app)
-                if metadata:
-                    actions.append({
-                        "type": "install",
-                        "name": app,
-                        "website": metadata.get("website"),
-                        "image": metadata.get("image")
-                    })
-                else:
-                    actions.append({"type": "install", "name": app})
+                actions.append({
+                    "type": "install",
+                    "name": app,
+                    "website": metadata.get("website") if metadata else None,
+                    "image": metadata.get("image") if metadata else None,
+                    "desc": metadata.get("desc", "") if metadata else "",
+                })
 
         elif "SYSTEM_SETTINGS:" in line:
             try:
@@ -1416,16 +1412,17 @@ def check_fast_regex_actions(query: str):
         logging.info(f"Regex shortcut Install: {app}")
         return [{"type": "install", "name": app}]
 
-    # Bare known-app name not installed
+    # Bare package name not installed — check catalog for a quick match
     _bare = query.strip().lower()
     if (len(_bare.split()) <= 2 and
             not any(c in _bare for c in '.:/\\?') and
-            _bare in KNOWN):
+            len(_bare) >= 3 and
+            get_package_metadata(_bare) is not None):
         _cache = get_app_cache()
         _installed = (
             _bare in _cache or
             any(k.startswith(_bare) for k in _cache) or
-            (len(_bare) >= 3 and any(_bare in k for k in _cache))
+            any(_bare in k for k in _cache)
         )
         if not _installed:
             logging.info(f"Regex shortcut: known app '{_bare}' not installed → suggest install")
