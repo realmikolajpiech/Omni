@@ -335,21 +335,23 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "organize_folder",
             "description": (
-                "Organize files in a specific folder into subfolders based on file type or date. "
+                "Organize files in a folder into smart subfolders. "
                 "Use when the user asks to 'cleanup', 'organize', or 'tidy up' a folder. "
-                "It intelligently groups code files by language (e.g. Python, JS) and media by type."
+                "Smart mode creates subcategories (e.g. Images/Photos, Images/Screenshots, Code/Python, Documents/PDFs, Documents/Spreadsheets) "
+                "and automatically merges small groups to avoid clutter. "
+                "Supports 100+ file types including design files, 3D models, datasets, and more."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The directory path to organize, e.g. '~/Desktop/personal'.",
+                        "description": "The directory path to organize, e.g. '~/Desktop' or '~/Downloads'.",
                     },
                     "strategy": {
                         "type": "string",
                         "enum": ["smart", "type", "date"],
-                        "description": "Strategy: 'smart' (default, groups code by language), 'type' (broad categories), 'date' (YYYY-MM).",
+                        "description": "Strategy: 'smart' (default, intelligent subcategories that auto-merge small groups), 'type' (broad categories only), 'date' (Year/Month folders).",
                     }
                 },
                 "required": ["path"],
