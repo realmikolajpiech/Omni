@@ -1,51 +1,100 @@
+import json
+import logging
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
-from src.core.config import ACTION_URL, ACTION_PENDING_URL, RESOLVE_PLACE_URL
+from src.core.config import ACTION_URL, RESOLVE_PLACE_URL
+
 
 class ActionWorker(QThread):
     # (actions, chips, query)
     action_found = pyqtSignal(object, object, str)
+    # Intermediate signal for "searching" state (query being searched)
+    searching = pyqtSignal(str, str)  # (search_query, original_query)
 
-    def __init__(self, query):
+    def __init__(self, query, use_stream=True):
         super().__init__()
         self.query = query
+        self.use_stream = use_stream
 
     def run(self):
         try:
-            import logging
-            logging.info(f"ActionWorker: Requesting action for '{self.query}'")
-            # Fast model can take 10–30+ s; use a long timeout so actions are not dropped
-            r = requests.post(ACTION_URL, json={"query": self.query}, timeout=90)
-            data = r.json()
-            actions = data.get("actions", [])
-            if not actions and data.get("action"):
-                actions = [data.get("action")]
-            chips = data.get("chips", [])
-            logging.info(f"ActionWorker: Found {len(actions)} actions, {len(chips)} chips for '{self.query}'")
-            self.action_found.emit(actions, chips, self.query)
-
-            # If backend returned a pending (web_search) skeleton, resolve it now.
-            pending_id = data.get("pending_id")
-            if not pending_id:
-                for a in actions:
-                    if isinstance(a, dict) and a.get("type") == "action_pending" and a.get("pending_id"):
-                        pending_id = a.get("pending_id")
-                        break
-
-            if pending_id:
-                logging.info(f"ActionWorker: Resolving pending action {pending_id} for '{self.query}'")
-                r2 = requests.post(ACTION_PENDING_URL, json={"pending_id": pending_id}, timeout=90)
-                data2 = r2.json()
-                actions2 = data2.get("actions", [])
-                if not actions2 and data2.get("action"):
-                    actions2 = [data2.get("action")]
-                chips2 = data2.get("chips", [])
-                logging.info(f"ActionWorker: Pending resolved to {len(actions2)} actions for '{self.query}'")
-                self.action_found.emit(actions2, chips2, self.query)
+            if self.use_stream:
+                self._run_streaming()
+            else:
+                self._run_simple()
         except Exception as e:
-            import logging
             logging.error(f"ActionWorker Error: {e}")
             self.action_found.emit([], [], self.query)
+
+    def _emit_from_data(self, data):
+        """Extract actions/chips from response data and emit signal."""
+        actions = data.get("actions", [])
+        if not actions and data.get("action"):
+            actions = [data.get("action")]
+        chips = data.get("chips", [])
+        logging.info(f"ActionWorker: {len(actions)} actions, {len(chips)} chips for '{self.query}'")
+        self.action_found.emit(actions, chips, self.query)
+
+    def _run_simple(self):
+        r = requests.post(ACTION_URL, json={"query": self.query}, timeout=90)
+        self._emit_from_data(r.json())
+
+    def _run_streaming(self):
+        """Send request with stream flag. Handles both SSE and JSON responses.
+
+        - If the endpoint returns text/event-stream (search path): parse SSE events,
+          emit intermediate "searching" signal for skeleton, then emit final result.
+        - If the endpoint returns application/json (fast path like calc/translate/etc):
+          parse JSON directly and emit result.
+        """
+        try:
+            with requests.post(
+                ACTION_URL,
+                json={"query": self.query, "stream": True},
+                timeout=90,
+                stream=True,
+            ) as r:
+                r.raise_for_status()
+                content_type = r.headers.get("content-type", "")
+
+                if "text/event-stream" in content_type:
+                    # SSE mode — parse events progressively
+                    got_done = False
+                    for line in r.iter_lines(decode_unicode=True):
+                        if not line or not line.startswith("data: "):
+                            continue
+                        try:
+                            payload = json.loads(line[6:])
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+
+                        event = payload.get("event", "")
+
+                        if event == "searching":
+                            search_q = payload.get("query", self.query)
+                            logging.info(f"ActionWorker: Searching '{search_q}' for '{self.query}'")
+                            self.searching.emit(search_q, self.query)
+
+                        elif event == "done":
+                            self._emit_from_data(payload)
+                            got_done = True
+                            return
+
+                    # Generator finished without a "done" event — emit empty
+                    if not got_done:
+                        logging.warning(f"ActionWorker: SSE stream ended without 'done' for '{self.query}'")
+                        self.action_found.emit([], [], self.query)
+                else:
+                    # JSON response (fast path — calc, translate, shortcuts, etc.)
+                    self._emit_from_data(r.json())
+
+        except Exception as e:
+            logging.warning(f"ActionWorker streaming failed ({e}), falling back to simple")
+            try:
+                self._run_simple()
+            except Exception as e2:
+                logging.error(f"ActionWorker simple fallback also failed: {e2}")
+                self.action_found.emit([], [], self.query)
 
 
 class PlaceResolverWorker(QThread):
@@ -58,8 +107,6 @@ class PlaceResolverWorker(QThread):
 
     def run(self):
         try:
-            import logging
-            logging.info(f"PlaceResolverWorker: Resolving place '{self.name}'")
             r = requests.post(RESOLVE_PLACE_URL, json={"name": self.name}, timeout=20)
             action = r.json()
             if action and action.get("type") == "place":
@@ -69,6 +116,5 @@ class PlaceResolverWorker(QThread):
                 logging.warning(f"PlaceResolverWorker: Failed to resolve '{self.name}'")
                 self.place_resolved.emit(None, self.name)
         except Exception as e:
-            import logging
             logging.error(f"PlaceResolverWorker Error: {e}")
             self.place_resolved.emit(None, self.name)

@@ -731,27 +731,25 @@ def main():
                 return vmodel, tbl, count
 
             if vmodel is None:
-                from embed_anything import EmbeddingModel, ImageEmbedConfig
+                from embed_anything import EmbeddingModel
                 import embed_anything as _ea
                 logging.info("  Loading CLIP vision model (embed-anything, first time)...")
 
                 _raw_clip = EmbeddingModel.from_pretrained_hf(model_id="openai/clip-vit-base-patch32")
-                _img_cfg = ImageEmbedConfig(batch_size=IMAGE_BATCH_SIZE)
 
                 class _CLIPWrapper:
-                    def __init__(self, m, cfg):
+                    def __init__(self, m):
                         self.model = m
-                        self.cfg = cfg
                     def encode(self, image_path):
                         import numpy as np
-                        results = _ea.embed_file(image_path, embedder=self.model, config=self.cfg)
+                        results = _ea.embed_file(image_path, embedder=self.model)
                         if not results:
                             return np.zeros(512, dtype=np.float32)
                         vec = np.array(results[0].embedding, dtype=np.float32)
                         norm = np.linalg.norm(vec)
                         return vec / norm if norm > 0 else vec
 
-                vmodel = _CLIPWrapper(_raw_clip, _img_cfg)
+                vmodel = _CLIPWrapper(_raw_clip)
 
             vectors = []
             valid = []

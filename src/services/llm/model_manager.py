@@ -58,6 +58,25 @@ current_fast_request_id = None
 fast_request_queue = []
 fast_queue_lock = threading.Lock()
 
+# Prefetch cache — stores pre-fetched data from contextual detection (Priority 5)
+_prefetch_cache: dict[str, tuple] = {}  # key -> (data, timestamp)
+_PREFETCH_TTL = 60  # seconds
+
+
+def prefetch_get(key: str):
+    """Return cached prefetch data if still fresh, else None."""
+    if key in _prefetch_cache:
+        data, ts = _prefetch_cache[key]
+        if time.time() - ts < _PREFETCH_TTL:
+            return data
+        del _prefetch_cache[key]
+    return None
+
+
+def prefetch_set(key: str, data):
+    """Store prefetch data with timestamp."""
+    _prefetch_cache[key] = (data, time.time())
+
 
 def _convert_file_urls_to_base64(messages):
     """
@@ -395,16 +414,13 @@ class _EmbedAnythingCLIPWrapper:
 
     def __init__(self, model):
         import embed_anything as _ea
-        from embed_anything import ImageEmbedConfig
         self._ea = _ea
-        self._ImageEmbedConfig = ImageEmbedConfig
         self.model = model
 
     def encode(self, input_):
         import numpy as np
         if isinstance(input_, str) and os.path.isfile(input_):
-            cfg = self._ImageEmbedConfig(batch_size=1)
-            results = self._ea.embed_file(input_, embedder=self.model, config=cfg)
+            results = self._ea.embed_file(input_, embedder=self.model)
         else:
             text = input_ if isinstance(input_, str) else str(input_)
             results = self._ea.embed_query([text], embedder=self.model)

@@ -34,18 +34,34 @@ _local_client = httpx.Client(
 # Result cache -- avoids duplicate API calls for the same query
 # ---------------------------------------------------------------------------
 _search_cache: dict[str, tuple[list, float]] = {}
-_SEARCH_CACHE_TTL = 120  # seconds
+_SEARCH_CACHE_TTL = 300  # seconds (increased from 120 for better reuse)
 
 def _cache_key(query: str, categories: str) -> str:
     return f"{query.lower().strip()}|{categories}"
 
 def _get_cached(query: str, categories: str):
     key = _cache_key(query, categories)
+    now = time.time()
+
+    # Exact match
     if key in _search_cache:
         results, ts = _search_cache[key]
-        if time.time() - ts < _SEARCH_CACHE_TTL:
+        if now - ts < _SEARCH_CACHE_TTL:
             return results
         del _search_cache[key]
+
+    # Prefix match: "apple" cached → "apple stock" reuses if within 10 chars
+    q_lower = query.lower().strip()
+    for cached_key, (results, ts) in list(_search_cache.items()):
+        if now - ts >= _SEARCH_CACHE_TTL:
+            continue
+        cached_q, _, cached_cat = cached_key.partition("|")
+        if cached_cat != categories:
+            continue
+        if q_lower.startswith(cached_q) and 0 < len(q_lower) - len(cached_q) <= 10:
+            logging.info(f"Search cache prefix hit: '{q_lower}' matched cached '{cached_q}'")
+            return results
+
     return None
 
 def _set_cached(query: str, categories: str, results: list):

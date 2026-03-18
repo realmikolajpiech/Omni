@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget, CalendarActionWidget, EmailActionWidget, AnswerActionWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -1032,7 +1032,10 @@ class OmniWindow(QWidget):
                 self.input_field.style().unpolish(self.input_field)
                 self.input_field.style().polish(self.input_field)
                 self.input_field.update()
-                
+
+                # Contextual pre-fetch based on active app
+                self._trigger_prefetch()
+
                 if source == "voice":
                     self.send_udp_command("SET_MODE:LISTENING")
                     self.mic_widget.set_active(True)
@@ -1369,10 +1372,10 @@ class OmniWindow(QWidget):
         self.raise_()
         self.activateWindow()
 
-        # Set text and submit
+        # Set text and trigger fast action search
         self.input_field.setText(query)
-        self.perform_ai_query(query)
-        logging.info(f"[IPC] After perform_ai_query: list_count={self.list_widget.count()}, "
+        self._trigger_immediate_fast_action(query)
+        logging.info(f"[IPC] After fast action trigger: list_count={self.list_widget.count()}, "
                      f"list_visible={self.list_widget.isVisible()}, divider_visible={self.divider.isVisible()}, "
                      f"window_height={self.height()}")
         if is_voice:
@@ -1669,7 +1672,7 @@ class OmniWindow(QWidget):
                                 return True
                     query = self.input_field.text().strip()
                     if query:
-                        self.perform_ai_query(query)
+                        self._activate_first_or_search(query)
                         return True
             elif event.key() == Qt.Key.Key_Escape:
                 # logging.info("Escape key pressed (Input Field)")
@@ -1726,15 +1729,15 @@ class OmniWindow(QWidget):
                 if not self.is_history_mode:
                     query = self.input_field.text().strip()
                     if query:
-                        self.perform_ai_query(query)
+                        self._activate_first_or_search(query)
                     else:
                         self.enter_history_mode()
                     return True
                 else:
-                    # In history mode, TAB also sends the follow-up if there is text
+                    # In history mode, TAB also submits the follow-up as a fast action
                     query = self.input_field.text().strip()
                     if query:
-                        self.perform_ai_query(query)
+                        self._activate_first_or_search(query)
                         return True
         return super().eventFilter(obj, event)
 
@@ -2362,10 +2365,8 @@ class OmniWindow(QWidget):
                     w.set_open_hint("")
 
         if self.is_history_mode:
-            # If user types in history mode, allow modification without resetting state
-            # self.is_history_mode = False  <-- REMOVED
-            # self.follow_up_widget.set_active(False) <-- REMOVED
-            return
+            # User started typing a new query — exit history mode, start fresh search
+            self.reset_to_search_mode(clear=False)
 
         # --- Command Palette: "/" prefix triggers it ---
         if text.startswith("/"):
@@ -2673,6 +2674,14 @@ class OmniWindow(QWidget):
                     return PasswordActionWidget(a.get('length', 16), a.get('pwd', None))
                 elif a.get('type') == 'qrcode':
                     return QRActionWidget(a.get('data', ''))
+                elif a.get('type') == 'calendar':
+                    return CalendarActionWidget(a.get('events_text', ''))
+                elif a.get('type') == 'emails':
+                    return EmailActionWidget(a.get('emails_text', ''))
+                elif a.get('type') == 'answer':
+                    return AnswerActionWidget(a.get('text', ''))
+                elif a.get('type') == 'organize_pending':
+                    return PendingActionWidget(a.get('title', 'Organize folder'), a.get('path', ''), header_text="ORGANIZE")
                 elif a.get('type') == 'action_pending':
                     return PendingActionWidget(a.get('title', 'Searching the web'), a.get('subtitle', ''), header_text="SEARCHING WEB")
                 elif a.get('type') == 'place_pending':
@@ -2802,6 +2811,10 @@ class OmniWindow(QWidget):
         if data.get('type') == 'install': return f"install:{data.get('name')}"
         if data.get('type') == 'uninstall': return f"uninstall:{data.get('name')}"
         if data.get('type') == 'command_palette': return f"cmd:{data.get('name')}"
+        if data.get('type') == 'calendar': return 'calendar'
+        if data.get('type') == 'emails': return 'emails'
+        if data.get('type') == 'answer': return f"answer:{data.get('text', '')[:50]}"
+        if data.get('type') == 'organize_pending': return f"organize:{data.get('path', '')}"
         # Fallback for others
         return str(data)
 
@@ -2952,14 +2965,55 @@ class OmniWindow(QWidget):
 
         self.list_widget.setItemWidget(item, anim_w)
 
+    def _trigger_prefetch(self):
+        """Pre-fetch contextual data based on the active app (runs in background thread)."""
+        import threading
+
+        def _do_prefetch():
+            try:
+                from src.services.system.context_detector import get_active_app_context
+                from src.services.llm import model_manager
+
+                hints = get_active_app_context()
+                if not hints:
+                    return
+
+                for hint in hints:
+                    # Skip if already cached and fresh
+                    if model_manager.prefetch_get(hint) is not None:
+                        continue
+
+                    if hint == "calendar_events":
+                        try:
+                            from src.services.llm.tools import execute_tool
+                            result = execute_tool("get_calendar_events", {"days": 3})
+                            model_manager.prefetch_set("calendar_events", result)
+                            logging.info("[PREFETCH] Cached calendar events")
+                        except Exception as e:
+                            logging.warning(f"[PREFETCH] Calendar failed: {e}")
+
+                    elif hint == "unread_emails":
+                        try:
+                            from src.services.llm.tools import execute_tool
+                            result = execute_tool("get_unread_emails", {"limit": 5})
+                            model_manager.prefetch_set("unread_emails", result)
+                            logging.info("[PREFETCH] Cached unread emails")
+                        except Exception as e:
+                            logging.warning(f"[PREFETCH] Emails failed: {e}")
+
+            except Exception as e:
+                logging.warning(f"[PREFETCH] Context detection failed: {e}")
+
+        threading.Thread(target=_do_prefetch, daemon=True).start()
+
     def cleanup_worker(self, attr_name):
         """Safely cleanup a worker thread by keeping a reference if it's still running."""
         worker = getattr(self, attr_name, None)
         if worker:
             # Disconnect known signals to avoid side effects and C++ "destroyed signal" warnings
             signals = [
-                'results_found', 'action_found', 'wiki_result', 'no_result', 
-                'og_result', 'finished', 'failed', 'partial_response', 
+                'results_found', 'action_found', 'searching', 'wiki_result', 'no_result',
+                'og_result', 'finished', 'failed', 'partial_response',
                 'finished_speaking', 'error'
             ]
             for sig in signals:
@@ -2993,11 +3047,7 @@ class OmniWindow(QWidget):
 
     def trigger_async_searches(self):
         query = self.input_field.text().strip()
-        if not query or self.is_history_mode: return
-
-        # Don't start action/search workers while AI is streaming a response
-        if self.ai_worker and self.ai_worker.isRunning():
-            return
+        if not query: return
 
         # Start Search Worker
         self.cleanup_worker('search_worker')
@@ -3005,10 +3055,11 @@ class OmniWindow(QWidget):
         self.search_worker.results_found.connect(self.on_search_results)
         self.search_worker.start()
 
-        # Start Action Worker
+        # Start Action Worker (SSE streaming for progressive UI)
         self.cleanup_worker('action_worker')
-        self.action_worker = ActionWorker(query)
+        self.action_worker = ActionWorker(query, use_stream=True)
         self.action_worker.action_found.connect(self.on_action_found)
+        self.action_worker.searching.connect(self.on_action_searching)
         self.action_worker.start()
 
         # Start File Search Worker - OPTIMIZED FOR SPEED
@@ -3019,15 +3070,24 @@ class OmniWindow(QWidget):
 
     def on_search_results(self, results, query):
         if self.input_field.text().strip() != query: return
-        if self.ai_worker and self.ai_worker.isRunning(): return
 
         self.external_search_results = results
         self.refresh_list(query, animate=False)
 
+    def on_action_searching(self, search_query, original_query):
+        """Handle intermediate 'searching' event from SSE — show skeleton immediately."""
+        if self.input_field.text().strip() != original_query:
+            return
+        if self.ai_worker and self.ai_worker.isRunning():
+            return
+        # Show a searching skeleton as an intermediate action
+        searching_action = {"type": "action_pending", "title": "Searching the web", "subtitle": search_query}
+        self.external_actions = [searching_action]
+        self.last_action_time = time.time()
+        self.refresh_list(original_query, animate=False)
+
     def on_action_found(self, actions, chips, query):
         if self.input_field.text().strip() != query: return
-        # Discard stale action results if AI is already running
-        if self.ai_worker and self.ai_worker.isRunning(): return
 
         # --- NEW: Filter out pending places and start async workers ---
         final_actions = []
@@ -3059,7 +3119,7 @@ class OmniWindow(QWidget):
         # Sort external actions to prioritize interactive cards
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3106,7 +3166,7 @@ class OmniWindow(QWidget):
         # Re-sort using same logic
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3134,14 +3194,12 @@ class OmniWindow(QWidget):
         """Handle Open Graph metadata — show website preview card."""
         if self.input_field.text().strip() != query:
             return
-        if self.ai_worker and self.ai_worker.isRunning(): return
         self.og_data = og_data
         self.refresh_list(query, animate=False)
 
     def on_file_search_results(self, results, query):
         """Handle file search results from the file search worker."""
         if self.input_field.text().strip() != query: return
-        if self.ai_worker and self.ai_worker.isRunning(): return
 
         # Store in separate list to avoid overwrite by slow search_worker
         self.local_file_results = results
@@ -3160,7 +3218,10 @@ class OmniWindow(QWidget):
             if text:
                 QGuiApplication.clipboard().setText(text)
         elif action_type == "ask_omni":
-            self.perform_ai_query(action.get("query", ""))
+            q = action.get("query", "")
+            if q:
+                self.input_field.setText(q)
+                self._trigger_immediate_fast_action(q)
         else:
             logging.warning(f"Unknown chip action type: {action_type}")
 
@@ -3209,11 +3270,11 @@ class OmniWindow(QWidget):
                 logging.error(f"Failed to open pending file: {e}")
             return
 
-        # If no item selected (Enter in box), use text
+        # If no item selected (Enter in box), activate first result or trigger fast action
         if not item:
             query = self.input_field.text().strip()
             if query:
-                self.perform_ai_query(query)
+                self._activate_first_or_search(query)
             return
 
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -3303,7 +3364,10 @@ class OmniWindow(QWidget):
                 except Exception as e:
                     logging.error(f"Failed to execute command '{data['cmd']}': {e}")
             elif data.get('type') == 'ask_omni':
-                self.perform_ai_query(data['query'])
+                q = data.get('query', '')
+                if q:
+                    self.input_field.setText(q)
+                    self._trigger_immediate_fast_action(q)
             elif data.get('type') == 'translate':
                 text = data.get('translated_text', '')
                 if text:
@@ -3314,10 +3378,37 @@ class OmniWindow(QWidget):
                 if text:
                     QGuiApplication.clipboard().setText(text)
                 self.animate_close()
+            elif data.get('type') == 'answer':
+                text = data.get('text', '')
+                if text:
+                    QGuiApplication.clipboard().setText(text)
+                self.animate_close()
+            elif data.get('type') == 'calendar':
+                # Open Calendar app
+                try:
+                    subprocess.Popen(['open', '-a', 'Calendar'])
+                except Exception:
+                    pass
+                self.animate_close()
+            elif data.get('type') == 'emails':
+                # Open Mail app
+                try:
+                    subprocess.Popen(['open', '-a', 'Mail'])
+                except Exception:
+                    pass
+                self.animate_close()
+            elif data.get('type') == 'organize_pending':
+                # Trigger organize via the widget's confirm button
+                container = self.list_widget.itemWidget(item)
+                if hasattr(container, 'content_widget'):
+                    w = container.content_widget
+                    if hasattr(w, 'accept_install'):
+                        w.accept_install()
+                return
         else:
             # Fallback
             query = self.input_field.text().strip()
-            if query: self.perform_ai_query(query)
+            if query: self._activate_first_or_search(query)
     
     def show_file_preview(self, file_path):
         """Toggle preview expansion for the selected file."""
@@ -3665,149 +3756,34 @@ class OmniWindow(QWidget):
             return True
         return False
 
-    def perform_ai_query(self, query):
-        # Reset voice flag — will be re-set after this call if query came from voice
-        self.voice_triggered_query = False
+    def _activate_first_or_search(self, query):
+        """Unified Tab/Enter handler: activate the first fast-action result, or trigger a search."""
+        # If there are items in the list, activate the first one
+        if self.list_widget.count() > 0:
+            first_item = self.list_widget.item(0)
+            if first_item:
+                self.on_entered(first_item)
+                return
+        # No items yet — trigger an immediate fast action search
+        self._trigger_immediate_fast_action(query)
 
-        # Stop debounce timers to prevent new fast/local searches from starting
+    def _trigger_immediate_fast_action(self, query):
+        """Fire an immediate ActionWorker for the query (bypasses debounce)."""
         self.debounce_timer.stop()
         self.local_search_timer.stop()
-
-        # ── Fast-action bypass ────────────────────────────────────────────────
-        # If the query already produced a widget-type fast action (currency, unit,
-        # translate, calc), skip the AI entirely and just display that widget
-        # nicely without any reasoning model involvement.
-        _FAST_WIDGET_TYPES = {'currency', 'unit', 'translate', 'calc', 'world_time'}
-        _fast_actions = [a for a in self.external_actions if isinstance(a, dict) and a.get('type') in _FAST_WIDGET_TYPES]
-        if _fast_actions and not self.is_history_mode:
-            self.cleanup_worker('search_worker')
-            self.cleanup_worker('action_worker')
-            self.cleanup_worker('file_search_worker')
-            self.list_widget.clear()
-            self.frame.set_minimal_mode(False)
-            self.logo_label.stop_spinning()
-            for act in _fast_actions:
-                t = act.get('type')
-                if t == 'currency':
-                    w = CurrencyActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
-                elif t == 'unit':
-                    w = UnitActionWidget(act.get('amount', '0'), act.get('from_unit', ''), act.get('to_unit', ''), act.get('converted_value', ''))
-                elif t == 'translate':
-                    w = TranslateActionWidget(act.get('source_text', ''), act.get('from_lang', ''), act.get('to_lang', ''), act.get('translated_text', ''))
-                elif t == 'calc':
-                    w = CalcActionWidget(act.get('content', ''), act.get('equation', ''))
-                elif t == 'world_time':
-                    w = WorldTimeWidget(act.get('city', ''), act.get('timezone', ''), act.get('current_time', ''), act.get('date', ''))
-                else:
-                    continue
-                self.insert_list_item(0, w, act, animation="pop")
-            self.is_history_mode = True
-            self.input_field.setReadOnly(False)
-            self.input_field.blockSignals(True)
-            self.input_field.clear()
-            self.input_field.blockSignals(False)
-            self.input_field.setPlaceholderText("Ask a follow-up...")
-            if self.isVisible():
-                self.input_field.setFocus()
-            self.follow_up_widget.set_mode("followup")
-            self.adjust_window_height(animate=True)
-            return
-        # ─────────────────────────────────────────────────────────────────────
-
-        # Remember the query text now — input_field may be cleared before on_ai_response fires
-        self._current_query = query
-
-        # Disable input while thinking
-        self.input_field.setReadOnly(True)
-
-        # Cancel any pending fast search/action requests to prevent race conditions and save resources
-        self.cleanup_worker('search_worker')
         self.cleanup_worker('action_worker')
+        self.cleanup_worker('search_worker')
         self.cleanup_worker('file_search_worker')
-
-        # Disconnect any pending place resolver workers so they can't show the window
-        # or update the action list while we're in AI mode
-        if hasattr(self, 'place_workers'):
-            for w in list(self.place_workers.values()):
-                for sig in ('place_resolved', 'finished'):
-                    try:
-                        getattr(w, sig).disconnect()
-                    except (TypeError, RuntimeError):
-                        pass
-            self.place_workers.clear()
-
-        # Signal workers to abort if they support it
-        import src.services.llm.model_manager as mm
-        mm.abort_fast_event.set()
-
-        is_followup = self.is_history_mode
-        self._streaming_answer_widget = None  # reset for new query
-        
-        if not is_followup:
-            self.list_widget.clear()
-            self.chat_history = []
-        
-        self.frame.set_minimal_mode(False) # Active mode
+        self.action_worker = ActionWorker(query, use_stream=True)
+        self.action_worker.action_found.connect(self.on_action_found)
+        self.action_worker.searching.connect(self.on_action_searching)
+        self.action_worker.start()
         self.logo_label.boost_speed()
-        self.follow_up_widget.set_mode("hidden")
 
-        # Initialize streaming TTS state
-        self.tts_buffer = ""
-        self.tts_spoken_len = 0
-        
-        if is_followup:
-            # Upgrade any leftover simple answer widgets to chat bubbles (first follow-up transition)
-            self._upgrade_to_chat_bubbles()
-
-            # Hide name labels on follow-up turns — the first turn establishes who's who,
-            # and the left/right alignment makes it clear after that.
-            answer_widget = AnswerWidget("", query_text=query, chat_mode=True,
-                                         show_user_name=False, show_ai_name=False)
-            answer_widget.set_query_visible(True)
-            self._streaming_answer_widget = answer_widget
-            # instant = bubbles visible immediately, no fade delay
-            self.insert_list_item(0, answer_widget, "answer", animation="instant")
-
-            # Clear input so user sees their question only in the bubble (not duplicated in the field)
-            self.input_field.blockSignals(True)
-            self.input_field.clear()
-            self.input_field.blockSignals(False)
-
-            if self.list_widget.count() > 0:
-                self.list_widget.scrollToItem(self.list_widget.item(0))
-            self.list_widget.update()
-            # After Qt has processed events and run the layout pass, re-measure so sizes are correct
-            QTimer.singleShot(0, answer_widget.update_item_size)
-        else:
-            # Normal mode: show animated spinner while waiting
-            self.thinking_widget = ThinkingWidget("")
-            self.add_list_item(self.thinking_widget, "thinking")
-
-        self.adjust_window_height()
-
-        # Screenshot?
-        screenshot_b64 = None
-        # Logic to decide if we need screenshot is now in AIWorker or Brain
-        # But if we want to send it, we need to take it here.
-        # Let's take it if query implies it, OR always?
-        # Taking screenshot is expensive?
-        # Let's try taking it if "screen" keyword or similar is in query
-        if any(x in query.lower() for x in ["screen", "look", "see", "window", "display"]):
-            self.screenshot_worker = ScreenshotWorker()
-            self.screenshot_worker.finished.connect(lambda b64: self.start_ai_worker(query, b64))
-            self.screenshot_worker.failed.connect(lambda: self.start_ai_worker(query, None))
-            
-            # Add a timeout timer to handle stuck screenshot operations (5 seconds max)
-            self.screenshot_timeout_timer = QTimer()
-            self.screenshot_timeout_timer.setSingleShot(True)
-            self.screenshot_timeout_timer.setInterval(5000)  # 5 seconds
-            self.screenshot_timeout_timer.timeout.connect(lambda: self._handle_screenshot_timeout())
-            self.screenshot_timeout_timer.start()
-            
-            self.screenshot_worker.start()
-            logging.info("Screenshot worker started with 5-second timeout")
-        else:
-            self.start_ai_worker(query, None)
+    def perform_ai_query(self, query):
+        """Legacy method — redirects to fast action system (unified flow)."""
+        self.voice_triggered_query = False
+        self._trigger_immediate_fast_action(query)
 
     def perform_silent_ai_query(self, system_query):
         """Send a query to AI and show only the AI response — no user bubble created."""

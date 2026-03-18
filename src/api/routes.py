@@ -11,7 +11,7 @@ from flask import Blueprint, request, jsonify, Response
 from src.core.config import COMMON_SHORTCUTS
 from src.services.llm import model_manager
 from src.services.llm.chat import process_chat_request, perform_calculation, should_see_screen
-from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result
+from src.services.search.web_search import get_navigation_result, get_person_result, get_place_result, search_api
 from src.services.memory.memvid_store import remember_fact, remember_update, delete_memory
 from src.services.system.app_launcher import find_and_launch_app, resolve_app_metadata, get_app_cache
 from src.services.system.installer import generate_install_plan, log_debug, get_package_metadata
@@ -151,6 +151,88 @@ def _build_person_desc_from_snippets(name: str, search_results: list) -> Optiona
     return desc if len(desc) > 15 else None
 
 
+def _heuristic_classify_search_results(query: str, results: list) -> Optional[dict]:
+    """Fast heuristic to classify search results without a second LLM call.
+
+    Returns a typed action dict if confident, or None to fall through to Phase 2 LLM.
+    Handles ~60-70% of search queries (the obvious ones).
+    """
+    if not results:
+        return None
+
+    q_lower = query.lower().strip()
+    q_words = q_lower.split()
+
+    # Combine text from top results for keyword scanning
+    combined = ' '.join(
+        (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
+        for r in results[:3]
+    ).lower()
+
+    # --- Place detection ---
+    if len(q_words) <= 3:
+        place_signals = ['capital', 'stolica', 'miasto', 'city', 'town', 'country',
+                         'province', 'województw', 'located in', 'population',
+                         'gmina', 'powiat', 'region', 'district', 'county',
+                         'municipality', 'village', 'commune', 'landmark',
+                         'monument', 'continent', 'island', 'river']
+        place_score = sum(1 for kw in place_signals if kw in combined)
+        if place_score >= 2:
+            logging.info(f"[HEURISTIC] Place detected (score={place_score}) for '{query}'")
+            return {"type": "place_pending", "name": query.strip()}
+
+    # --- Person detection via Knowledge Graph ---
+    kg_result = next((r for r in results if r.get('is_knowledge_graph')), None)
+    if kg_result:
+        attrs = kg_result.get('attributes', {})
+        person_attrs = {'born', 'died', 'spouse', 'children', 'education', 'height',
+                        'nationality', 'occupation', 'parents', 'awards', 'alma mater',
+                        'years active', 'known for', 'net worth'}
+        attr_keys_lower = {k.lower() for k in attrs.keys()}
+        person_attr_matches = person_attrs & attr_keys_lower
+        if len(person_attr_matches) >= 1:
+            name = kg_result.get('title', query).strip()
+            desc = (kg_result.get('content') or '').strip()
+            if attrs:
+                attr_str = " ".join([f"{k}: {v}." for k, v in list(attrs.items())[:4]])
+                if attr_str:
+                    desc = (desc + " " + attr_str).strip()
+            if desc:
+                logging.info(f"[HEURISTIC] Person detected via KG attrs ({person_attr_matches}) for '{query}'")
+                return {"type": "person", "name": name, "description": desc[:400],
+                        "url": kg_result.get('url', ''), "image": kg_result.get('img_src')}
+
+    # --- Person detection via URL patterns ---
+    person_url_patterns = ['linkedin.com/in/', 'wikipedia.org/wiki/', 'imdb.com/name/']
+    bio_keywords = ['biography', 'born ', 'is a ', 'was a ', 'actor', 'actress', 'singer',
+                    'politician', 'director', 'ceo', 'founder', 'president', 'professor']
+    person_url_hits = sum(1 for r in results[:3] if any(p in (r.get('url', '').lower()) for p in person_url_patterns))
+    bio_keyword_hits = sum(1 for kw in bio_keywords if kw in combined)
+    if person_url_hits >= 2 or (person_url_hits >= 1 and bio_keyword_hits >= 2):
+        # Strong person signal — but we still need the LLM for name/description synthesis
+        # Return None to let Phase 2 handle it with better formatting
+        pass
+
+    # --- Link detection: exact domain match (high confidence official site) ---
+    from urllib.parse import urlparse
+    for r in results[:2]:
+        url = r.get('url', '')
+        title = r.get('title', '')
+        try:
+            parsed = urlparse(url)
+            netloc = parsed.netloc.replace("www.", "")
+            domain_parts = netloc.split('.')
+            domain_root = domain_parts[-2] if len(domain_parts) >= 2 else domain_parts[0]
+            if domain_root.lower() == q_lower and len(q_lower) >= 2:
+                desc = (r.get('content') or r.get('snippet', '')).strip()
+                logging.info(f"[HEURISTIC] Exact domain match: {domain_root} == {q_lower}")
+                return {"type": "link", "url": url, "title": title, "description": desc}
+        except Exception:
+            pass
+
+    return None
+
+
 def _parse_fast_action_output(
     *,
     result_text: str,
@@ -172,21 +254,28 @@ def _parse_fast_action_output(
         logging.info(f"Empty model output, defaulting to SEARCH for '{query}'")
         result_text = f"SEARCH:{query}"
 
-    # NONE: fast model recognized a direct conversational AI query — return no actions
+    # NONE: legacy command — convert to a simple answer
     if re.search(r'\bNONE\b', result_text):
-        logging.info(f"[ACTION] Fast model returned NONE for conversational query: '{query}'")
-        return [], []
+        logging.info(f"[ACTION] Fast model returned NONE for query: '{query}', converting to ANSWER")
+        result_text = f"ANSWER:I'm Omni, your AI assistant. How can I help you?"
 
     # Also check if output contains only special tokens or is just newlines/spaces
     has_command = any(cmd in result_text for cmd in [
         "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
         "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
         "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
-        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:", "NONE"
+        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:",
+        "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:"
     ])
     if not has_command:
-        logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
-        result_text = f"SEARCH:{query}"
+        # No recognized command — treat the raw text as an answer rather than searching
+        clean_text = result_text.strip()
+        if clean_text and len(clean_text) > 5:
+            logging.info(f"No recognized commands in output, treating as ANSWER for '{query}'")
+            result_text = f"ANSWER:{clean_text}"
+        else:
+            logging.info(f"No recognized commands in output '{result_text[:100]}', defaulting to SEARCH for '{query}'")
+            result_text = f"SEARCH:{query}"
 
     logging.info(f"[TIMING] Starting action parsing at: {time.time() - endpoint_start_time:.3f}s")
     actions = []
@@ -304,7 +393,61 @@ def _parse_fast_action_output(
             except Exception:
                 pass
 
-        if "FA:" in line:
+        if line.strip() == "CALENDAR":
+            try:
+                # Check prefetch cache first (populated on window toggle)
+                cached = model_manager.prefetch_get("calendar_events")
+                if cached is not None:
+                    logging.info("[ACTION] Using prefetched calendar events")
+                    cal_result = cached
+                else:
+                    from src.services.llm.tools import execute_tool
+                    cal_result = execute_tool("get_calendar_events", {"days": 3})
+                actions.append({"type": "calendar", "events_text": cal_result})
+            except Exception as e:
+                logging.error(f"Failed to execute CALENDAR tool: {e}")
+                actions.append({"type": "calendar", "events_text": f"Error fetching calendar: {e}"})
+
+        elif line.strip() == "EMAILS":
+            try:
+                # Check prefetch cache first (populated on window toggle)
+                cached = model_manager.prefetch_get("unread_emails")
+                if cached is not None:
+                    logging.info("[ACTION] Using prefetched unread emails")
+                    email_result = cached
+                else:
+                    from src.services.llm.tools import execute_tool
+                    email_result = execute_tool("get_unread_emails", {"limit": 5})
+                actions.append({"type": "emails", "emails_text": email_result})
+            except Exception as e:
+                logging.error(f"Failed to execute EMAILS tool: {e}")
+                actions.append({"type": "emails", "emails_text": f"Error fetching emails: {e}"})
+
+        elif line.startswith("ANSWER:"):
+            # Capture everything after ANSWER: including subsequent non-command lines
+            answer_start_idx = result_text.find("ANSWER:")
+            if answer_start_idx >= 0:
+                full_answer = result_text[answer_start_idx + 7:].strip()
+                # Stop at the next command if there is one
+                for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "INSTALL:", "TRANSLATE:", "CURRENCY:"]:
+                    cmd_idx = full_answer.find(cmd)
+                    if cmd_idx > 0:
+                        full_answer = full_answer[:cmd_idx].strip()
+                        break
+                if full_answer:
+                    actions.append({"type": "answer", "text": full_answer})
+            else:
+                text = line[7:].strip()
+                if text:
+                    actions.append({"type": "answer", "text": text})
+            break  # ANSWER consumes the rest, stop parsing
+
+        elif line.startswith("ORGANIZE:"):
+            path = line[9:].strip()
+            if path:
+                actions.append({"type": "organize_pending", "path": path, "title": f"Organize {path}"})
+
+        elif "FA:" in line:
             fact = line.split("FA:")[1].strip()
             if fact and "[Unknown]" not in fact:
                 logging.info(f"Extracted Fact: {fact}")
@@ -1050,6 +1193,27 @@ def search_endpoint():
         except Exception as e:
             logging.error(f"Search error: {e}")
 
+    # Image semantic search via CLIP — outside search_lock to avoid deadlock
+    # (ensure_vision_model also acquires search_lock internally)
+    try:
+        if model_manager.db_conn and "images" in model_manager.db_conn.list_tables():
+            model_manager.ensure_vision_model()
+            if model_manager.vision_model is not None:
+                clip_vec = model_manager.vision_model.encode(query)
+                img_tbl = model_manager.db_conn.open_table("images")
+                img_res = img_tbl.search(clip_vec).limit(3).to_arrow()
+                for i in range(img_res.num_rows):
+                    dist = img_res.column('_distance')[i].as_py() if '_distance' in img_res.schema.names else 1.0
+                    if dist < 0.5:
+                        results.append({
+                            "name": img_res.column('filename')[i].as_py(),
+                            "path": img_res.column('path')[i].as_py(),
+                            "score": float(dist),
+                            "type": "file",
+                        })
+    except Exception as e:
+        logging.error(f"Image search error: {e}")
+
     return jsonify({"results": results})
 
 @api_bp.route('/person_image', methods=['POST'])
@@ -1594,10 +1758,22 @@ def action_endpoint():
         return jsonify({"actions": [], "chips": []}), 400
 
     query = req.get('query', "").strip()
-    if not query:
-        return jsonify({"actions": [], "chips": []})
+    stream = req.get('stream', False) or request.args.get('stream', '0') == '1'
 
-    logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id})")
+    def _action_resp(actions, chips=None, force_sse=False, **extra):
+        """Return action response. Always JSON unless force_sse=True (search path)."""
+        data = {"actions": actions, "action": actions[0] if actions else None, "chips": chips or []}
+        data.update(extra)
+        if stream and force_sse:
+            def _sse():
+                yield f'data: {json.dumps({"event": "done", **data})}\n\n'
+            return Response(_sse(), mimetype="text/event-stream")
+        return jsonify(data)
+
+    if not query:
+        return _action_resp([])
+
+    logging.info(f"Action endpoint received query: '{query}' (request_id: {request_id}, stream={stream})")
     endpoint_start_time = time.time()
 
     # 1. Common shortcuts
@@ -1610,7 +1786,7 @@ def action_endpoint():
             "description": "Direct Shortcut"
         }
         logging.info(f"Shortcut match: {url}")
-        return jsonify({"action": act, "actions": [act], "chips": []})
+        return _action_resp([act])
 
     # 1.5 System Settings (instant - no LLM needed)
     try:
@@ -1618,7 +1794,7 @@ def action_endpoint():
         settings_act = detect_settings_command(query)
         if settings_act:
             logging.info(f"[settings] Fast-path action detected: {settings_act['setting']}")
-            return jsonify({"actions": [settings_act], "action": settings_act, "chips": []})
+            return _action_resp([settings_act])
     except Exception as _e:
         logging.warning(f"[settings] detect_settings_command failed: {_e}")
 
@@ -1626,7 +1802,7 @@ def action_endpoint():
     cc_keywords = ["click", "type", "scroll", "press", "copy", "paste", "move mouse", "drag", "select"]
     if any(k in query.lower() for k in cc_keywords):
         logging.info("Computer Control keyword detected. Skipping Fast Model.")
-        return jsonify({"actions": [], "chips": []})
+        return _action_resp([])
 
     # 1.6b File Conversion Hard Override
     convert_keywords = ["convert", "konwertuj", "przekonwertuj", "zamien format", "zmien format",
@@ -1643,12 +1819,12 @@ def action_endpoint():
                            "na mov", "na csv", "na xlsx", "na txt", "na bmp", "na webp", "na tiff"]
         if re.search(file_ext_pattern, ql) or any(k in ql for k in format_keywords):
             logging.info("File conversion keyword detected. Skipping Fast Model, routing to Main Model tool calling.")
-            return jsonify({"actions": [], "chips": []})
+            return _action_resp([])
 
     # 1.7 Regex Shortcuts (Speed Optimization)
     fast_acts = check_fast_regex_actions(query)
     if fast_acts:
-        return jsonify({"actions": fast_acts, "action": fast_acts[0], "chips": []})
+        return _action_resp(fast_acts)
 
     # 1.76 Translate Fast Path - short phrase with non-ASCII letters (clearly foreign)
     def _looks_foreign(text):
@@ -1690,13 +1866,13 @@ def action_endpoint():
                         if "TRANSLATE:" in _tr_text:
                             _parts = _tr_text.split("TRANSLATE:")[1].strip().split("|")
                             if len(_parts) >= 4:
-                                return jsonify({"actions": [{
+                                return _action_resp([{
                                     "type": "translate",
                                     "source_text": _parts[0].strip(),
                                     "from_lang": _parts[1].strip(),
                                     "to_lang": _parts[2].strip(),
                                     "translated_text": "|".join(_parts[3:]).strip(),
-                                }], "chips": []})
+                                }])
             except Exception as _te:
                 logging.warning(f"Translate fast path: {_te}")
 
@@ -1704,7 +1880,7 @@ def action_endpoint():
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
     if not _is_connected():
         logging.info("No internet connection, skipping fast model inference")
-        return jsonify({"actions": [], "chips": []})
+        return _action_resp([])
 
     search_context = ""
     search_results = []
@@ -1741,14 +1917,17 @@ Never output trailing '|' without text after it.
 - PASSWORD:length
 - QRCODE:data
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"...","value":...}
-- NONE (query is a direct conversational question to you as the AI — e.g. "who are you", "what are you", "are you an AI", "how are you", "what can you do", "do you have feelings", "are you sentient", "introduce yourself", "what's your name")
+- CALENDAR (show upcoming calendar events — use for queries like "my calendar", "upcoming events", "what meetings do I have")
+- EMAILS (show unread emails — use for queries like "my emails", "unread emails", "check inbox")
+- ORGANIZE:path (organize the specified folder — use for queries like "organize my desktop", "clean up downloads")
+- ANSWER:text (direct answer from your knowledge — use for ANY question you can answer without web search, including factual questions like "what is photosynthesis", conversational questions like "who are you", "what can you do", "how are you", jokes, opinions, explanations, etc. Keep the answer concise but helpful, 1-3 sentences.)
 """
 
     system_prompt = base_system_prompt.replace(
         "{tool_instruction}",
         "Think first: only call `web_search` if you truly need external, real-world info (unknown person/place/fact/event).\n"
         "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
-        "If the query is a direct conversational question to you as an AI (identity, feelings, capabilities, self-introduction), output NONE — do NOT search."
+        "If you can answer the query from your own knowledge, use ANSWER:text instead of searching."
     )
 
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -1810,10 +1989,11 @@ Never output trailing '|' without text after it.
             step_name="Action intent", reset_model=True, tools=[web_search_tool]
         )
         if out is None:
-            return jsonify({"actions": [], "chips": []})
+            return _action_resp([])
 
-        # Handle Tool Calls
+        # Handle Tool Calls — resolve inline instead of returning pending
         if out['choices'][0]['message'].get('tool_calls'):
+            llm1_ms = (time.time() - start_t) * 1000
             logging.info(f"[TIMING] Phase 1 decided to use tools at: {time.time() - endpoint_start_time:.3f}s")
             tool_calls = out['choices'][0]['message']['tool_calls']
             q_tool = query
@@ -1825,14 +2005,221 @@ Never output trailing '|' without text after it.
                         break
             except Exception:
                 q_tool = query
-            _pending_actions_put(request_id, {"query": query, "tool_query": q_tool})
-            pending_act = {"type": "action_pending", "pending_id": request_id,
-                           "title": "Searching the web", "subtitle": q_tool}
-            return jsonify({"actions": [pending_act], "action": pending_act, "chips": []})
+
+            # Check if request is still active before expensive Serper call
+            if model_manager.current_fast_request_id != request_id:
+                return _action_resp([])
+
+            # For SSE mode, wrap the rest of inline resolution in a generator
+            if stream:
+                def _stream_inline_resolution():
+                    # Yield "searching" event immediately so UI shows skeleton
+                    yield f'data: {json.dumps({"event": "searching", "query": q_tool})}\n\n'
+
+                    # Execute Serper
+                    _serper_t0 = time.time()
+                    _tool_results = search_api(q_tool, categories='general', fast=True)
+                    if not _tool_results and q_tool != query:
+                        _tool_results = search_api(query, categories='general', fast=True)
+                    if not _tool_results:
+                        _words = query.strip().split()
+                        if len(_words) >= 2:
+                            for _w in _words:
+                                if len(_w) >= 3:
+                                    _tool_results = search_api(_w, categories='general', fast=True)
+                                    if _tool_results:
+                                        break
+                    _serper_ms = (time.time() - _serper_t0) * 1000
+
+                    if model_manager.current_fast_request_id != request_id:
+                        yield f'data: {json.dumps({"event": "done", "actions": [], "chips": []})}\n\n'
+                        return
+
+                    _search_results_local = list(_tool_results) if _tool_results else []
+
+                    _tool_content = "No results found."
+                    if _tool_results:
+                        _tool_content = ""
+                        for _i, _res in enumerate(_tool_results[:3], 1):
+                            _tool_content += f"Result {_i}: {_res.get('title')} - {_res.get('content') or _res.get('snippet')}\n"
+                    _search_context_local = f"Tool Search Results for '{q_tool}':\n{_tool_content}".strip()
+
+                    # Try heuristic first
+                    _heuristic = _heuristic_classify_search_results(query, _tool_results)
+                    if _heuristic:
+                        yield f'data: {json.dumps({"event": "done", "actions": [_heuristic], "action": _heuristic, "chips": []})}\n\n'
+                        return
+
+                    # Phase 2 LLM
+                    _phase2_system = (
+                        "You are an intelligent action classifier. You ONLY output commands.\n"
+                        "Use the web search results below to decide the best action(s).\n"
+                        "Do NOT call any tools.\nNEVER return empty output.\n"
+                        "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
+                        "Every output line must start with a valid prefix.\n"
+                        "Never output PERSON without a description after the '|' separator.\n"
+                        "If the result is a physical location, ALWAYS output a PLACE: command.\n"
+                        "If it is a person, output PERSON:FullName|Description — description is MANDATORY.\n\n"
+                        "Commands: PLACE:Name, PERSON:Name|Desc, OPEN:url, SEARCH:query, INSTALL/UNINSTALL:name\n"
+                        "Do not explain."
+                    )
+                    _p2_out = _safe_fast_completion(
+                        messages=[{"role": "system", "content": _phase2_system},
+                                  {"role": "user", "content": f"Query: {query}\n\n{_search_context_local}"}],
+                        max_tokens=350, temperature=0.0, step_name="Action intent (stream phase2)"
+                    )
+                    if _p2_out is None:
+                        _rt = f"SEARCH:{query}"
+                    else:
+                        _rt = _p2_out['choices'][0]['message']['content'].strip()
+                        _ct = re.sub(r'<think>.*?(?:</think>|$)', '', _rt, flags=re.DOTALL).strip()
+                        if not _ct and _rt:
+                            if any(cmd in _rt for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:"]):
+                                _ct = _rt.replace("<think>", "").replace("</think>", "")
+                        _rt = _ct
+
+                    _actions, _chips = _parse_fast_action_output(
+                        result_text=_rt, query=query, request_id=request_id,
+                        endpoint_start_time=endpoint_start_time, search_context=_search_context_local,
+                        search_results=_search_results_local, safe_fast_completion=_safe_fast_completion,
+                    )
+                    yield f'data: {json.dumps({"event": "done", "actions": _actions, "action": _actions[0] if _actions else None, "chips": _chips})}\n\n'
+
+                return Response(_stream_inline_resolution(), mimetype="text/event-stream")
+
+            # Execute Serper inline (previously done in /action_pending)
+            from src.services.search.web_search import search_api
+            serper_t0 = time.time()
+            tool_results = search_api(q_tool, categories='general', fast=True)
+            logging.warning(f"[ACTION/INLINE] search_api({q_tool!r}, fast=True) → {len(tool_results)} results")
+
+            # Retry with original query if tool query differs and got no results
+            if not tool_results and q_tool != query:
+                logging.info(f"[ACTION/INLINE] Retrying search with original query: {query!r}")
+                tool_results = search_api(query, categories='general', fast=True)
+
+            # If still no results, try individual words
+            if not tool_results:
+                words = query.strip().split()
+                if len(words) >= 2:
+                    for word in words:
+                        if len(word) >= 3:
+                            tool_results = search_api(word, categories='general', fast=True)
+                            if tool_results:
+                                break
+
+            serper_ms = (time.time() - serper_t0) * 1000
+
+            # Check again after Serper (user may have typed something new)
+            if model_manager.current_fast_request_id != request_id:
+                return _action_resp([])
+
+            # Validate result relevance
+            if tool_results and q_tool:
+                _q_lower = q_tool.lower().strip()
+                _any_relevant = any(
+                    _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
+                    for r in tool_results[:3]
+                )
+                if not _any_relevant and len(_q_lower) >= 3:
+                    logging.warning(f"[ACTION/INLINE] Results don't mention '{q_tool}' — retrying non-fast...")
+                    retry_results = search_api(q_tool, categories='general', fast=False)
+                    if retry_results:
+                        _any_relevant2 = any(
+                            _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
+                            for r in retry_results[:3]
+                        )
+                        if _any_relevant2:
+                            tool_results = retry_results
+
+            if tool_results:
+                search_results.extend(tool_results)
+
+            tool_content = "No results found."
+            if tool_results:
+                tool_content = ""
+                for i, res in enumerate(tool_results[:3], 1):
+                    tool_content += f"Result {i}: {res.get('title')} - {res.get('content') or res.get('snippet')}\n"
+
+            search_context = f"Tool Search Results for '{q_tool}':\n{tool_content}".strip()
+
+            # Fast heuristic classification (skip Phase 2 LLM when possible)
+            heuristic_t0 = time.time()
+            heuristic_result = _heuristic_classify_search_results(query, tool_results)
+            heuristic_hit = heuristic_result is not None
+            if heuristic_result:
+                total_ms = (time.time() - endpoint_start_time) * 1000
+                logging.info(f"[TIMING] LLM1={llm1_ms:.0f}ms Serper={serper_ms:.0f}ms heuristic_hit=True LLM2=0ms total={total_ms:.0f}ms")
+                return _action_resp([heuristic_result])
+
+            # Fallback: Phase 2 LLM classification (only when heuristic is uncertain)
+            llm2_t0 = time.time()
+            phase2_system = (
+                "You are an intelligent action classifier. You ONLY output commands.\n"
+                "Use the web search results below to decide the best action(s).\n"
+                "Do NOT call any tools.\n"
+                "NEVER return empty output.\n"
+                "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
+                "Every output line must start with a valid prefix.\n"
+                "Never output PERSON without a description after the '|' separator.\n"
+                "Never output trailing '|' without text after it.\n"
+                "If the result is a physical location (school, restaurant, monument, city), ALWAYS output a PLACE: command.\n"
+                "If it also has an official website, output OPEN: as well.\n"
+                "If it is a person, output PERSON:FullName|Description — the description is MANDATORY.\n\n"
+                "Output one or more commands, one per line:\n"
+                "- PLACE:Name (for ANY physical location/institution)\n"
+                "- PERSON:Name|Description (Name MUST be the full person name, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description MUST be 1-2 sentences synthesized from the search results: role + organization/school/company/location. NEVER omit the description — if you truly cannot write one, use SEARCH:query instead.)\n"
+                "- OPEN:url (for websites)\n"
+                "- INSTALL/UNINSTALL:name\n"
+                "- SEARCH:query\n"
+                "- CALC/TRANSLATE/CURRENCY/WEATHER/UNIT/COLOR/TIMER/PASSWORD/QRCODE\n"
+                "- SYSTEM_SETTINGS:{...}\n\n"
+                "Examples:\n"
+                "Search result: 'ZSTiB Brzesko school website zstib.edu.pl'\n"
+                "PLACE:ZSTiB Brzesko\n"
+                "OPEN:https://zstib.edu.pl\n\n"
+                "Search result: 'Mikołaj Piech – Omni'\n"
+                "PERSON:Mikołaj Piech|He is a Polish app developer associated with Omni and focused on AI-powered software.\n\n"
+                "Search result: 'Anna Kowalska – wicedyrektor. Szkoła Podstawowa nr 5, Kraków'\n"
+                "PERSON:Anna Kowalska|She is a vice-principal at Szkoła Podstawowa nr 5 in Kraków, Poland.\n\n"
+                "Do not explain."
+            )
+            phase2_user = f"Query: {query}\n\n{search_context}"
+            phase2_out = _safe_fast_completion(
+                messages=[{"role": "system", "content": phase2_system}, {"role": "user", "content": phase2_user}],
+                max_tokens=350,
+                temperature=0.0,
+                step_name="Action intent (inline phase2)"
+            )
+            llm2_ms = (time.time() - llm2_t0) * 1000
+
+            if phase2_out is None:
+                # LLM2 failed/aborted — parse as SEARCH fallback
+                result_text = f"SEARCH:{query}"
+            else:
+                result_text = phase2_out['choices'][0]['message']['content'].strip()
+                cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
+                if not cleaned_text and result_text:
+                    if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+                        cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
+                result_text = cleaned_text
+
+            actions, chips = _parse_fast_action_output(
+                result_text=result_text,
+                query=query,
+                request_id=request_id,
+                endpoint_start_time=endpoint_start_time,
+                search_context=search_context,
+                search_results=search_results,
+                safe_fast_completion=_safe_fast_completion,
+            )
+            total_ms = (time.time() - endpoint_start_time) * 1000
+            logging.info(f"[TIMING] LLM1={llm1_ms:.0f}ms Serper={serper_ms:.0f}ms heuristic_hit={heuristic_hit} LLM2={llm2_ms:.0f}ms total={total_ms:.0f}ms")
+            return _action_resp(actions, chips)
 
         if model_manager.current_fast_request_id != request_id:
             logging.info(f"Request {request_id} was cancelled during inference")
-            return jsonify({"actions": [], "chips": []})
+            return _action_resp([])
 
         end_t = time.time()
         dur = end_t - start_t
@@ -1856,11 +2243,11 @@ Never output trailing '|' without text after it.
             search_results=search_results, safe_fast_completion=_safe_fast_completion,
         )
         logging.info(f"[TIMING] Total action_endpoint time: {time.time() - endpoint_start_time:.3f}s")
-        return jsonify({"actions": actions, "action": actions[0] if actions else None, "chips": chips})
+        return _action_resp(actions, chips)
 
     except Exception as e:
         logging.error(f"Error in action_endpoint: {e}")
-        return jsonify({"actions": [], "chips": [], "error": str(e)})
+        return _action_resp([], error=str(e))
 
 
 @api_bp.route('/action_pending', methods=['POST'])

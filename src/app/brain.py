@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.core.config import BRAIN_HOST, BRAIN_PORT
 from src.core.logger import setup_logging
 from src.api.routes import api_bp
-from src.services.llm.model_manager import ensure_model_loaded, ensure_resources
+from src.services.llm.model_manager import ensure_model_loaded, ensure_resources, ensure_fast_model
 
 def create_app():
     setup_logging("brain")
@@ -26,6 +26,19 @@ def create_app():
 def load_models_background():
     """Load models in background with error handling."""
     try:
+        ensure_fast_model()  # Fast model first — most queries need it immediately
+        # Warm up the fast model with a tiny request so first real query is fast
+        try:
+            from src.services.llm.model_manager import fast_model
+            if fast_model:
+                fast_model.client.chat.completions.create(
+                    model=fast_model.model if hasattr(fast_model, 'model') else "openai/gpt-oss-20b",
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=1,
+                )
+                logging.info("Fast model warmed up successfully")
+        except Exception as e:
+            logging.warning(f"Fast model warmup failed (non-critical): {e}")
         ensure_model_loaded()
         ensure_resources()
         logging.info("Model loading completed successfully")

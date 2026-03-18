@@ -126,7 +126,7 @@ BLOCKED_EXTENSIONS = {
     ".dill", ".snapshot", ".symbols", ".xcframework", ".framework", ".dSYM",
     ".xcworkspacedata", ".xcscheme", ".xcsettings", ".xcconfig", ".plist",
     ".storyboard", ".xib", ".entitlements", ".mobileprovision",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".heic",
+    ".tiff", ".heic",
 
     # [UNITY & SHADERS] 
     ".asset", ".dwlt", ".index", ".shader", ".shadergraph", ".cginc", ".hlsl",
@@ -299,7 +299,7 @@ os.makedirs(os.path.dirname(PERSONAL_MEM_PATH), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 # App version (used for update checks)
-APP_VERSION = "0.6.6"
+APP_VERSION = "0.6.7"
 
 # Backend (Cloudflare Worker) — all AI/search calls are proxied through here
 BACKEND_URL = os.environ.get("OMNI_BACKEND_URL", "https://omni-backend.heyomni.workers.dev")

@@ -1,126 +1,146 @@
 import logging
-import time
-from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_model, fast_lock, db_conn, vision_model
+import re
+import unicodedata
+from src.services.llm.model_manager import ensure_fast_model, fast_model, fast_lock, db_conn
 from src.services.memory.memvid_store import get_user_memory
 import src.services.llm.model_manager as model_manager
+
+# Maximum CLIP cosine distance to count as a semantic match
+CLIP_DISTANCE_THRESHOLD = 0.6
+
 
 def should_search_images(query):
     """Uses Fast Model to decide if we need to search images."""
     query_lower = query.lower()
-    # High priority patterns
     img_patterns = [
         "photo", "image", "picture", "screenshot", "camera", "look like",
         "find photo", "search image", "draw", "generate",
         "wallpaper", "background"
     ]
-    # "show me" is only for images if not followed by "video", "trailer", etc.
     if "show me" in query_lower and not any(x in query_lower for x in ["video", "trailer", "movie", "youtube", "how to", "make", "recipe", "why", "who is", "where is"]):
-         return True
-         
+        return True
     if any(pattern in query_lower for pattern in img_patterns):
-         return True
+        return True
     return False
 
-def ensure_vision_model():
-    model_manager.ensure_vision_model()
+
+def _images_table():
+    """Return the 'images' LanceDB table, or None if it doesn't exist."""
+    try:
+        if not model_manager.db_conn:
+            return None
+        # table_names() returns a plain list of strings
+        if "images" not in model_manager.db_conn.table_names():
+            return None
+        return model_manager.db_conn.open_table("images")
+    except Exception as e:
+        logging.error(f"Could not open images table: {e}")
+        return None
+
+
+def _rows_from_arrow(arrow_table):
+    """Yield dicts with filename, path, _distance from an Arrow result."""
+    names = arrow_table.schema.names
+    for i in range(arrow_table.num_rows):
+        row = {col: arrow_table.column(col)[i].as_py() for col in names}
+        yield row
+
 
 def perform_image_search(query):
-    """Searches LanceDB 'images' table using CLIP text embedding."""
-    ensure_main_model()
-    ensure_vision_model()
-    
-    if model_manager.vision_model is None: return ""
-    if not db_conn: return ""
-    
-    try:
-        if "images" not in db_conn.table_names():
-            return ""
+    """CLIP semantic search. Returns list of result strings (empty = nothing found)."""
+    model_manager.ensure_vision_model()
+    if model_manager.vision_model is None:
+        return []
 
-        tbl = db_conn.open_table("images")
-        # Encode query with CLIP (text)
+    tbl = _images_table()
+    if tbl is None:
+        return []
+
+    try:
         vector = model_manager.vision_model.encode(query).tolist()
-        logging.info(f"Searching images for: '{query}' (vector len={len(vector)})")
-        
-        res = tbl.search(vector).limit(3).to_pandas()
-        if res.empty: 
-            logging.info(f"No image results for '{query}'")
-            return ""
-        
+        logging.info(f"[image-search] CLIP query: '{query}' (dim={len(vector)})")
+        res = tbl.search(vector).limit(5).to_arrow()
         results = []
-        for _, row in res.iterrows():
-            path = row['path']
-            filename = row['filename']
-            score = row['_distance']
-            logging.info(f"Found image match: {filename} (score={score:.4f})")
-            results.append(f"Found Image: {filename}\nPath: {path}")
-            
-        return "\n\n".join(results)
+        for row in _rows_from_arrow(res):
+            dist = row.get('_distance', 1.0)
+            logging.info(f"[image-search] CLIP candidate: {row['filename']} dist={dist:.4f}")
+            if dist < CLIP_DISTANCE_THRESHOLD:
+                results.append(f"Found Image: {row['filename']}\nPath: {row['path']}")
+        return results
     except Exception as e:
-        logging.error(f"Image search failed: {e}")
-        return ""
+        logging.error(f"[image-search] CLIP search failed: {e}")
+        return []
+
+
+def _filename_keyword_search(keywords):
+    """Exact filename substring search. Returns list of result strings."""
+    tbl = _images_table()
+    if tbl is None:
+        return []
+
+    results = []
+    seen = set()
+    for kw in keywords:
+        if len(kw) < 2:
+            continue
+        try:
+            matches = tbl.search().where(f"filename LIKE '%{kw}%'").limit(5).to_arrow()
+            for row in _rows_from_arrow(matches):
+                if row['path'] not in seen:
+                    seen.add(row['path'])
+                    results.append(f"Found Image (By Name): {row['filename']}\nPath: {row['path']}")
+                    logging.info(f"[image-search] filename match: {row['filename']} (kw='{kw}')")
+        except Exception as e:
+            logging.error(f"[image-search] filename search failed for '{kw}': {e}")
+    return results
+
+
+def _name_variants(name_part):
+    """Return ASCII/unicode variants of a name part for fuzzy filename matching."""
+    replacements = {'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+                    'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z'}
+    ascii_part = name_part
+    for k, v in replacements.items():
+        ascii_part = ascii_part.replace(k, v)
+    normalized = unicodedata.normalize('NFKD', ascii_part).encode('ASCII', 'ignore').decode('utf-8')
+    return {v for v in {name_part, ascii_part, normalized} if len(v) >= 3}
+
+
+STOP_WORDS = {
+    "photo", "image", "picture", "photos", "images", "pictures",
+    "my", "me", "a", "an", "the", "of", "from", "find", "show",
+    "search", "get", "look", "for", "please", "some", "any",
+}
+
 
 def perform_image_search_with_fallback(query):
-    """Searches images, optionally expanding query with user name."""
-    # 1. Standard Vector Search
-    res_vec = perform_image_search(query)
-    
-    # 2. Check for "My" -> name keyword search
-    res_kw = ""
-    query_lower = query.lower()
-    if "my" in query_lower or "me" in query_lower:
-        mem_str = get_user_memory()
-        # Extract name from string like "[2026-01-10] The user's name is Miki."
-        name = ""
-        import re
-        name_match = re.search(r"user's name is ([^.\n]+)", mem_str, re.IGNORECASE)
-        if name_match:
-            name = name_match.group(1).strip()
-        
-        if name:
-             # Extract first name "Mikołaj" -> "mikolaj"
-             # Simple normalization: lowercase
-             parts = name.lower().split()
-             for part in parts:
-                 if len(part) < 3: continue
-                 kw_results = []
-                 try:
-                     # Unicode Normalization for ASCII fallback (mikołaj -> mikolaj)
-                     # Manual map for Polish chars that NFKD doesn't handle well for 'ł'
-                     replacements = {
-                         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n', 
-                         'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z'
-                     }
-                     ascii_part = part
-                     for k, v in replacements.items():
-                         ascii_part = ascii_part.replace(k, v)
-                     
-                     import unicodedata
-                     normalized = unicodedata.normalize('NFKD', ascii_part).encode('ASCII', 'ignore').decode('utf-8')
-                     variants = {part, ascii_part, normalized}
-                     if normalized != part and len(normalized) >= 3:
-                         variants.add(normalized)
-                     
-                     for v in variants:
-                        logging.info(f"Performing Keyword Search for '{v}'...")
-                        try:
-                            # Re-open table here as 'tbl' is not in scope
-                            if "images" in model_manager.db_conn.table_names():
-                                img_tbl = model_manager.db_conn.open_table("images")
-                                matches = img_tbl.search().where(f"filename LIKE '%{v}%'").limit(5).to_pandas()
-                                
-                                for _, row in matches.iterrows():
-                                    # Avoid duplicates if multiple parts match same file
-                                    entry = f"Found Image (By Name): {row['filename']}\nPath: {row['path']}"
-                                    if entry not in res_kw:
-                                        kw_results.append(entry)
-                        except Exception as e:
-                             logging.error(f"Keyword search inner loop failed: {e}")
-                     
-                     if kw_results:
-                         res_kw += "\n\n".join(kw_results) + "\n\n"
-                 except Exception as e:
-                     logging.error(f"Keyword search failed: {e}")
+    """CLIP semantic search with filename fallback."""
+    # 1. Semantic search
+    semantic = perform_image_search(query)
 
-    # Combine: Keywords first (high priority), then Vector
-    final_res = (res_kw + "\n" + res_vec).strip()
-    return final_res
+    # 2. If semantic found nothing, fall back to filename keyword search
+    if not semantic:
+        query_lower = query.lower()
+        keywords = set()
+
+        # Always extract plain query keywords
+        for word in query.split():
+            w = word.lower().strip("\"'.,!?")
+            if w not in STOP_WORDS and len(w) > 1:
+                keywords.add(w)
+
+        # If "my"/"me", also try the user's name
+        if "my" in query_lower or "me" in query_lower:
+            mem_str = get_user_memory()
+            name_match = re.search(r"user's name is ([^.\n]+)", mem_str, re.IGNORECASE)
+            if name_match:
+                for part in name_match.group(1).strip().lower().split():
+                    keywords.update(_name_variants(part))
+
+        if keywords:
+            logging.info(f"[image-search] semantic found nothing — trying filename keywords: {keywords}")
+            filename_results = _filename_keyword_search(list(keywords))
+            if filename_results:
+                return "\n\n".join(filename_results)
+
+    return "\n\n".join(semantic)

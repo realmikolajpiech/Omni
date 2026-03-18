@@ -5357,3 +5357,252 @@ class OptimizeSystemWidget(QWidget):
             return self.layout().sizeHint()
         return super().sizeHint()
 
+
+# ---------------------------------------------------------------------------
+# CalendarActionWidget — shows upcoming calendar events
+# ---------------------------------------------------------------------------
+
+class CalendarActionWidget(QWidget):
+    def __init__(self, events_text, parent=None):
+        super().__init__(parent)
+        self.current_theme = "light"
+        self.events_text = events_text or "No upcoming events."
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(8)
+
+        # Header
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        self.action_label = QLabel("CALENDAR")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+
+        open_btn = QPushButton("Open Calendar")
+        open_btn.setObjectName("CalendarOpenBtn")
+        open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        open_btn.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        open_btn.clicked.connect(self._open_calendar)
+
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(open_btn)
+
+        # Events content
+        self.content_label = QLabel(self.events_text)
+        self.content_label.setFont(QFont("Manrope", 12))
+        self.content_label.setWordWrap(True)
+        self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.content_label)
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def _open_calendar(self):
+        import subprocess
+        subprocess.Popen(["open", "-a", "Calendar"])
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        bg = "rgba(0, 0, 0, 0.22)" if is_dark else "rgba(255, 255, 255, 0.25)"
+        border = "rgba(255, 255, 255, 0.10)" if is_dark else "rgba(255, 255, 255, 0.40)"
+        text_color = "#FFFFFF" if is_dark else "#050505"
+        accent = "#38BDF8" if is_dark else "#0EA5E9"
+        btn_bg = "rgba(56,189,248,0.15)" if is_dark else "rgba(14,165,233,0.12)"
+
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background-color: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.action_label.setStyleSheet(f"color: {accent}; letter-spacing: 1px;")
+        self.content_label.setStyleSheet(f"color: {text_color}; line-height: 1.5;")
+        btn = self.findChild(QPushButton, "CalendarOpenBtn")
+        if btn:
+            btn.setStyleSheet(
+                f"QPushButton#CalendarOpenBtn {{ background: {btn_bg}; color: {accent}; border: none; border-radius: 8px; padding: 4px 12px; }}"
+                f"QPushButton#CalendarOpenBtn:hover {{ background: {accent}; color: white; }}"
+            )
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+
+# ---------------------------------------------------------------------------
+# EmailActionWidget — shows unread emails
+# ---------------------------------------------------------------------------
+
+class EmailActionWidget(QWidget):
+    def __init__(self, emails_text, parent=None):
+        super().__init__(parent)
+        self.current_theme = "light"
+        self.emails_text = emails_text or "No unread emails."
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(8)
+
+        # Header
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        self.action_label = QLabel("EMAILS")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+
+        open_btn = QPushButton("Open Mail")
+        open_btn.setObjectName("EmailOpenBtn")
+        open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        open_btn.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+        open_btn.clicked.connect(self._open_mail)
+
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(open_btn)
+
+        # Email content
+        self.content_label = QLabel(self.emails_text)
+        self.content_label.setFont(QFont("Manrope", 12))
+        self.content_label.setWordWrap(True)
+        self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.content_label)
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def _open_mail(self):
+        import subprocess
+        subprocess.Popen(["open", "-a", "Mail"])
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        bg = "rgba(0, 0, 0, 0.22)" if is_dark else "rgba(255, 255, 255, 0.25)"
+        border = "rgba(255, 255, 255, 0.10)" if is_dark else "rgba(255, 255, 255, 0.40)"
+        text_color = "#FFFFFF" if is_dark else "#050505"
+        accent = "#A78BFA" if is_dark else "#7C3AED"
+        btn_bg = "rgba(167,139,250,0.15)" if is_dark else "rgba(124,58,237,0.12)"
+
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background-color: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.action_label.setStyleSheet(f"color: {accent}; letter-spacing: 1px;")
+        self.content_label.setStyleSheet(f"color: {text_color}; line-height: 1.5;")
+        btn = self.findChild(QPushButton, "EmailOpenBtn")
+        if btn:
+            btn.setStyleSheet(
+                f"QPushButton#EmailOpenBtn {{ background: {btn_bg}; color: {accent}; border: none; border-radius: 8px; padding: 4px 12px; }}"
+                f"QPushButton#EmailOpenBtn:hover {{ background: {accent}; color: white; }}"
+            )
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
+
+# ---------------------------------------------------------------------------
+# AnswerActionWidget — simple text card for ANSWER: responses
+# ---------------------------------------------------------------------------
+
+class AnswerActionWidget(QWidget):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.current_theme = "light"
+        self.answer_text = text or ""
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.card = QWidget()
+        self.card.setObjectName("ActionCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(12, 10, 12, 10)
+        card_layout.setSpacing(4)
+
+        # Top Row: Icon + Label (matches CalcActionWidget style)
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        self.icon_label = QLabel("\u2728")
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.action_label = QLabel("ANSWER")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+
+        top_layout.addWidget(self.icon_label)
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+
+        # Answer text
+        self.text_label = QLabel(self.answer_text)
+        self.text_label.setFont(QFont("Manrope", 13))
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        card_layout.addWidget(top_row)
+        card_layout.addWidget(self.text_label)
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        if is_dark:
+            bg = "rgba(255, 255, 255, 0.05)"
+            border = "rgba(255, 255, 255, 0.1)"
+            icon_color = "#FFFFFF"
+            action_color = "#AAAAAA"
+            text_color = "#FFFFFF"
+        else:
+            bg = "rgba(255, 255, 255, 0.25)"
+            border = "rgba(0, 0, 0, 0.1)"
+            icon_color = "#111111"
+            action_color = "#666666"
+            text_color = "#050505"
+
+        self.card.setStyleSheet(f"QWidget#ActionCard {{ background: {bg}; border-radius: 16px; border: 1px solid {border}; }}")
+        self.icon_label.setStyleSheet(f"background-color: transparent; color: {icon_color}; font-size: 14px; border: none;")
+        self.action_label.setStyleSheet(f"color: {action_color}; letter-spacing: 0.5px;")
+        self.text_label.setStyleSheet(f"color: {text_color}; line-height: 1.4;")
+
+    def sizeHint(self):
+        w = 660
+        if self.layout():
+            h = self.layout().heightForWidth(w)
+            if h > 0: return QSize(w, h + 35)
+            return self.layout().sizeHint()
+        return super().sizeHint()
+
