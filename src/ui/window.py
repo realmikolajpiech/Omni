@@ -1726,19 +1726,8 @@ class OmniWindow(QWidget):
                             self.animate_close()
                             return True
 
-                if not self.is_history_mode:
-                    query = self.input_field.text().strip()
-                    if query:
-                        self._activate_first_or_search(query)
-                    else:
-                        self.enter_history_mode()
-                    return True
-                else:
-                    # In history mode, TAB also submits the follow-up as a fast action
-                    query = self.input_field.text().strip()
-                    if query:
-                        self._activate_first_or_search(query)
-                        return True
+                # Tab no longer triggers search/ask — only Enter does
+                return True
         return super().eventFilter(obj, event)
 
     def enter_history_mode(self):
@@ -2410,7 +2399,7 @@ class OmniWindow(QWidget):
 
         self.frame.set_minimal_mode(True)
         # self.refresh_list(text, animate=True)
-        self.follow_up_widget.set_mode("ask_omni")
+        self.follow_up_widget.set_mode("hidden")
         self.local_search_timer.start() # Debounce local search slightly
         self.debounce_timer.start()
 

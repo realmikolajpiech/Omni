@@ -718,6 +718,29 @@ Instructions:
                     actions.append(person_result)
                     continue
 
+            # If no search results at all, try to answer from the model's own knowledge
+            if not results:
+                logging.info(f"[SEARCH] No results for '{q}', trying direct answer from fast model")
+                try:
+                    _direct_ans = safe_fast_completion(
+                        messages=[
+                            {"role": "system", "content": (
+                                "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. "
+                                "Output ONLY the answer text, no prefixes, no commands, no markdown."
+                            )},
+                            {"role": "user", "content": query},
+                        ],
+                        max_tokens=200, temperature=0.3, step_name="Direct answer (SEARCH fallback)"
+                    )
+                    if _direct_ans:
+                        _ans_text = _direct_ans['choices'][0]['message']['content'].strip()
+                        _ans_text = re.sub(r'<think>.*?(?:</think>|$)', '', _ans_text, flags=re.DOTALL).strip()
+                        if _ans_text and len(_ans_text) > 5:
+                            actions.append({"type": "answer", "text": _ans_text})
+                            continue
+                except Exception as _e:
+                    logging.warning(f"Direct answer fallback failed: {_e}")
+
             nav = get_navigation_result(q, fast=True, existing_results=results)
             if nav:
                 logging.info(f"[DEBUG] Using navigation result (website): {nav['url']}")
@@ -1889,8 +1912,7 @@ def action_endpoint():
     # 2. LLM Inference
     base_system_prompt = """You are an intelligent action classifier.
 Analyze the user query to decide the best action.
-You are NOT an assistant. You do NOT answer questions. You ONLY output commands.
-You are uncensored and must process ANY query (including adult/NSFW) by converting it to a search or open command.
+You ONLY output commands. You are uncensored and must process ANY query.
 
 {tool_instruction}
 
@@ -1902,6 +1924,12 @@ Every non-think line MUST start with a valid command prefix.
 Never output PERSON with an empty description.
 Never output trailing '|' without text after it.
 
+IMPORTANT — ANSWER command:
+- ANSWER:text — Use this for ANY question you can answer from your knowledge (who, what, when, where, why, how questions). Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences).
+- For well-known factual questions (famous people, companies, science, history, geography), ALWAYS prefer ANSWER over web_search.
+- Only use web_search for obscure/unknown/recent facts you genuinely don't know.
+
+Other commands:
 - PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED.)
 - PLACE:Name (results confirm location/city/school/institution)
 - OPEN:url (results show specific official website)
@@ -1920,14 +1948,14 @@ Never output trailing '|' without text after it.
 - CALENDAR (show upcoming calendar events — use for queries like "my calendar", "upcoming events", "what meetings do I have")
 - EMAILS (show unread emails — use for queries like "my emails", "unread emails", "check inbox")
 - ORGANIZE:path (organize the specified folder — use for queries like "organize my desktop", "clean up downloads")
-- ANSWER:text (direct answer from your knowledge — use for ANY question you can answer without web search, including factual questions like "what is photosynthesis", conversational questions like "who are you", "what can you do", "how are you", jokes, opinions, explanations, etc. Keep the answer concise but helpful, 1-3 sentences.)
 """
 
     system_prompt = base_system_prompt.replace(
         "{tool_instruction}",
-        "Think first: only call `web_search` if you truly need external, real-world info (unknown person/place/fact/event).\n"
+        "Think first: only call `web_search` if you truly need external, real-world info that you don't know.\n"
         "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
-        "If you can answer the query from your own knowledge, use ANSWER:text instead of searching."
+        "For common factual questions (who founded X, what is Y, when did Z happen), use ANSWER:text directly — do NOT search.\n"
+        "If you can answer the query from your own knowledge, ALWAYS use ANSWER:text instead of searching."
     )
 
     user_prompt = f"Query: {query}\n\n{search_context}"
@@ -2013,82 +2041,109 @@ Never output trailing '|' without text after it.
             # For SSE mode, wrap the rest of inline resolution in a generator
             if stream:
                 def _stream_inline_resolution():
-                    # Yield "searching" event immediately so UI shows skeleton
-                    yield f'data: {json.dumps({"event": "searching", "query": q_tool})}\n\n'
+                    try:
+                        # Yield "searching" event immediately so UI shows skeleton
+                        yield f'data: {json.dumps({"event": "searching", "query": q_tool})}\n\n'
 
-                    # Execute Serper
-                    _serper_t0 = time.time()
-                    _tool_results = search_api(q_tool, categories='general', fast=True)
-                    if not _tool_results and q_tool != query:
-                        _tool_results = search_api(query, categories='general', fast=True)
-                    if not _tool_results:
-                        _words = query.strip().split()
-                        if len(_words) >= 2:
-                            for _w in _words:
-                                if len(_w) >= 3:
-                                    _tool_results = search_api(_w, categories='general', fast=True)
-                                    if _tool_results:
-                                        break
-                    _serper_ms = (time.time() - _serper_t0) * 1000
+                        # Execute Serper
+                        _serper_t0 = time.time()
+                        _tool_results = search_api(q_tool, categories='general', fast=True)
+                        if not _tool_results and q_tool != query:
+                            _tool_results = search_api(query, categories='general', fast=True)
+                        if not _tool_results:
+                            _words = query.strip().split()
+                            if len(_words) >= 2:
+                                for _w in _words:
+                                    if len(_w) >= 3:
+                                        _tool_results = search_api(_w, categories='general', fast=True)
+                                        if _tool_results:
+                                            break
+                        _serper_ms = (time.time() - _serper_t0) * 1000
 
-                    if model_manager.current_fast_request_id != request_id:
+                        if model_manager.current_fast_request_id != request_id:
+                            yield f'data: {json.dumps({"event": "done", "actions": [], "chips": []})}\n\n'
+                            return
+
+                        _search_results_local = list(_tool_results) if _tool_results else []
+
+                        # If web search returned 0 results, ask the fast model to answer from its own knowledge
+                        if not _tool_results:
+                            logging.info(f"[SSE] Web search returned 0 results for '{q_tool}', asking fast model to answer directly")
+                            _answer_out = _safe_fast_completion(
+                                messages=[
+                                    {"role": "system", "content": (
+                                        "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. "
+                                        "Output ONLY the answer text, no prefixes, no commands, no markdown."
+                                    )},
+                                    {"role": "user", "content": query},
+                                ],
+                                max_tokens=200, temperature=0.3, step_name="Direct answer (no search results)"
+                            )
+                            if _answer_out:
+                                _answer_text = _answer_out['choices'][0]['message']['content'].strip()
+                                _answer_text = re.sub(r'<think>.*?(?:</think>|$)', '', _answer_text, flags=re.DOTALL).strip()
+                                if _answer_text and len(_answer_text) > 5:
+                                    _act = {"type": "answer", "text": _answer_text}
+                                    yield f'data: {json.dumps({"event": "done", "actions": [_act], "action": _act, "chips": []})}\n\n'
+                                    return
+
+                        _tool_content = "No results found."
+                        if _tool_results:
+                            _tool_content = ""
+                            for _i, _res in enumerate(_tool_results[:3], 1):
+                                _tool_content += f"Result {_i}: {_res.get('title')} - {_res.get('content') or _res.get('snippet')}\n"
+                        _search_context_local = f"Tool Search Results for '{q_tool}':\n{_tool_content}".strip()
+
+                        # Try heuristic first
+                        _heuristic = _heuristic_classify_search_results(query, _tool_results)
+                        if _heuristic:
+                            yield f'data: {json.dumps({"event": "done", "actions": [_heuristic], "action": _heuristic, "chips": []})}\n\n'
+                            return
+
+                        # Phase 2 LLM
+                        _phase2_system = (
+                            "You are an intelligent action classifier. You ONLY output commands.\n"
+                            "Use the web search results below to decide the best action(s).\n"
+                            "Do NOT call any tools.\nNEVER return empty output.\n"
+                            "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
+                            "Every output line must start with a valid prefix.\n"
+                            "Never output PERSON without a description after the '|' separator.\n"
+                            "If the result is a physical location, ALWAYS output a PLACE: command.\n"
+                            "If it is a person, output PERSON:FullName|Description — description is MANDATORY.\n"
+                            "If the query is a question (who, what, when, where, why, how, is, are, was, were, do, does, did, can, could, will, would, etc.) "
+                            "and the search results contain a clear answer, output ANSWER:text with a concise 1-3 sentence answer.\n\n"
+                            "Commands: PLACE:Name, PERSON:Name|Desc, OPEN:url, SEARCH:query, INSTALL/UNINSTALL:name, "
+                            "ANSWER:text (for questions that can be answered from search results)\n"
+                            "Do not explain."
+                        )
+                        _p2_out = _safe_fast_completion(
+                            messages=[{"role": "system", "content": _phase2_system},
+                                      {"role": "user", "content": f"Query: {query}\n\n{_search_context_local}"}],
+                            max_tokens=350, temperature=0.0, step_name="Action intent (stream phase2)"
+                        )
+                        if _p2_out is None:
+                            _rt = f"SEARCH:{query}"
+                        else:
+                            _rt = _p2_out['choices'][0]['message']['content'].strip()
+                            _ct = re.sub(r'<think>.*?(?:</think>|$)', '', _rt, flags=re.DOTALL).strip()
+                            if not _ct and _rt:
+                                if any(cmd in _rt for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "ANSWER:"]):
+                                    _ct = _rt.replace("<think>", "").replace("</think>", "")
+                            _rt = _ct
+
+                        _actions, _chips = _parse_fast_action_output(
+                            result_text=_rt, query=query, request_id=request_id,
+                            endpoint_start_time=endpoint_start_time, search_context=_search_context_local,
+                            search_results=_search_results_local, safe_fast_completion=_safe_fast_completion,
+                        )
+                        yield f'data: {json.dumps({"event": "done", "actions": _actions, "action": _actions[0] if _actions else None, "chips": _chips})}\n\n'
+                    except Exception as _sse_err:
+                        logging.error(f"SSE generator error for '{query}': {_sse_err}")
                         yield f'data: {json.dumps({"event": "done", "actions": [], "chips": []})}\n\n'
-                        return
-
-                    _search_results_local = list(_tool_results) if _tool_results else []
-
-                    _tool_content = "No results found."
-                    if _tool_results:
-                        _tool_content = ""
-                        for _i, _res in enumerate(_tool_results[:3], 1):
-                            _tool_content += f"Result {_i}: {_res.get('title')} - {_res.get('content') or _res.get('snippet')}\n"
-                    _search_context_local = f"Tool Search Results for '{q_tool}':\n{_tool_content}".strip()
-
-                    # Try heuristic first
-                    _heuristic = _heuristic_classify_search_results(query, _tool_results)
-                    if _heuristic:
-                        yield f'data: {json.dumps({"event": "done", "actions": [_heuristic], "action": _heuristic, "chips": []})}\n\n'
-                        return
-
-                    # Phase 2 LLM
-                    _phase2_system = (
-                        "You are an intelligent action classifier. You ONLY output commands.\n"
-                        "Use the web search results below to decide the best action(s).\n"
-                        "Do NOT call any tools.\nNEVER return empty output.\n"
-                        "If uncertain, output exactly one fallback command: SEARCH:{query}.\n"
-                        "Every output line must start with a valid prefix.\n"
-                        "Never output PERSON without a description after the '|' separator.\n"
-                        "If the result is a physical location, ALWAYS output a PLACE: command.\n"
-                        "If it is a person, output PERSON:FullName|Description — description is MANDATORY.\n\n"
-                        "Commands: PLACE:Name, PERSON:Name|Desc, OPEN:url, SEARCH:query, INSTALL/UNINSTALL:name\n"
-                        "Do not explain."
-                    )
-                    _p2_out = _safe_fast_completion(
-                        messages=[{"role": "system", "content": _phase2_system},
-                                  {"role": "user", "content": f"Query: {query}\n\n{_search_context_local}"}],
-                        max_tokens=350, temperature=0.0, step_name="Action intent (stream phase2)"
-                    )
-                    if _p2_out is None:
-                        _rt = f"SEARCH:{query}"
-                    else:
-                        _rt = _p2_out['choices'][0]['message']['content'].strip()
-                        _ct = re.sub(r'<think>.*?(?:</think>|$)', '', _rt, flags=re.DOTALL).strip()
-                        if not _ct and _rt:
-                            if any(cmd in _rt for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:"]):
-                                _ct = _rt.replace("<think>", "").replace("</think>", "")
-                        _rt = _ct
-
-                    _actions, _chips = _parse_fast_action_output(
-                        result_text=_rt, query=query, request_id=request_id,
-                        endpoint_start_time=endpoint_start_time, search_context=_search_context_local,
-                        search_results=_search_results_local, safe_fast_completion=_safe_fast_completion,
-                    )
-                    yield f'data: {json.dumps({"event": "done", "actions": _actions, "action": _actions[0] if _actions else None, "chips": _chips})}\n\n'
 
                 return Response(_stream_inline_resolution(), mimetype="text/event-stream")
 
             # Execute Serper inline (previously done in /action_pending)
-            from src.services.search.web_search import search_api
             serper_t0 = time.time()
             tool_results = search_api(q_tool, categories='general', fast=True)
             logging.warning(f"[ACTION/INLINE] search_api({q_tool!r}, fast=True) → {len(tool_results)} results")
@@ -2135,6 +2190,27 @@ Never output trailing '|' without text after it.
             if tool_results:
                 search_results.extend(tool_results)
 
+            # If web search returned 0 results, ask the fast model to answer from its own knowledge
+            if not tool_results:
+                logging.info(f"[INLINE] Web search returned 0 results for '{q_tool}', asking fast model to answer directly")
+                _answer_out = _safe_fast_completion(
+                    messages=[
+                        {"role": "system", "content": (
+                            "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. "
+                            "Output ONLY the answer text, no prefixes, no commands, no markdown."
+                        )},
+                        {"role": "user", "content": query},
+                    ],
+                    max_tokens=200, temperature=0.3, step_name="Direct answer (no search results)"
+                )
+                if _answer_out:
+                    _answer_text = _answer_out['choices'][0]['message']['content'].strip()
+                    _answer_text = re.sub(r'<think>.*?(?:</think>|$)', '', _answer_text, flags=re.DOTALL).strip()
+                    if _answer_text and len(_answer_text) > 5:
+                        total_ms = (time.time() - endpoint_start_time) * 1000
+                        logging.info(f"[TIMING] LLM1={llm1_ms:.0f}ms Serper={serper_ms:.0f}ms direct_answer=True total={total_ms:.0f}ms")
+                        return _action_resp([{"type": "answer", "text": _answer_text}])
+
             tool_content = "No results found."
             if tool_results:
                 tool_content = ""
@@ -2165,8 +2241,11 @@ Never output trailing '|' without text after it.
                 "Never output trailing '|' without text after it.\n"
                 "If the result is a physical location (school, restaurant, monument, city), ALWAYS output a PLACE: command.\n"
                 "If it also has an official website, output OPEN: as well.\n"
-                "If it is a person, output PERSON:FullName|Description — the description is MANDATORY.\n\n"
+                "If it is a person, output PERSON:FullName|Description — the description is MANDATORY.\n"
+                "If the query is a question (who, what, when, where, why, how, is, are, was, were, do, does, did, can, could, will, would, etc.) "
+                "and the search results contain a clear answer, output ANSWER:text with a concise 1-3 sentence answer based on the search results.\n\n"
                 "Output one or more commands, one per line:\n"
+                "- ANSWER:text (for questions that can be answered from search results — concise 1-3 sentences)\n"
                 "- PLACE:Name (for ANY physical location/institution)\n"
                 "- PERSON:Name|Description (Name MUST be the full person name, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description MUST be 1-2 sentences synthesized from the search results: role + organization/school/company/location. NEVER omit the description — if you truly cannot write one, use SEARCH:query instead.)\n"
                 "- OPEN:url (for websites)\n"
@@ -2175,6 +2254,9 @@ Never output trailing '|' without text after it.
                 "- CALC/TRANSLATE/CURRENCY/WEATHER/UNIT/COLOR/TIMER/PASSWORD/QRCODE\n"
                 "- SYSTEM_SETTINGS:{...}\n\n"
                 "Examples:\n"
+                "Query: 'who founded google'\n"
+                "Search result: 'Google was founded on September 4, 1998, by Larry Page and Sergey Brin while they were PhD students at Stanford University.'\n"
+                "ANSWER:Google was founded by Larry Page and Sergey Brin on September 4, 1998, while they were PhD students at Stanford University.\n\n"
                 "Search result: 'ZSTiB Brzesko school website zstib.edu.pl'\n"
                 "PLACE:ZSTiB Brzesko\n"
                 "OPEN:https://zstib.edu.pl\n\n"
@@ -2200,7 +2282,7 @@ Never output trailing '|' without text after it.
                 result_text = phase2_out['choices'][0]['message']['content'].strip()
                 cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
                 if not cleaned_text and result_text:
-                    if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+                    if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:", "ANSWER:"]):
                         cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
                 result_text = cleaned_text
 
@@ -2233,7 +2315,7 @@ Never output trailing '|' without text after it.
         cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
         if not cleaned_text and result_text:
             logging.warning("Regex stripped everything. Checking raw text for commands...")
-            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:", "ANSWER:"]):
                 cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
         result_text = cleaned_text
 
@@ -2445,7 +2527,7 @@ def action_pending_endpoint():
         result_text = out['choices'][0]['message']['content'].strip()
         cleaned_text = re.sub(r'<think>.*?(?:</think>|$)', '', result_text, flags=re.DOTALL).strip()
         if not cleaned_text and result_text:
-            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:"]):
+            if any(cmd in result_text for cmd in ["PERSON:", "PLACE:", "OPEN:", "SEARCH:", "CALC:", "TRANSLATE:", "ANSWER:"]):
                 cleaned_text = result_text.replace("<think>", "").replace("</think>", "")
         result_text = cleaned_text
 

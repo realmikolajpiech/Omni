@@ -332,13 +332,10 @@ class FollowUpWidget(QWidget):
 
     def set_mode(self, mode):
         """
-        mode: "hidden" | "followup" | "ask_omni"
+        mode: "hidden" | "followup"
         """
         if mode == "followup":
             self.hint.setText("Press Escape to exit follow up mode")
-            self.show()
-        elif mode == "ask_omni":
-            self.hint.setText("Press Tab to Ask Omni")
             self.show()
         else:
             self.hint.setText("")

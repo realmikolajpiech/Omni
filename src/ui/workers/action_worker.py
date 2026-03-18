@@ -60,6 +60,7 @@ class ActionWorker(QThread):
                 if "text/event-stream" in content_type:
                     # SSE mode — parse events progressively
                     got_done = False
+                    search_query_seen = None
                     for line in r.iter_lines(decode_unicode=True):
                         if not line or not line.startswith("data: "):
                             continue
@@ -72,6 +73,7 @@ class ActionWorker(QThread):
 
                         if event == "searching":
                             search_q = payload.get("query", self.query)
+                            search_query_seen = search_q
                             logging.info(f"ActionWorker: Searching '{search_q}' for '{self.query}'")
                             self.searching.emit(search_q, self.query)
 
@@ -80,10 +82,10 @@ class ActionWorker(QThread):
                             got_done = True
                             return
 
-                    # Generator finished without a "done" event — emit empty
+                    # Generator finished without a "done" event — fall back to simple
                     if not got_done:
-                        logging.warning(f"ActionWorker: SSE stream ended without 'done' for '{self.query}'")
-                        self.action_found.emit([], [], self.query)
+                        logging.warning(f"ActionWorker: SSE stream ended without 'done' for '{self.query}', falling back to simple")
+                        self._run_simple()
                 else:
                     # JSON response (fast path — calc, translate, shortcuts, etc.)
                     self._emit_from_data(r.json())
