@@ -301,15 +301,15 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_email",
-            "description": "Send an email using macOS Mail app. The email is sent automatically.",
+            "description": "Compose an email for user review. A compose widget is shown with editable To/Subject/Body fields. Call this even if you don't know the recipient's email address — the user can fill it in.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string", "description": "Recipient email address."},
+                    "to": {"type": "string", "description": "Recipient email address. Leave empty string if unknown — user will fill it in."},
                     "subject": {"type": "string", "description": "Subject line."},
                     "body": {"type": "string", "description": "Email body content."},
                 },
-                "required": ["to", "subject", "body"],
+                "required": ["subject", "body"],
             },
         },
     },
@@ -881,13 +881,13 @@ def _tool_get_unread_emails(limit: int) -> str:
 
 
 def _tool_send_email(to: str, subject: str, body: str) -> str:
-    from src.services.system.productivity import send_email
     to = to.strip()
     subject = subject.strip()
     body = body.strip()
-    if not to or not subject:
-        return "Error: to and subject are required."
-    return send_email(to, subject, body)
+    if not subject:
+        return "Error: subject is required."
+    # Don't send yet — the UI will show a compose widget for user review.
+    return f"Email draft prepared for user review. To: {to or '(user will fill in)'}, Subject: {subject}"
 
 
 

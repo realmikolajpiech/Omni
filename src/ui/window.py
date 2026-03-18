@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget, CalendarActionWidget, EmailActionWidget, AnswerActionWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget, CalendarActionWidget, EmailActionWidget, AnswerActionWidget, SendEmailWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -2667,6 +2667,8 @@ class OmniWindow(QWidget):
                     return CalendarActionWidget(a.get('events_text', ''))
                 elif a.get('type') == 'emails':
                     return EmailActionWidget(a.get('emails_text', ''))
+                elif a.get('type') == 'send_email_draft':
+                    return SendEmailWidget(a.get('to', ''), a.get('subject', ''), a.get('body', ''), original_query=a.get('original_query', ''))
                 elif a.get('type') == 'answer':
                     return AnswerActionWidget(a.get('text', ''))
                 elif a.get('type') == 'organize_pending':
@@ -2804,6 +2806,7 @@ class OmniWindow(QWidget):
         if data.get('type') == 'emails': return 'emails'
         if data.get('type') == 'answer': return f"answer:{data.get('text', '')[:50]}"
         if data.get('type') == 'organize_pending': return f"organize:{data.get('path', '')}"
+        if data.get('type') == 'send_email_draft': return 'send_email'
         # Fallback for others
         return str(data)
 
@@ -3108,7 +3111,7 @@ class OmniWindow(QWidget):
         # Sort external actions to prioritize interactive cards
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3155,7 +3158,7 @@ class OmniWindow(QWidget):
         # Re-sort using same logic
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3386,6 +3389,22 @@ class OmniWindow(QWidget):
                 except Exception:
                     pass
                 self.animate_close()
+            elif data.get('type') == 'send_email_draft':
+                container = self.list_widget.itemWidget(item)
+                w = getattr(container, 'content_widget', container)
+                if isinstance(w, SendEmailWidget):
+                    if not w._composing and not w.body_edit.toPlainText().strip():
+                        # First Enter: start AI compose
+                        w.start_compose()
+                    elif w._composing:
+                        pass  # composing in progress, wait
+                    elif not w.to_edit.text().strip():
+                        w.to_edit.setFocus()
+                    elif not w.subject_edit.text().strip():
+                        w.subject_edit.setFocus()
+                    else:
+                        w._send()
+                return
             elif data.get('type') == 'organize_pending':
                 # Trigger organize via the widget's confirm button
                 container = self.list_widget.itemWidget(item)
@@ -4083,6 +4102,8 @@ class OmniWindow(QWidget):
             answer = data.get("answer", "")
             thinking = data.get("thinking", "")
             actions = data.get("actions", [])
+            if actions:
+                logging.info(f"[UI] on_ai_response received {len(actions)} actions: {[a.get('type') if isinstance(a, dict) else str(a)[:30] for a in actions]}")
 
             # ── Find list item early (needed for permission suppression) ──────
             item = None
@@ -4385,6 +4406,10 @@ class OmniWindow(QWidget):
                                 success=act.get('success', True)
                             )
                             self.insert_list_item(insert_pos, w, act, animation="slide")
+                            insert_pos += 1
+                        elif act.get('type') == 'send_email_draft':
+                            w = SendEmailWidget(act.get('to', ''), act.get('subject', ''), act.get('body', ''), original_query=act.get('original_query', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
 
             answer_text = data.get("answer", "")

@@ -184,6 +184,13 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
     if tool_name == "delete_reminder":
         return "cancelled" if "cancelled" in result else "not found"
 
+    if tool_name == "send_email":
+        if result.startswith("Email draft prepared"):
+            return "draft ready"
+        if "sent" in result.lower():
+            return "sent"
+        return "failed" if "Error" in result else result.strip()[:60]
+
     kb = len(result) / 1000
     return f"{kb:.1f} KB returned" if kb >= 0.1 else f"{len(result)} chars"
 
@@ -832,7 +839,7 @@ Location: {user_loc} | Date: {current_date} | Current datetime (ISO): {current_d
 - **run_terminal** — execute any shell command on macOS (defaults write, pmset, diskutil, etc.); NEVER tell user to open Terminal manually; NEVER use run_terminal for tasks that have a dedicated tool (send_email, get_unread_emails, get_calendar_events, create_calendar_event, install_app, uninstall_app, create_file, edit_file, compress, find_file, read_file, organize_folder)
 - **install_app** — install an app via Homebrew; use for any install/download request; tries cask then formula
 - **uninstall_app** — remove an app via Homebrew; use for any uninstall/remove request
-- **send_email** — send an email via macOS Mail app; params: to (address), subject, body; email is sent automatically — do NOT tell user to click Send; ALWAYS use this instead of run_terminal for sending emails
+- **send_email** — compose an email via macOS Mail app; params: to (address, can be empty), subject, body; a compose widget is shown to the user for review before sending — write a natural, well-formatted email body; ALWAYS call this tool even if you don't know the recipient's email — the user can fill it in the widget; ALWAYS use this instead of run_terminal for sending emails
 - **get_unread_emails** — get recent unread emails from macOS Mail app; optional param: limit (default 5); SLOW (~10s) — only call when user explicitly asks about emails; ALWAYS use this instead of run_terminal for reading emails
 - **get_calendar_events** — SLOW (~10s) — only call when user explicitly asks about calendar/schedule; ALWAYS use this instead of run_terminal for calendar queries
 - **create_calendar_event** — create a new calendar event; params: title, start_iso (YYYY-MM-DD HH:MM:SS), duration_minutes (default 60), description; ALWAYS use this instead of run_terminal for creating events
@@ -855,7 +862,7 @@ Use tools proactively. Do NOT pretend to search or recall — actually call the 
 IMPORTANT efficiency rules:
 - Do NOT call more than 3 tools in a single iteration. Pick the most relevant ones.
 - If memory_recall returns nothing for a person's contact info, ASK the user instead of searching files/emails repeatedly.
-- When sending email: if you don't know the recipient's address after one memory_recall, ask the user. Do NOT waste time searching files, emails, and calendar.
+- When sending email: try memory_recall first to find the recipient's address. If not found, call send_email anyway with to="" — the compose widget lets the user fill in the address. Do NOT ask the user for the address — just show the compose widget. Do NOT waste time searching files, emails, and calendar.
 - Match the email subject/body to the user's EXACT request. Read the query carefully.
 - **After gathering context** (memory_recall, get_calendar_events, etc.), you MUST proceed to call the action tool (send_email, run_terminal, set_reminder, etc.) in the next iteration. Do NOT stop and write a response describing what you "did" — actually do it.
 
@@ -927,6 +934,7 @@ Available settings and values:
 - NEVER instruct user to open Terminal or manually run commands. Always use run_terminal tool.
 - NEVER tell user to install anything manually. Always use install_app / uninstall_app tools.
 - **CRITICAL**: NEVER claim to have sent an email, run a command, set a reminder, created a file, or performed ANY action unless you actually called the corresponding tool in this response. Writing "I sent the email" without calling send_email is a hallucination and strictly forbidden. If you have gathered enough context (e.g. after memory_recall or get_calendar_events), proceed immediately to call the action tool in the very next step.
+- When send_email is called, a compose widget is shown to the user for review. Say something brief like "Here's your email draft — review and send when ready." Do NOT say "Email sent" because the user must click Send.
 - If user shares a new fact about himself, acknowledge it naturally.
 - Always emit valid JSON in a ```json``` block for actions.
 - "Find / open / show me [file]" → search_files THEN immediately open the best match with the run_terminal tool. Never just report the path.
@@ -1228,6 +1236,15 @@ Available settings and values:
                                     if _m:
                                         _tool_file_paths.append(_m.group(1).strip())
 
+                            # Capture send_email drafts for UI compose widget
+                            if tool_name == "send_email" and result.startswith("Email draft prepared"):
+                                auto_actions.append({
+                                    "type": "send_email_draft",
+                                    "to": args.get("to", ""),
+                                    "subject": args.get("subject", ""),
+                                    "body": args.get("body", ""),
+                                })
+
                             # "done" state update
                             n_done = len(tool_records)
                             th_label = f"Used {n_done} tool{'s' if n_done != 1 else ''}"
@@ -1242,7 +1259,7 @@ Available settings and values:
                                 "tool_call_id": tc["id"],
                                 "content": result,
                             })
-                            
+
                         # Discard intermediate text from tool-calling iterations;
                         # the LLM's final response (after all tools) is always complete.
 
@@ -1292,6 +1309,7 @@ Available settings and values:
                     final_full_answer = answer.strip()
                     
                     if auto_actions:
+                        logging.info(f"[STREAM] Appending {len(auto_actions)} auto_actions: {[a.get('type') for a in auto_actions]}")
                         actions.extend(auto_actions)
                     actions.extend(flush_pending_trust_requests())
                     _postprocess_actions(actions, final_full_answer)
@@ -1361,6 +1379,14 @@ Available settings and values:
                         if result and "[Permission required]" in str(result):
                             permission_blocked = True
                         logging.info(f"[tool-ns:{tool_name}] result length={len(result)} (took {time.time() - tool_start:.4f}s)")
+                        # Capture send_email drafts for UI compose widget
+                        if tool_name == "send_email" and result.startswith("Email draft prepared"):
+                            auto_actions.append({
+                                "type": "send_email_draft",
+                                "to": args.get("to", ""),
+                                "subject": args.get("subject", ""),
+                                "body": args.get("body", ""),
+                            })
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],

@@ -5,7 +5,8 @@ import urllib.request
 import requests
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu,
-                              QFileIconProvider, QSizePolicy, QPushButton, QProgressBar)
+                              QFileIconProvider, QSizePolicy, QPushButton, QProgressBar,
+                              QLineEdit, QTextEdit)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QFileInfo, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QPainterPath, QGuiApplication, QCursor, QDesktopServices, QColor, QBrush, QPen
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
@@ -5605,4 +5606,348 @@ class AnswerActionWidget(QWidget):
             if h > 0: return QSize(w, h + 35)
             return self.layout().sizeHint()
         return super().sizeHint()
+
+
+# ---------------------------------------------------------------------------
+# SendEmailWidget — AI-powered email compose card
+# ---------------------------------------------------------------------------
+
+class SendEmailWidget(QWidget):
+    """Email compose widget. AI composes email + looks up contact from memory."""
+    email_sent = pyqtSignal()
+
+    def __init__(self, to="", subject="", body="", original_query="", parent=None):
+        super().__init__(parent)
+        self.current_theme = "light"
+        self._sent = False
+        self._composing = False
+        self._original_query = original_query
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.card = QWidget()
+        self.card.setObjectName("SendEmailCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(10)
+
+        # Header row
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(8)
+
+        self.action_label = QLabel("COMPOSE EMAIL")
+        self.action_label.setFont(QFont("Manrope", 9, QFont.Weight.Bold))
+
+        self.status_label = QLabel("")
+        self.status_label.setFont(QFont("Manrope", 9))
+        self.status_label.setVisible(False)
+
+        top_layout.addWidget(self.action_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.status_label)
+
+        card_layout.addWidget(top_row)
+
+        # To field
+        to_row = QWidget()
+        to_layout = QHBoxLayout(to_row)
+        to_layout.setContentsMargins(0, 0, 0, 0)
+        to_layout.setSpacing(8)
+        to_label = QLabel("To")
+        to_label.setFont(QFont("Manrope", 11))
+        to_label.setFixedWidth(60)
+        to_label.setObjectName("SendEmailFieldLabel")
+        self.to_edit = QLineEdit(to)
+        self.to_edit.setFont(QFont("Manrope", 12))
+        self.to_edit.setObjectName("SendEmailInput")
+        self.to_edit.setPlaceholderText("recipient@example.com")
+        to_layout.addWidget(to_label)
+        to_layout.addWidget(self.to_edit)
+        card_layout.addWidget(to_row)
+
+        # Subject field
+        subj_row = QWidget()
+        subj_layout = QHBoxLayout(subj_row)
+        subj_layout.setContentsMargins(0, 0, 0, 0)
+        subj_layout.setSpacing(8)
+        subj_label = QLabel("Subject")
+        subj_label.setFont(QFont("Manrope", 11))
+        subj_label.setFixedWidth(60)
+        subj_label.setObjectName("SendEmailFieldLabel")
+        self.subject_edit = QLineEdit(subject)
+        self.subject_edit.setFont(QFont("Manrope", 12))
+        self.subject_edit.setObjectName("SendEmailInput")
+        self.subject_edit.setPlaceholderText("Subject")
+        subj_layout.addWidget(subj_label)
+        subj_layout.addWidget(self.subject_edit)
+        card_layout.addWidget(subj_row)
+
+        # Body field
+        self.body_edit = QTextEdit()
+        self.body_edit.setFont(QFont("Manrope", 12))
+        self.body_edit.setObjectName("SendEmailBody")
+        self.body_edit.setPlaceholderText("Composing email..." if original_query else "Email body...")
+        self.body_edit.setPlainText(body)
+        self.body_edit.setMinimumHeight(80)
+        self.body_edit.setMaximumHeight(180)
+        card_layout.addWidget(self.body_edit)
+
+        # Send button row
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch()
+
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("SendEmailBtn")
+        self.send_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.send_btn.setFont(QFont("Manrope", 11, QFont.Weight.DemiBold))
+        self.send_btn.setFixedHeight(34)
+        self.send_btn.setMinimumWidth(100)
+        self.send_btn.clicked.connect(self._send)
+
+        btn_layout.addWidget(self.send_btn)
+        card_layout.addWidget(btn_row)
+
+        layout.addWidget(self.card)
+        self.update_style()
+
+    def start_compose(self):
+        """Trigger AI compose — call this when user presses Enter, not during typing."""
+        if self._composing or self._sent:
+            return
+        if self._original_query and not self.body_edit.toPlainText().strip():
+            self._start_ai_compose(self._original_query, self.to_edit.text().strip())
+
+    def _start_ai_compose(self, query, recipient_hint):
+        """Use AI + memory to compose the email in the background."""
+        self._composing = True
+        self.send_btn.setEnabled(False)
+        self.status_label.setText("AI is composing...")
+        self.status_label.setVisible(True)
+        is_dark = self.current_theme == "dark"
+        self.status_label.setStyleSheet(f"color: {'#9CA3AF' if is_dark else '#6B7280'};")
+
+        import threading
+        def _compose():
+            try:
+                result = self._ai_compose(query, recipient_hint)
+                QTimer.singleShot(0, lambda: self._on_compose_done(result))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_compose_done({"error": str(e)}))
+        threading.Thread(target=_compose, daemon=True).start()
+
+    def _ai_compose(self, query, recipient_hint):
+        """Call memory_recall for contact + use AI to compose the email."""
+        import json
+        result = {}
+
+        # Step 1: Look up contact email from memory
+        if recipient_hint and "@" not in recipient_hint:
+            try:
+                from src.services.memory.memvid_store import get_user_memory
+                memory = get_user_memory(f"{recipient_hint} email address contact")
+                if memory and "no " not in memory.lower()[:20]:
+                    result["memory"] = memory
+                    # Try to extract email from memory
+                    import re
+                    emails_found = re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', memory)
+                    if emails_found:
+                        result["to"] = emails_found[0]
+            except Exception:
+                pass
+
+        # Step 2: Use AI to compose subject + body
+        try:
+            from src.services.llm import model_manager
+            from src.services.llm.model_manager import ensure_main_model, main_lock
+
+            ensure_main_model()
+            if not model_manager.llm:
+                return result
+
+            to_context = ""
+            if result.get("to"):
+                to_context = f"Recipient email: {result['to']}\n"
+            elif recipient_hint:
+                to_context = f"Recipient name: {recipient_hint}\n"
+
+            memory_context = ""
+            if result.get("memory"):
+                memory_context = f"Memory about this person:\n{result['memory']}\n"
+
+            compose_prompt = (
+                "You are composing an email. Output ONLY valid JSON with exactly these keys: "
+                '"subject", "body"\n'
+                "The body should be a natural, well-written email. Keep it concise.\n"
+                "Do NOT include markdown, code fences, or any text outside the JSON.\n\n"
+                f"{to_context}"
+                f"{memory_context}"
+                f"User request: {query}"
+            )
+
+            with main_lock:
+                out = model_manager.llm.create_chat_completion(
+                    messages=[
+                        {"role": "system", "content": compose_prompt},
+                        {"role": "user", "content": query},
+                    ],
+                    max_tokens=512,
+                    temperature=0.7,
+                )
+
+            text = (out['choices'][0]['message'].get('content') or "").strip()
+            # Strip thinking tags if present
+            import re
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            # Strip code fences
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text)
+
+            parsed = json.loads(text)
+            if parsed.get("subject"):
+                result["subject"] = parsed["subject"]
+            if parsed.get("body"):
+                result["body"] = parsed["body"]
+        except Exception as e:
+            import logging
+            logging.warning(f"[SendEmailWidget] AI compose failed: {e}")
+
+        return result
+
+    def _on_compose_done(self, result):
+        """Update fields with AI-composed content."""
+        self._composing = False
+        self.send_btn.setEnabled(True)
+
+        if result.get("error"):
+            self.status_label.setText("Compose failed — type manually")
+            self.status_label.setStyleSheet("color: #F59E0B;")
+            self.body_edit.setPlaceholderText("Email body...")
+        else:
+            self.status_label.setVisible(False)
+
+        # Only fill fields that are still empty (user may have typed already)
+        if result.get("to") and not self.to_edit.text().strip():
+            self.to_edit.setText(result["to"])
+
+        if result.get("subject") and not self.subject_edit.text().strip():
+            self.subject_edit.setText(result["subject"])
+
+        if result.get("body") and not self.body_edit.toPlainText().strip():
+            self.body_edit.setPlainText(result["body"])
+            self.body_edit.setPlaceholderText("Email body...")
+
+        # Trigger parent layout update
+        self.updateGeometry()
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'adjust_window_height'):
+                parent.adjust_window_height()
+                break
+            parent = parent.parent()
+
+    def _send(self):
+        if self._sent or self._composing:
+            return
+        to = self.to_edit.text().strip()
+        subject = self.subject_edit.text().strip()
+        body = self.body_edit.toPlainText().strip()
+        if not to or not subject:
+            self.status_label.setText("To and Subject are required")
+            self.status_label.setStyleSheet("color: #EF4444;")
+            self.status_label.setVisible(True)
+            return
+
+        self.send_btn.setEnabled(False)
+        self.send_btn.setText("Sending...")
+        self.to_edit.setReadOnly(True)
+        self.subject_edit.setReadOnly(True)
+        self.body_edit.setReadOnly(True)
+
+        import threading
+        def _do_send():
+            from src.services.system.productivity import send_email
+            result = send_email(to, subject, body)
+            QTimer.singleShot(0, lambda: self._on_sent(result))
+        threading.Thread(target=_do_send, daemon=True).start()
+
+    def _on_sent(self, result):
+        self._sent = True
+        if "successfully" in result.lower() or "sent" in result.lower():
+            self.send_btn.setText("Sent")
+            self.status_label.setText("Email sent")
+            self.status_label.setStyleSheet(f"color: {'#34D399' if self.current_theme == 'dark' else '#059669'};")
+        else:
+            self.send_btn.setText("Failed")
+            self.send_btn.setEnabled(True)
+            self._sent = False
+            self.to_edit.setReadOnly(False)
+            self.subject_edit.setReadOnly(False)
+            self.body_edit.setReadOnly(False)
+            self.status_label.setText(result[:60])
+            self.status_label.setStyleSheet("color: #EF4444;")
+        self.status_label.setVisible(True)
+        self.email_sent.emit()
+
+    def set_theme(self, theme):
+        self.current_theme = theme
+        self.update_style()
+
+    def update_style(self):
+        is_dark = self.current_theme == "dark"
+        bg = "rgba(0, 0, 0, 0.22)" if is_dark else "rgba(255, 255, 255, 0.25)"
+        border = "rgba(255, 255, 255, 0.10)" if is_dark else "rgba(255, 255, 255, 0.40)"
+        text_color = "#FFFFFF" if is_dark else "#050505"
+        accent = "#60A5FA" if is_dark else "#2563EB"
+        label_color = "#9CA3AF" if is_dark else "#6B7280"
+        input_bg = "rgba(255, 255, 255, 0.06)" if is_dark else "rgba(0, 0, 0, 0.04)"
+        input_border = "rgba(255, 255, 255, 0.12)" if is_dark else "rgba(0, 0, 0, 0.10)"
+        btn_bg = accent
+        btn_hover = "#3B82F6" if is_dark else "#1D4ED8"
+
+        self.card.setStyleSheet(
+            f"QWidget#SendEmailCard {{ background-color: {bg}; border-radius: 16px; border: 1px solid {border}; }}"
+        )
+        self.action_label.setStyleSheet(f"color: {accent}; letter-spacing: 1px;")
+
+        input_style = (
+            f"QLineEdit#SendEmailInput {{ "
+            f"  background: {input_bg}; color: {text_color}; "
+            f"  border: 1px solid {input_border}; border-radius: 8px; "
+            f"  padding: 6px 10px; "
+            f"}}"
+            f"QLineEdit#SendEmailInput:focus {{ border: 1px solid {accent}; }}"
+        )
+        self.to_edit.setStyleSheet(input_style)
+        self.subject_edit.setStyleSheet(input_style)
+
+        self.body_edit.setStyleSheet(
+            f"QTextEdit#SendEmailBody {{ "
+            f"  background: {input_bg}; color: {text_color}; "
+            f"  border: 1px solid {input_border}; border-radius: 8px; "
+            f"  padding: 6px 10px; "
+            f"}}"
+            f"QTextEdit#SendEmailBody:focus {{ border: 1px solid {accent}; }}"
+        )
+
+        for lbl in self.card.findChildren(QLabel, "SendEmailFieldLabel"):
+            lbl.setStyleSheet(f"color: {label_color}; border: none; background: transparent;")
+
+        self.send_btn.setStyleSheet(
+            f"QPushButton#SendEmailBtn {{ "
+            f"  background: {btn_bg}; color: white; border: none; "
+            f"  border-radius: 8px; padding: 6px 20px; "
+            f"}}"
+            f"QPushButton#SendEmailBtn:hover {{ background: {btn_hover}; }}"
+            f"QPushButton#SendEmailBtn:disabled {{ background: {label_color}; color: rgba(255,255,255,0.6); }}"
+        )
+
+    def sizeHint(self):
+        return QSize(660, 320)
 
