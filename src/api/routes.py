@@ -1899,6 +1899,95 @@ def action_endpoint():
             except Exception as _te:
                 logging.warning(f"Translate fast path: {_te}")
 
+    # 1.77 Translate Fast Path - "X in en" / "X in english" pattern
+    _LANG_MAP = {
+        'en': 'en', 'english': 'en', 'eng': 'en',
+        'pl': 'pl', 'polish': 'pl', 'polski': 'pl',
+        'es': 'es', 'spanish': 'es', 'español': 'es', 'espanol': 'es',
+        'fr': 'fr', 'french': 'fr', 'français': 'fr', 'francais': 'fr',
+        'de': 'de', 'german': 'de', 'deutsch': 'de',
+        'it': 'it', 'italian': 'it', 'italiano': 'it',
+        'pt': 'pt', 'portuguese': 'pt', 'português': 'pt', 'portugues': 'pt',
+        'ru': 'ru', 'russian': 'ru', 'русский': 'ru',
+        'ja': 'ja', 'japanese': 'ja', '日本語': 'ja',
+        'ko': 'ko', 'korean': 'ko', '한국어': 'ko',
+        'zh': 'zh', 'chinese': 'zh', '中文': 'zh',
+        'ar': 'ar', 'arabic': 'ar',
+        'hi': 'hi', 'hindi': 'hi',
+        'nl': 'nl', 'dutch': 'nl',
+        'sv': 'sv', 'swedish': 'sv', 'svenska': 'sv',
+        'no': 'no', 'norwegian': 'no', 'norsk': 'no',
+        'da': 'da', 'danish': 'da', 'dansk': 'da',
+        'fi': 'fi', 'finnish': 'fi', 'suomi': 'fi',
+        'tr': 'tr', 'turkish': 'tr', 'türkçe': 'tr', 'turkce': 'tr',
+        'uk': 'uk', 'ukrainian': 'uk', 'українська': 'uk',
+        'cs': 'cs', 'czech': 'cs', 'čeština': 'cs', 'cestina': 'cs',
+        'ro': 'ro', 'romanian': 'ro', 'română': 'ro', 'romana': 'ro',
+        'hu': 'hu', 'hungarian': 'hu', 'magyar': 'hu',
+        'el': 'el', 'greek': 'el',
+        'th': 'th', 'thai': 'th',
+        'vi': 'vi', 'vietnamese': 'vi',
+        'id': 'id', 'indonesian': 'id',
+        'ms': 'ms', 'malay': 'ms',
+        'he': 'he', 'hebrew': 'he',
+        'bg': 'bg', 'bulgarian': 'bg',
+        'hr': 'hr', 'croatian': 'hr', 'hrvatski': 'hr',
+        'sk': 'sk', 'slovak': 'sk', 'slovenčina': 'sk',
+        'sl': 'sl', 'slovenian': 'sl', 'slovenščina': 'sl',
+        'sr': 'sr', 'serbian': 'sr', 'srpski': 'sr',
+        'lt': 'lt', 'lithuanian': 'lt',
+        'lv': 'lv', 'latvian': 'lv',
+        'et': 'et', 'estonian': 'et',
+        'ca': 'ca', 'catalan': 'ca',
+        'af': 'af', 'afrikaans': 'af',
+        'sw': 'sw', 'swahili': 'sw',
+    }
+    _translate_in_match = re.match(
+        r'^(.+?)\s+(?:in|to|into|na|w|do|po)\s+(\w+)$', ql.strip()
+    )
+    if _translate_in_match:
+        _src_phrase = _translate_in_match.group(1).strip()
+        _target_key = _translate_in_match.group(2).strip().lower()
+        _target_code = _LANG_MAP.get(_target_key)
+        if _target_code and len(_src_phrase.split()) <= 8:
+            logging.info(f"Translate-in fast path: '{_src_phrase}' → {_target_code}")
+            model_manager.ensure_fast_model()
+            if model_manager.fast_model:
+                _tr_in_msgs = [
+                    {"role": "system", "content": (
+                        f"Translate the following text to '{_target_code}'. "
+                        "Detect the source language automatically. "
+                        "Output EXACTLY in this format (no extra text):\n"
+                        f"TRANSLATE:original|from_lang_code|{_target_code}|translation"
+                    )},
+                    {"role": "user", "content": _src_phrase},
+                ]
+                try:
+                    if model_manager.fast_lock.acquire(timeout=5):
+                        try:
+                            _tr_in_out = model_manager.fast_model.create_chat_completion(
+                                messages=_tr_in_msgs, max_tokens=150, temperature=0.0,
+                                request_id=request_id,
+                            )
+                        finally:
+                            model_manager.fast_lock.release()
+                        if _tr_in_out:
+                            _tr_in_text = _tr_in_out['choices'][0]['message']['content'].strip()
+                            _tr_in_text = re.sub(r'<think>.*?(?:</think>|$)', '', _tr_in_text, flags=re.DOTALL).strip()
+                            logging.info(f"Translate-in fast path output: {_tr_in_text!r}")
+                            if "TRANSLATE:" in _tr_in_text:
+                                _parts = _tr_in_text.split("TRANSLATE:")[1].strip().split("|")
+                                if len(_parts) >= 4:
+                                    return _action_resp([{
+                                        "type": "translate",
+                                        "source_text": _parts[0].strip(),
+                                        "from_lang": _parts[1].strip(),
+                                        "to_lang": _parts[2].strip(),
+                                        "translated_text": "|".join(_parts[3:]).strip(),
+                                    }])
+                except Exception as _te2:
+                    logging.warning(f"Translate-in fast path: {_te2}")
+
     # 1.8 Skip LLM if no internet
     logging.info(f"[TIMING] Regex/Shortcuts checks took: {time.time() - endpoint_start_time:.3f}s")
     if not _is_connected():
