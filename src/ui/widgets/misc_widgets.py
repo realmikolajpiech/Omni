@@ -1101,12 +1101,43 @@ class AnswerWidget(QWidget):
             self.user_bubble = None
 
         # ── AI CONTENT (created before thinking so thinking can be inserted inside) ──
+        self._simple_placeholder = None  # "Thinking..." label for non-chat mode
         if chat_mode:
             self.ai_bubble = _BubbleWidget("", sender="ai", is_markdown=True, show_name=show_ai_name)
             self.outer_layout.addWidget(self.ai_bubble)
             self.text_edit = self.ai_bubble.bubble.edit
         else:
             self.ai_bubble = None
+            # "Thinking..." placeholder — shown when no text and no thinking widget yet
+            self._simple_placeholder = QLabel("Thinking...")
+            _ph_font = QFont("Instrument Serif", 22, QFont.Weight.Normal)
+            _ph_font.setItalic(True)
+            self._simple_placeholder.setFont(_ph_font)
+            self._simple_placeholder.setMinimumHeight(38)
+            # Pulsing opacity animation for polish
+            self._ph_opacity = QGraphicsOpacityEffect(self._simple_placeholder)
+            self._ph_opacity.setOpacity(0.6)
+            self._simple_placeholder.setGraphicsEffect(self._ph_opacity)
+            self._ph_anim = QPropertyAnimation(self._ph_opacity, b"opacity")
+            self._ph_anim.setStartValue(0.35)
+            self._ph_anim.setEndValue(0.75)
+            self._ph_anim.setDuration(900)
+            self._ph_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+            self._ph_anim.setLoopCount(-1)  # infinite
+            # Reverse direction each cycle for smooth pulse
+            self._ph_anim.finished.connect(lambda: None)  # keep ref alive
+            from PyQt6.QtCore import QAbstractAnimation
+            def _bounce():
+                if self._ph_anim.direction() == QAbstractAnimation.Direction.Forward:
+                    self._ph_anim.setDirection(QAbstractAnimation.Direction.Backward)
+                else:
+                    self._ph_anim.setDirection(QAbstractAnimation.Direction.Forward)
+                self._ph_anim.start()
+            self._ph_anim.finished.connect(_bounce)
+            self._ph_anim.setLoopCount(1)
+            self._ph_anim.start()
+            self.outer_layout.addWidget(self._simple_placeholder)
+
             self.text_edit = UnscrollableTextEdit()
             self.text_edit.setReadOnly(True)
             self.text_edit.setFrameStyle(QFrame.Shape.NoFrame)
@@ -1114,11 +1145,17 @@ class AnswerWidget(QWidget):
             self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
             self.text_edit.setFont(QFont("Manrope", 15, QFont.Weight.Normal))
+            self.text_edit.setVisible(False)
             self.outer_layout.addWidget(self.text_edit)
 
         # ── THINKING (collapsible, optional) ──────────────────────────
         self.thinking_widget = None
         if thinking_text and thinking_text.strip():
+            # Hide placeholder once thinking is present
+            if self._simple_placeholder:
+                self._simple_placeholder.setVisible(False)
+                if hasattr(self, '_ph_anim'):
+                    self._ph_anim.stop()
             self.thinking_widget = CollapsibleThinkingWidget(thinking_text)
             if chat_mode and self.ai_bubble:
                 # In chat mode: thinking lives inside the AI bubble (above answer text).
@@ -1141,6 +1178,11 @@ class AnswerWidget(QWidget):
                 # Route through proper path so thinking_placeholder is hidden
                 self.ai_bubble.bubble.set_text(text)
             else:
+                # Hide placeholder when we already have text
+                if self._simple_placeholder:
+                    self._simple_placeholder.setVisible(False)
+                    if hasattr(self, '_ph_anim'):
+                        self._ph_anim.stop()
                 self.text_edit.setVisible(True)
                 self.text_edit.setMarkdown(text)
 
@@ -1163,6 +1205,11 @@ class AnswerWidget(QWidget):
             self.text_edit.setStyleSheet(
                 f"background: transparent; color: {text_color}; line-height: 1.5; "
                 f"a {{ color: {link_color}; text-decoration: underline; }}"
+            )
+        if self._simple_placeholder:
+            ph_color = t.get("text_secondary", "rgba(128,128,128,0.6)")
+            self._simple_placeholder.setStyleSheet(
+                f"QLabel {{ background: transparent; color: {ph_color}; padding-left: 2px; }}"
             )
         if self.thinking_widget:
             self.thinking_widget.set_theme(self.current_theme)
@@ -1192,6 +1239,11 @@ class AnswerWidget(QWidget):
 
     def ensure_thinking_widget(self):
         if self.thinking_widget is None:
+            # Hide placeholder — thinking replaces it
+            if self._simple_placeholder and self._simple_placeholder.isVisible():
+                self._simple_placeholder.setVisible(False)
+                if hasattr(self, '_ph_anim'):
+                    self._ph_anim.stop()
             self.thinking_widget = CollapsibleThinkingWidget("")
             self.thinking_widget.set_theme(self.current_theme)
             if self.chat_mode and self.ai_bubble:
@@ -1208,6 +1260,11 @@ class AnswerWidget(QWidget):
     def update_thinking(self, text, skip_resize=False):
         self.ensure_thinking_widget()
         self.thinking_widget.set_thinking_text(text)
+        # Hide simple-mode placeholder once thinking is visible
+        if self._simple_placeholder is not None and text and text.strip():
+            self._simple_placeholder.setVisible(False)
+            if hasattr(self, '_ph_anim'):
+                self._ph_anim.stop()
         if not skip_resize:
             self.update_item_size()
         has_answer = bool(self.text_edit and self.text_edit.toPlainText().strip())
@@ -1232,6 +1289,12 @@ class AnswerWidget(QWidget):
         self._answer_text = text  # save it
         visible = getattr(self, '_answer_visible', True)
         text_to_show = text if visible else ""
+
+        # Hide simple-mode placeholder as soon as content (answer or thinking) arrives
+        if self._simple_placeholder is not None and (text_to_show or (self.thinking_widget and self.thinking_widget.isVisible())):
+            self._simple_placeholder.setVisible(False)
+            if hasattr(self, '_ph_anim'):
+                self._ph_anim.stop()
 
         if self.chat_mode and self.ai_bubble is not None:
             # _BubbleInner.set_text has its own skip-if-unchanged check
@@ -1266,7 +1329,11 @@ class AnswerWidget(QWidget):
             if action_label:
                 self.set_thinking_header(action_label)
             # Do NOT hide the widget. Let the user expand it to see reasoning.
-        # Also ensure the placeholder is hidden (covers case when no CollapsibleThinkingWidget)
+        # Also ensure placeholders are hidden
+        if self._simple_placeholder is not None:
+            self._simple_placeholder.setVisible(False)
+            if hasattr(self, '_ph_anim'):
+                self._ph_anim.stop()
         if self.ai_bubble is not None and self.ai_bubble.bubble.thinking_placeholder is not None:
             self.ai_bubble.bubble._placeholder_shown = False
             self.ai_bubble.bubble.thinking_placeholder.setVisible(False)
@@ -1297,6 +1364,9 @@ class AnswerWidget(QWidget):
             if ai_h > 0:
                 h += ai_h
         else:
+            # "Thinking..." placeholder (non-chat mode)
+            if self._simple_placeholder and self._simple_placeholder.isVisible():
+                h += self._simple_placeholder.minimumHeight() + spacing
             if self.text_edit and self.text_edit.isVisible():
                 inner_w = w - margins.left() - margins.right()
                 self.text_edit.document().setTextWidth(inner_w)

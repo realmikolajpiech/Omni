@@ -373,7 +373,7 @@ class OmniWindow(QWidget):
         self._pending_partial_data = None  # buffered partial for throttled UI update
         self._partial_flush_timer = QTimer(self)
         self._partial_flush_timer.setSingleShot(True)
-        self._partial_flush_timer.setInterval(80)  # ~12 FPS cap for layout updates
+        self._partial_flush_timer.setInterval(50)  # ~20 FPS cap for layout updates
         self._partial_flush_timer.timeout.connect(self._flush_partial_update)
         self._continuation_thinking_prefix = ""  # thinking text prepended on request_permission re-run
         self._continuation_pending = False  # True while waiting for user to approve request_permission
@@ -3393,17 +3393,13 @@ class OmniWindow(QWidget):
                 container = self.list_widget.itemWidget(item)
                 w = getattr(container, 'content_widget', container)
                 if isinstance(w, SendEmailWidget):
-                    if not w._composing and not w.body_edit.toPlainText().strip():
+                    if w._composing:
+                        pass  # composing in progress, wait
+                    elif not w._compose_done and w._original_query:
                         # First Enter: start AI compose
                         w.start_compose()
-                    elif w._composing:
-                        pass  # composing in progress, wait
-                    elif not w.to_edit.text().strip():
-                        w.to_edit.setFocus()
-                    elif not w.subject_edit.text().strip():
-                        w.subject_edit.setFocus()
                     else:
-                        w._send()
+                        w._send()  # handles validation & field focus
                 return
             elif data.get('type') == 'organize_pending':
                 # Trigger organize via the widget's confirm button
@@ -3817,8 +3813,12 @@ class OmniWindow(QWidget):
                 self.list_widget.scrollToItem(self.list_widget.item(0))
             QTimer.singleShot(0, answer_widget.update_item_size)
         else:
-            self.thinking_widget = ThinkingWidget("")
-            self.add_list_item(self.thinking_widget, "thinking")
+            # Create AnswerWidget immediately with "Thinking..." placeholder
+            # instead of a standalone ThinkingWidget — avoids the jarring
+            # remove-and-replace transition when the first streaming token arrives.
+            answer_widget = AnswerWidget("", query_text=system_query, chat_mode=False)
+            self._streaming_answer_widget = answer_widget
+            self.add_list_item(answer_widget, "answer")
 
         self.frame.set_minimal_mode(False)
         self.logo_label.boost_speed()
