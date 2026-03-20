@@ -17,7 +17,7 @@ from src.ui.styles import get_style_sheet, THEMES
 from src.core.ipc import start_ipc_listener
 from src.services.system.app_launcher import get_app_cache
 
-from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget, CalendarActionWidget, EmailActionWidget, AnswerActionWidget, SendEmailWidget)
+from src.ui.widgets.action_widgets import (LinkActionWidget, InstallActionWidget, UninstallActionWidget, FileActionWidget, PersonActionWidget, PlaceActionWidget, AppActionWidget, CalcActionWidget, SettingsActionWidget, SettingsAnimationWidget, TerminalActionWidget, OGPreviewWidget, QuickURLWidget,SearchActionWidget, MapNavigationWidget, TranslateActionWidget, CurrencyActionWidget, WeatherActionWidget, UnitActionWidget, ColorActionWidget, TimerActionWidget, PasswordActionWidget, QRActionWidget, PendingActionWidget, OptimizeSystemWidget, WorldTimeWidget, CalendarActionWidget, EmailActionWidget, AnswerActionWidget, SendEmailWidget, ToolDraftWidget)
 from src.ui.widgets.install_widget import InstallProgressWidget, UninstallProgressWidget
 from src.ui.widgets.command_widget import CommandLogWidget
 import socket
@@ -150,6 +150,7 @@ class OmniWindow(QWidget):
     toggle_requested = pyqtSignal(str) # Accepts source
     toggle_clipboard_requested = pyqtSignal()
     clipboard_mode_shortcut_requested = pyqtSignal()  # Cmd+4 while window visible
+    _tool_draft_done_signal = pyqtSignal(object, str, bool)  # (widget, result, success)
 
     def setup_uinput(self):
         # Linux only
@@ -188,6 +189,7 @@ class OmniWindow(QWidget):
         self.toggle_requested.connect(self.toggle_visibility_safe)
         self.toggle_clipboard_requested.connect(self.toggle_clipboard)
         self.clipboard_mode_shortcut_requested.connect(self._on_clipboard_shortcut)
+        self._tool_draft_done_signal.connect(self._on_tool_draft_done)
         
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -2671,6 +2673,14 @@ class OmniWindow(QWidget):
                     return SendEmailWidget(a.get('to', ''), a.get('subject', ''), a.get('body', ''), original_query=a.get('original_query', ''))
                 elif a.get('type') == 'answer':
                     return AnswerActionWidget(a.get('text', ''))
+                elif a.get('type') == 'tool_draft':
+                    w = ToolDraftWidget(a.get('tool_name', ''), a.get('args', {}), original_query=a.get('original_query', ''))
+                    def _make_draft_exec_cb2(_widget):
+                        def _cb(tool_name, args):
+                            self._execute_tool_draft(tool_name, args, _widget)
+                        return _cb
+                    w.execute_requested.connect(_make_draft_exec_cb2(w))
+                    return w
                 elif a.get('type') == 'organize_pending':
                     return PendingActionWidget(a.get('title', 'Organize folder'), a.get('path', ''), header_text="ORGANIZE")
                 elif a.get('type') == 'action_pending':
@@ -2807,6 +2817,7 @@ class OmniWindow(QWidget):
         if data.get('type') == 'answer': return f"answer:{data.get('text', '')[:50]}"
         if data.get('type') == 'organize_pending': return f"organize:{data.get('path', '')}"
         if data.get('type') == 'send_email_draft': return 'send_email'
+        if data.get('type') == 'tool_draft': return f"tool_draft:{data.get('tool_name', '')}:{str(data.get('args', ''))[:30]}"
         # Fallback for others
         return str(data)
 
@@ -3111,7 +3122,7 @@ class OmniWindow(QWidget):
         # Sort external actions to prioritize interactive cards
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft', 'tool_draft'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3158,7 +3169,7 @@ class OmniWindow(QWidget):
         # Re-sort using same logic
         def action_priority(a):
             t = a.get('type')
-            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft'): return 0
+            if t in ('currency', 'calc', 'translate', 'system_settings', 'status', 'weather', 'unit', 'color_preview', 'timer', 'password', 'qrcode', 'calendar', 'emails', 'answer', 'organize_pending', 'send_email_draft', 'tool_draft'): return 0
             if t == 'link':
                 try:
                     from urllib.parse import urlparse as _urlp
@@ -3401,6 +3412,12 @@ class OmniWindow(QWidget):
                     else:
                         w._send()  # handles validation & field focus
                 return
+            elif data.get('type') == 'tool_draft':
+                container = self.list_widget.itemWidget(item)
+                w = getattr(container, 'content_widget', container)
+                if isinstance(w, ToolDraftWidget) and not w._executed:
+                    w._on_execute()
+                return
             elif data.get('type') == 'organize_pending':
                 # Trigger organize via the widget's confirm button
                 container = self.list_widget.itemWidget(item)
@@ -3515,6 +3532,28 @@ class OmniWindow(QWidget):
             return f"Error: {e}"
 
     # ── Computer control execution ────────────────────────────────────────────
+
+    def _execute_tool_draft(self, tool_name: str, args: dict, widget):
+        """Execute a deferred tool draft in a background thread."""
+        import threading
+        def _run():
+            try:
+                from src.services.llm.tools import execute_tool_draft
+                result = execute_tool_draft(tool_name, args)
+                success = not result.startswith("Error")
+                self._tool_draft_done_signal.emit(widget, result, success)
+            except Exception as e:
+                logging.error(f"[tool_draft] Execution error: {e}")
+                self._tool_draft_done_signal.emit(widget, str(e), False)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_tool_draft_done(self, widget, result: str, success: bool):
+        """Handle tool draft completion on the main thread."""
+        try:
+            widget.show_result(result, success)
+            self.adjust_window_height()
+        except RuntimeError:
+            pass  # widget deleted
 
     def _execute_computer_control(self, act: dict):
         """Close the window then run a single computer_control action."""
@@ -4409,6 +4448,17 @@ class OmniWindow(QWidget):
                             insert_pos += 1
                         elif act.get('type') == 'send_email_draft':
                             w = SendEmailWidget(act.get('to', ''), act.get('subject', ''), act.get('body', ''), original_query=act.get('original_query', ''))
+                            self.insert_list_item(insert_pos, w, act, animation="pop")
+                            insert_pos += 1
+                        elif act.get('type') == 'tool_draft':
+                            t_name = act.get('tool_name', '')
+                            t_args = act.get('args', {})
+                            w = ToolDraftWidget(t_name, t_args, original_query=act.get('original_query', ''))
+                            def _make_draft_exec_cb(_widget):
+                                def _cb(tool_name, args):
+                                    self._execute_tool_draft(tool_name, args, _widget)
+                                return _cb
+                            w.execute_requested.connect(_make_draft_exec_cb(w))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
 

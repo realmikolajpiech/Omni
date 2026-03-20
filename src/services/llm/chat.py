@@ -9,7 +9,7 @@ from flask import jsonify
 
 from src.services.llm import model_manager
 from src.services.llm.model_manager import ensure_main_model, ensure_fast_model, fast_lock, main_lock, abort_fast_event
-from src.services.llm.tools import TOOL_SCHEMAS, execute_tool, flush_pending_trust_requests
+from src.services.llm.tools import TOOL_SCHEMAS, execute_tool, flush_pending_trust_requests, DRAFT_TOOLS
 from src.services.search.web_search import perform_web_search
 from src.services.search.local_search import perform_file_search, should_search_files
 from src.services.search.image_search import perform_image_search_with_fallback, should_search_images
@@ -167,13 +167,46 @@ def _tool_result_summary(tool_name: str, result: str) -> str:
         return "removed"
 
     if tool_name == "create_file":
+        if result.startswith("File creation draft prepared"):
+            return "draft ready"
         if result.startswith("Created:"):
             path = result[len("Created:"):].strip()
             return f"saved to {path}"
         return "failed" if "Error" in result else result.strip()[:60]
 
     if tool_name == "set_reminder":
+        if result.startswith("Reminder draft prepared"):
+            return "draft ready"
         return "scheduled" if result.startswith("ok") else result.strip()[:60]
+
+    if tool_name == "create_calendar_event":
+        if result.startswith("Calendar event draft prepared"):
+            return "draft ready"
+        return result.strip()[:60]
+
+    if tool_name == "edit_file":
+        if result.startswith("File edit draft prepared"):
+            return "draft ready"
+        return "edited" if result.startswith("Edited:") else result.strip()[:60]
+
+    if tool_name == "compress":
+        if result.startswith("Compress draft prepared"):
+            return "draft ready"
+        if result.startswith("Created:"):
+            return result.strip()[:60]
+        return "failed" if "Error" in result else result.strip()[:60]
+
+    if tool_name == "convert_file":
+        if result.startswith("Convert draft prepared"):
+            return "draft ready"
+        if result.startswith("Converted:"):
+            return result.strip()[:60]
+        return "failed" if "Error" in result else result.strip()[:60]
+
+    if tool_name == "organize_folder":
+        if result.startswith("Organize draft prepared"):
+            return "draft ready"
+        return result.strip()[:60]
 
     if tool_name == "list_reminders":
         if result == "No pending reminders.":
@@ -1245,6 +1278,15 @@ Available settings and values:
                                     "body": args.get("body", ""),
                                 })
 
+                            # Capture draft tool proposals for UI widgets
+                            if tool_name in DRAFT_TOOLS and "draft prepared" in result:
+                                auto_actions.append({
+                                    "type": "tool_draft",
+                                    "tool_name": tool_name,
+                                    "args": dict(args),
+                                    "original_query": query,
+                                })
+
                             # "done" state update
                             n_done = len(tool_records)
                             th_label = f"Used {n_done} tool{'s' if n_done != 1 else ''}"
@@ -1386,6 +1428,14 @@ Available settings and values:
                                 "to": args.get("to", ""),
                                 "subject": args.get("subject", ""),
                                 "body": args.get("body", ""),
+                            })
+                        # Capture draft tool proposals for UI widgets
+                        if tool_name in DRAFT_TOOLS and "draft prepared" in result:
+                            auto_actions.append({
+                                "type": "tool_draft",
+                                "tool_name": tool_name,
+                                "args": dict(args),
+                                "original_query": query,
                             })
                         messages.append({
                             "role": "tool",

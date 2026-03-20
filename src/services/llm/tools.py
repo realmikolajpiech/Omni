@@ -700,6 +700,105 @@ def execute_tool(name: str, arguments: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
+# ── Draft tool names (these return proposals, not results) ────────────────────
+DRAFT_TOOLS = {
+    "set_reminder", "create_calendar_event", "create_file",
+    "edit_file", "compress", "convert_file", "organize_folder",
+}
+
+
+def execute_tool_draft(name: str, arguments: dict) -> str:
+    """Execute a previously deferred tool draft. Called from the UI after user clicks."""
+    import os
+    try:
+        if name == "set_reminder":
+            from src.services.reminders.reminder_service import add_reminder
+            from datetime import datetime
+            fire_at = datetime.fromisoformat(arguments["fire_at_iso"].strip()).timestamp()
+            rid = add_reminder(
+                arguments["label"].strip(),
+                fire_at,
+                int(arguments.get("interval_seconds", 0)),
+                arguments.get("query", "").strip(),
+            )
+            return f"ok (id:{rid})"
+
+        elif name == "create_calendar_event":
+            from src.services.system.productivity import create_calendar_event
+            return create_calendar_event(
+                arguments["title"].strip(),
+                arguments["start_iso"].strip(),
+                int(arguments.get("duration_minutes", 60)),
+                arguments.get("description", ""),
+            )
+
+        elif name == "create_file":
+            folder = os.path.expanduser(arguments.get("folder", "").strip() or "~/Desktop")
+            os.makedirs(folder, exist_ok=True)
+            file_path = os.path.join(folder, arguments["filename"].strip())
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(arguments.get("content", ""))
+            return f"Created: {file_path}"
+
+        elif name == "edit_file":
+            path = os.path.expanduser(arguments["path"].strip())
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            new_content = content.replace(arguments["old_text"], arguments["new_text"], 1)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            return f"Edited: {path}"
+
+        elif name == "compress":
+            import zipfile
+            paths = arguments.get("paths", [])
+            resolved = [os.path.expanduser(p.strip()) for p in paths]
+            output = arguments.get("output", "")
+            if output:
+                zip_path = os.path.expanduser(output.strip())
+            else:
+                zip_path = resolved[0].rstrip("/") + ".zip"
+            os.makedirs(os.path.dirname(zip_path) or ".", exist_ok=True)
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in resolved:
+                    if os.path.isfile(item):
+                        zf.write(item, os.path.basename(item))
+                    elif os.path.isdir(item):
+                        base_dir = os.path.dirname(item)
+                        for root, dirs, files in os.walk(item):
+                            for fl in files:
+                                full = os.path.join(root, fl)
+                                zf.write(full, os.path.relpath(full, base_dir))
+            size = os.path.getsize(zip_path)
+            if size < 1024:
+                size_str = f"{size} bytes"
+            elif size < 1024 * 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size / (1024 * 1024):.1f} MB"
+            return f"Created: {zip_path} ({size_str})"
+
+        elif name == "convert_file":
+            return _tool_convert_file_execute(
+                arguments.get("input_path", ""),
+                arguments.get("output_format", ""),
+                arguments.get("output_path", ""),
+            )
+
+        elif name == "organize_folder":
+            from src.services.system.files import organize_folder
+            return organize_folder(
+                arguments.get("path", "").strip(),
+                arguments.get("strategy", "smart"),
+            )
+
+        else:
+            return f"Error: unknown draft tool '{name}'"
+    except Exception as e:
+        logging.error(f"[tools] Draft execution error in '{name}': {e}")
+        return f"Error: {e}"
+
+
 def _tool_search_web(query: str) -> str:
     from src.services.search.web_search import perform_web_search
     if not query.strip():
@@ -867,12 +966,12 @@ def _tool_get_calendar_events(days: int) -> str:
 
 
 def _tool_create_calendar_event(title: str, start_iso: str, duration_minutes: int, description: str) -> str:
-    from src.services.system.productivity import create_calendar_event
     title = title.strip()
     start_iso = start_iso.strip()
     if not title or not start_iso:
         return "Error: title and start_iso are required."
-    return create_calendar_event(title, start_iso, int(duration_minutes), description)
+    # Don't create yet — UI will show a proposal widget
+    return f"Calendar event draft prepared. Title: {title}, Start: {start_iso}, Duration: {duration_minutes} min"
 
 
 def _tool_get_unread_emails(limit: int) -> str:
@@ -993,159 +1092,58 @@ def _tool_uninstall_app(name: str) -> str:
         return f"Error: {e}"
 
 def _tool_organize_folder(path: str, strategy: str) -> str:
-    from src.services.system.files import organize_folder
     path = path.strip()
     if not path:
         return "Error: empty path."
-
-    # Trust level 2 required for organizing files
-    current = get_effective_trust()
-    if current < 2:
-        _get_pending().append({
-            "type":           "trust_request",
-            "required_level": 2,
-            "command":        f"organize {path}",
-            "description":    f"Organize files in {path}",
-        })
-        return "[Permission required] 'Automation' trust is needed to organize files."
-
-    return organize_folder(path, strategy)
+    # Don't organize yet — UI will show a proposal widget
+    return f"Organize draft prepared. Path: {path}, Strategy: {strategy}"
 
 
 def _tool_create_file(filename: str, content: str, folder: str = "") -> str:
-    """Create a file with given content. Requires trust level 2."""
-    import os
-
+    """Create a file with given content — returns draft for UI proposal widget."""
     filename = filename.strip()
     if not filename:
         return "Error: empty filename."
-
-    current = get_effective_trust()
-    if current < 2:
-        _get_pending().append({
-            "type":           "trust_request",
-            "required_level": 2,
-            "command":        f"create file {filename}",
-            "description":    f"Create file '{filename}'",
-        })
-        return "[Permission required] 'Automation' trust is needed to create files."
-
-    folder = os.path.expanduser(folder.strip() if folder.strip() else "~/Desktop")
-    os.makedirs(folder, exist_ok=True)
-    file_path = os.path.join(folder, filename)
-
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"Created: {file_path}"
-    except Exception as e:
-        return f"Error creating file: {e}"
+    # Don't create yet — UI will show a proposal widget
+    folder = folder.strip() if folder and folder.strip() else "~/Desktop"
+    return f"File creation draft prepared. Filename: {filename}, Folder: {folder}"
 
 
 def _tool_compress(paths: list, output: str = "") -> str:
-    """Compress files/folders into a ZIP archive. Requires trust level 2."""
+    """Compress files/folders — returns draft for UI proposal widget."""
     import os
-    import zipfile
-
     if not paths:
         return "Error: no paths provided."
-
-    current = get_effective_trust()
-    if current < 2:
-        _get_pending().append({
-            "type":           "trust_request",
-            "required_level": 2,
-            "command":        f"compress {len(paths)} item(s)",
-            "description":    f"Compress {len(paths)} item(s) into a ZIP archive",
-        })
-        return "[Permission required] 'Automation' trust is needed to compress files."
-
-    # Resolve paths
-    resolved = []
+    # Validate paths exist before proposing
     for p in paths:
-        p = os.path.expanduser(p.strip())
-        if not os.path.exists(p):
-            return f"Error: path not found: {p}"
-        resolved.append(p)
-
-    # Determine output path
-    if output:
-        zip_path = os.path.expanduser(output.strip())
-    else:
-        first = resolved[0]
-        base = first.rstrip("/")
-        zip_path = base + ".zip"
-
-    # Ensure parent dir exists
-    os.makedirs(os.path.dirname(zip_path) or ".", exist_ok=True)
-
-    try:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for item in resolved:
-                if os.path.isfile(item):
-                    zf.write(item, os.path.basename(item))
-                elif os.path.isdir(item):
-                    base_dir = os.path.dirname(item)
-                    for root, dirs, files in os.walk(item):
-                        for f in files:
-                            full = os.path.join(root, f)
-                            arcname = os.path.relpath(full, base_dir)
-                            zf.write(full, arcname)
-
-        size = os.path.getsize(zip_path)
-        if size < 1024:
-            size_str = f"{size} bytes"
-        elif size < 1024 * 1024:
-            size_str = f"{size / 1024:.1f} KB"
-        else:
-            size_str = f"{size / (1024 * 1024):.1f} MB"
-
-        return f"Created: {zip_path} ({size_str})"
-    except Exception as e:
-        return f"Error compressing: {e}"
+        expanded = os.path.expanduser(p.strip())
+        if not os.path.exists(expanded):
+            return f"Error: path not found: {expanded}"
+    # Don't compress yet — UI will show a proposal widget
+    return f"Compress draft prepared. {len(paths)} item(s)"
 
 
 def _tool_edit_file(path: str, old_text: str, new_text: str) -> str:
-    """Edit a file by replacing old_text with new_text. Requires trust level 2."""
+    """Edit a file — returns draft for UI proposal widget."""
     import os
-
     path = path.strip()
     if not path:
         return "Error: empty path."
     if not old_text:
         return "Error: old_text is required."
-
-    current = get_effective_trust()
-    if current < 2:
-        _get_pending().append({
-            "type":           "trust_request",
-            "required_level": 2,
-            "command":        f"edit file {path}",
-            "description":    f"Edit file '{os.path.basename(path)}'",
-        })
-        return "[Permission required] 'Automation' trust is needed to edit files."
-
-    path = os.path.expanduser(path)
-    if not os.path.isfile(path):
-        return f"Error: file not found: {path}"
-
+    # Validate that the file and old_text exist before proposing
+    expanded = os.path.expanduser(path)
+    if not os.path.isfile(expanded):
+        return f"Error: file not found: {expanded}"
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(expanded, "r", encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         return f"Error reading file: {e}"
-
     if old_text not in content:
         return f"Error: old_text not found in {path}. Make sure it matches the file content exactly."
-
-    new_content = content.replace(old_text, new_text, 1)
-
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        return f"Edited: {path}"
-    except Exception as e:
-        return f"Error writing file: {e}"
+    # Don't edit yet — UI will show a proposal widget
+    return f"File edit draft prepared. Path: {path}"
 
 
 def _tool_read_file(path: str) -> str:
@@ -1285,27 +1283,29 @@ def _format_size(size: int) -> str:
 
 
 def _tool_convert_file(input_path: str, output_format: str, output_path: str = "") -> str:
-    """Convert a file to a different format. Requires trust level 2."""
+    """Convert a file — returns draft for UI proposal widget."""
     import os
-    import subprocess
-    import shutil
-
     input_path = input_path.strip()
     output_format = output_format.strip().lower().lstrip(".")
     if not input_path:
         return "Error: empty input path."
     if not output_format:
         return "Error: empty output format."
+    expanded = os.path.expanduser(input_path)
+    if not os.path.isfile(expanded):
+        return f"Error: file not found: {expanded}"
+    # Don't convert yet — UI will show a proposal widget
+    return f"Convert draft prepared. {os.path.basename(input_path)} to .{output_format}"
 
-    current = get_effective_trust()
-    if current < 2:
-        _get_pending().append({
-            "type":           "trust_request",
-            "required_level": 2,
-            "command":        f"convert file to {output_format}",
-            "description":    f"Convert '{os.path.basename(input_path)}' to .{output_format}",
-        })
-        return f"[Permission required] 'Automation' trust is needed to convert files."
+
+def _tool_convert_file_execute(input_path: str, output_format: str, output_path: str = "") -> str:
+    """Actually execute file conversion (called from UI after user confirms)."""
+    import os
+    import subprocess
+    import shutil
+
+    input_path = input_path.strip()
+    output_format = output_format.strip().lower().lstrip(".")
 
     input_path = os.path.expanduser(input_path)
     if not os.path.isfile(input_path):
@@ -1631,18 +1631,17 @@ def _convert_ffmpeg(input_path: str, out: str, mode: str) -> str:
 # ── Reminder tools ─────────────────────────────────────────────────────────────
 
 def _tool_set_reminder(label: str, fire_at_iso: str, interval_seconds: int = 0, query: str = "") -> str:
-    from src.services.reminders.reminder_service import add_reminder
-    from datetime import datetime
     label = label.strip()
     fire_at_iso = fire_at_iso.strip()
     if not label or not fire_at_iso:
         return "Error: label and fire_at_iso are required."
+    # Validate datetime but don't create yet — UI will show a proposal widget
+    from datetime import datetime
     try:
-        fire_at = datetime.fromisoformat(fire_at_iso).timestamp()
+        datetime.fromisoformat(fire_at_iso)
     except ValueError as e:
         return f"Error: invalid ISO datetime '{fire_at_iso}': {e}"
-    rid = add_reminder(label, fire_at, int(interval_seconds or 0), query.strip())
-    return f"ok (id:{rid})"
+    return f"Reminder draft prepared. Label: {label}, At: {fire_at_iso}"
 
 
 def _tool_list_reminders() -> str:

@@ -1838,6 +1838,184 @@ def check_fast_regex_actions(query: str):
 
 
 
+# ── Fast-path parsers for tool_draft actions ──────────────────────────────────
+
+def _parse_reminder_from_query(query: str) -> dict:
+    """Extract reminder args from a natural-language query."""
+    from datetime import datetime, timedelta
+    import re as _re
+    ql = query.lower()
+
+    # Extract time offset: "in 5 min", "in 1 hour", "za 10 minut"
+    fire_at = None
+    now = datetime.now()
+
+    # "in X min/hour/sec" or "za X minut/godzin"
+    m = _re.search(r'(?:in|za|after)\s+(\d+)\s*(min|minut|minute|minutes|h|hour|hours|godzin|godziny|sec|second|seconds|sekund)', ql)
+    if m:
+        val = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith(("min", "minut")):
+            fire_at = now + timedelta(minutes=val)
+        elif unit.startswith(("h", "hour", "godzin")):
+            fire_at = now + timedelta(hours=val)
+        elif unit.startswith(("sec", "sekund")):
+            fire_at = now + timedelta(seconds=val)
+
+    # "at 14:30" or "o 14:30"
+    if not fire_at:
+        m = _re.search(r'(?:at|o|@)\s*(\d{1,2})[:\.](\d{2})', ql)
+        if m:
+            h, mn = int(m.group(1)), int(m.group(2))
+            fire_at = now.replace(hour=h, minute=mn, second=0, microsecond=0)
+            if fire_at <= now:
+                fire_at += timedelta(days=1)
+
+    if not fire_at:
+        fire_at = now + timedelta(minutes=5)  # default: 5 min from now
+
+    # Extract label: strip the command/time parts, use the rest
+    label = query
+    for pattern in [
+        r'(?:remind me|set (?:a )?reminder|reminder for|przypomnij (?:mi )?|ustaw przypomnienie)\s*',
+        r'(?:in|za|after)\s+\d+\s*\w+\s*',
+        r'(?:at|o|@)\s*\d{1,2}[:.]\d{2}\s*',
+        r'(?:to|do|that|żeby|aby|by)\s+',
+    ]:
+        label = _re.sub(pattern, '', label, flags=_re.IGNORECASE).strip()
+    if not label:
+        label = "Reminder"
+
+    return {
+        "label": label.capitalize(),
+        "fire_at_iso": fire_at.isoformat(),
+        "interval_seconds": 0,
+        "query": "",
+    }
+
+
+def _parse_event_from_query(query: str) -> dict:
+    """Extract calendar event args from a natural-language query."""
+    from datetime import datetime, timedelta
+    import re as _re
+    ql = query.lower()
+
+    # Strip command prefix
+    title = query
+    for prefix in [
+        r'(?:create|add|schedule|new|book)\s+(?:an?\s+)?(?:event|meeting|spotkanie|wydarzenie)\s*',
+        r'(?:zaplanuj|dodaj)\s+(?:spotkanie|wydarzenie)\s*',
+        r'(?:dodaj do kalendarza)\s*',
+    ]:
+        title = _re.sub(prefix, '', title, flags=_re.IGNORECASE).strip()
+
+    # Try to extract time
+    now = datetime.now()
+    start = None
+
+    # "tomorrow at 15:00"
+    m = _re.search(r'(?:tomorrow|jutro)\s+(?:at|o|@)?\s*(\d{1,2})[:\.](\d{2})', ql)
+    if m:
+        start = (now + timedelta(days=1)).replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+    # "at 15:00" or "o 15:00"
+    if not start:
+        m = _re.search(r'(?:at|o|@)\s*(\d{1,2})[:\.](\d{2})', ql)
+        if m:
+            start = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+            if start <= now:
+                start += timedelta(days=1)
+    if not start:
+        start = now + timedelta(hours=1)
+
+    # Clean title from time references
+    for pat in [r'(?:tomorrow|jutro)\s*', r'(?:at|o|@)\s*\d{1,2}[:.]\d{2}\s*']:
+        title = _re.sub(pat, '', title, flags=_re.IGNORECASE).strip()
+    if not title:
+        title = "New Event"
+
+    return {
+        "title": title.strip().capitalize(),
+        "start_iso": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_minutes": 60,
+        "description": "",
+    }
+
+
+def _parse_create_file_from_query(query: str) -> dict:
+    """Extract create_file args from a natural-language query."""
+    import re as _re
+    ql = query.lower()
+
+    # Extract filename: look for something.ext pattern
+    filename = ""
+    m = _re.search(r'([\w\-]+\.[\w]+)', query)
+    if m:
+        filename = m.group(1)
+
+    # Extract folder from keywords
+    folder = "~/Desktop"
+    folder_map = {
+        "desktop": "~/Desktop", "pulpit": "~/Desktop", "pulpicie": "~/Desktop",
+        "dekstop": "~/Desktop", "dekstopie": "~/Desktop",
+        "downloads": "~/Downloads", "pobrane": "~/Downloads", "pobranych": "~/Downloads",
+        "documents": "~/Documents", "dokumenty": "~/Documents", "dokumentach": "~/Documents",
+    }
+    for kw, path in folder_map.items():
+        if kw in ql:
+            folder = path
+            break
+
+    if not filename:
+        filename = "file.txt"
+
+    return {
+        "filename": filename,
+        "content": "",
+        "folder": folder,
+    }
+
+
+def _parse_compress_from_query(query: str) -> dict:
+    """Extract compress args from a natural-language query."""
+    import re as _re, os
+    paths = []
+    for m in _re.finditer(r'(~?/[\w./ \-]+)', query):
+        p = m.group(1).strip()
+        expanded = os.path.expanduser(p)
+        if os.path.exists(expanded):
+            paths.append(p)
+    if not paths:
+        folder_map = {
+            "desktop": "~/Desktop", "pulpit": "~/Desktop",
+            "downloads": "~/Downloads", "pobrane": "~/Downloads",
+        }
+        for kw, path in folder_map.items():
+            if kw in query.lower():
+                paths.append(path)
+                break
+    if not paths:
+        return {}
+    return {"paths": paths, "output": ""}
+
+
+def _parse_organize_path(query: str) -> str:
+    """Extract folder path from an organize query."""
+    ql = query.lower()
+    folder_map = {
+        "desktop": "~/Desktop", "pulpit": "~/Desktop", "pulpicie": "~/Desktop",
+        "downloads": "~/Downloads", "pobrane": "~/Downloads", "pobranych": "~/Downloads",
+        "documents": "~/Documents", "dokumenty": "~/Documents",
+    }
+    for kw, path in folder_map.items():
+        if kw in ql:
+            return path
+    import re as _re
+    m = _re.search(r'(~?/[\w./ \-]+)', query)
+    if m:
+        return m.group(1).strip()
+    return "~/Desktop"
+
+
 @api_bp.route('/action', methods=['POST'])
 def action_endpoint():
     import uuid
@@ -1933,6 +2111,77 @@ def action_endpoint():
             "to": _to,
             "subject": _subject,
             "body": _body,
+            "original_query": query,
+        }])
+
+    # 1.5c–f Tool keywords: return tool_draft actions immediately (like send_email_draft)
+    _ql = query.lower()
+    _ql_words = set(_ql.split())
+
+    # ── Reminders ──────────────────────────────────────────────────────────
+    if ("remind" in _ql and ("me" in _ql or "in " in _ql or "at " in _ql)) or \
+       "set reminder" in _ql or "reminder for" in _ql or \
+       "przypomnij" in _ql or "przypomnienie" in _ql or "ustaw przypomnienie" in _ql:
+        _rem_args = _parse_reminder_from_query(query)
+        if _rem_args:
+            logging.info(f"Reminder fast-path: {_rem_args}")
+            return _action_resp([{
+                "type": "tool_draft",
+                "tool_name": "set_reminder",
+                "args": _rem_args,
+                "original_query": query,
+            }])
+
+    # ── Calendar events ────────────────────────────────────────────────────
+    if ("create event" in _ql or "add event" in _ql or "add to calendar" in _ql or
+        "schedule meeting" in _ql or "new event" in _ql or "calendar event" in _ql or
+        "create meeting" in _ql or "book a meeting" in _ql or
+        "zaplanuj spotkanie" in _ql or "dodaj wydarzenie" in _ql or "dodaj do kalendarza" in _ql):
+        _ev_args = _parse_event_from_query(query)
+        if _ev_args:
+            logging.info(f"Calendar event fast-path: {_ev_args}")
+            return _action_resp([{
+                "type": "tool_draft",
+                "tool_name": "create_calendar_event",
+                "args": _ev_args,
+                "original_query": query,
+            }])
+
+    # ── Create file ────────────────────────────────────────────────────────
+    if ("create file" in _ql or "make file" in _ql or "write file" in _ql or "save file" in _ql or
+        ("plik" in _ql and _ql_words & {"stworz", "stwórz", "utworz", "utwórz", "zapisz", "napisz", "zrob"})):
+        _cf_args = _parse_create_file_from_query(query)
+        logging.info(f"Create file fast-path: {_cf_args}")
+        return _action_resp([{
+            "type": "tool_draft",
+            "tool_name": "create_file",
+            "args": _cf_args,
+            "original_query": query,
+        }])
+
+    # ── Compress ───────────────────────────────────────────────────────────
+    if (_ql.startswith("zip ") or "compress " in _ql or "archive " in _ql or
+        "skompresuj" in _ql or "spakuj" in _ql or "zapakuj" in _ql):
+        _cmp_args = _parse_compress_from_query(query)
+        if _cmp_args:
+            logging.info(f"Compress fast-path: {_cmp_args}")
+            return _action_resp([{
+                "type": "tool_draft",
+                "tool_name": "compress",
+                "args": _cmp_args,
+                "original_query": query,
+            }])
+
+    # ── Organize folder ───────────────────────────────────────────────────
+    if (("organize" in _ql or "tidy" in _ql or "cleanup" in _ql or "clean up" in _ql or
+         "posprzataj" in _ql or "posprzątaj" in _ql or "uporządkuj" in _ql or "uporzadkuj" in _ql) and
+        any(w in _ql for w in ("folder", "desktop", "downloads", "pulpit", "pobrane", "directory", "folderu"))):
+        _org_path = _parse_organize_path(query)
+        logging.info(f"Organize fast-path: {_org_path}")
+        return _action_resp([{
+            "type": "tool_draft",
+            "tool_name": "organize_folder",
+            "args": {"path": _org_path, "strategy": "smart"},
             "original_query": query,
         }])
 
