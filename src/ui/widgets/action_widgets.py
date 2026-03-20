@@ -5734,9 +5734,28 @@ class SendEmailWidget(QWidget):
         layout.addWidget(self.card)
         self.update_style()
 
-        # Show hint
-        if self._original_query and not body.strip():
-            self.hint_label.setText("Enter to compose with AI")
+        # Auto-compose after a delay — only if the query has enough content
+        # (delay ensures the user has stopped typing before we fire an API call)
+        if self._original_query and not body.strip() and self._query_is_complete(self._original_query):
+            self.hint_label.setText("Composing...")
+            QTimer.singleShot(1500, self.start_compose)
+        else:
+            self.hint_label.setText("Enter to compose with AI" if self._original_query else "")
+
+    @staticmethod
+    def _query_is_complete(query: str) -> bool:
+        """Return True if the query has enough intent to compose a real email draft."""
+        import re as _re
+        # Strip the email command prefix (multilingual)
+        stripped = _re.sub(
+            r'^(?:send|write|compose|wyślij|wyslij|napisz)\s+(?:an?\s+)?(?:e?mail|maila?)\s+',
+            '', query.strip(), flags=_re.IGNORECASE
+        )
+        # Strip recipient name (1-2 words after "to/do/do/oskarowi" etc.)
+        stripped = _re.sub(r'^(?:to|do)\s+\w+(?:\s+\w+)?\s*', '', stripped, flags=_re.IGNORECASE)
+        # What remains should have some meaningful content (≥3 words)
+        words = [w for w in stripped.split() if len(w) > 1]
+        return len(words) >= 3
 
     def start_compose(self):
         """Trigger AI compose — can also be called externally."""
@@ -5783,88 +5802,84 @@ class SendEmailWidget(QWidget):
                 if found_email and not result.get("to"):
                     result["to"] = found_email
 
-                self._compose_result_ready.emit(result)
+                try:
+                    self._compose_result_ready.emit(result)
+                except RuntimeError:
+                    pass  # widget deleted before compose finished
             except Exception as e:
-                self._compose_result_ready.emit({"error": str(e)})
+                try:
+                    self._compose_result_ready.emit({"error": str(e)})
+                except RuntimeError:
+                    pass  # widget deleted before compose finished
 
         threading.Thread(target=_compose, daemon=True).start()
 
     def _ai_compose(self, query, recipient_hint, memory_context=""):
-        """Compose email subject + body via direct API call (non-reasoning Grok, no locks)."""
-        import json, re, logging
+        """Compose email subject + body via direct call to the Omni backend."""
+        import json, re, logging, requests
         result = {}
-
         try:
-            from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID, MAIN_MODEL_XAI_NONREASONING
+            from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID, FAST_MODEL_GROQ
             from src.core import auth as _auth
-
-            # Build context about recipient
-            context_parts = []
-            if recipient_hint:
-                if "@" in recipient_hint:
-                    context_parts.append(f"Recipient email: {recipient_hint}")
-                else:
-                    context_parts.append(f"Recipient name: {recipient_hint}")
-            if memory_context:
-                context_parts.append(f"What I know about this person:\n{memory_context}")
-
-            context_str = "\n".join(context_parts)
 
             compose_prompt = (
                 'You compose emails. Output ONLY valid JSON: {"subject":"...","body":"..."}\n'
                 "Rules:\n"
-                "- Write a specific, relevant subject line that matches the topic\n"
-                "- Body should be natural and personal — use context about the person if available\n"
-                "- Keep it concise (3-5 sentences). Don't use generic filler like 'I hope this finds you well'\n"
-                "- Sign off with just 'Best,' or 'Thanks,' (no [Your Name] placeholder)\n"
-                "- No markdown, no code fences, no extra text outside JSON\n\n"
-                f"{context_str}\n\n"
-                f"User request: {query}"
+                "- Specific subject line matching the topic\n"
+                "- Body: natural and personal, concise (3-5 sentences), no filler phrases\n"
+                "- Sign off with 'Best,' or 'Thanks,' (no [Your Name] placeholder)\n"
+                "- No markdown, no code fences, only the JSON object"
             )
+            context_parts = []
+            if recipient_hint:
+                context_parts.append(f"Recipient name: {recipient_hint}")
+            if memory_context:
+                context_parts.append(f"What I know about this person:\n{memory_context}")
+            user_content = "\n".join(context_parts + [f"Request: {query}"])
 
-            # Direct HTTP call — no locks, no abort events, uses fast non-reasoning model
-            import requests
-            token = _auth.get_access_token()
             headers = {
                 "Content-Type": "application/json",
                 "X-Omni-Secret": OMNI_SECRET,
                 "X-Device-ID": DEVICE_ID,
             }
+            token = _auth.get_access_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
 
-            resp = requests.post(
-                f"{BACKEND_URL}/v1/chat/completions",
-                headers=headers,
-                json={
-                    "model": MAIN_MODEL_XAI_NONREASONING,
-                    "messages": [
-                        {"role": "system", "content": compose_prompt},
-                        {"role": "user", "content": query},
-                    ],
-                    "max_tokens": 400,
-                    "temperature": 0.8,
-                    "stream": False,
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            for attempt in range(2):
+                try:
+                    resp = requests.post(
+                        f"{BACKEND_URL}/v1/chat/completions",
+                        headers=headers,
+                        json={
+                            "model": FAST_MODEL_GROQ,
+                            "messages": [
+                                {"role": "system", "content": compose_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            "max_tokens": 400,
+                            "temperature": 0.8,
+                            "stream": False,
+                        },
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt == 1:
+                        raise
+                    logging.warning(f"[SendEmailWidget] Compose attempt {attempt+1} failed: {e}, retrying...")
 
-            text = (data['choices'][0]['message'].get('content') or "").strip()
+            data = resp.json()
+            text = (data["choices"][0]["message"].get("content") or "").strip()
             logging.info(f"[SendEmailWidget] AI compose raw: {text[:200]}")
 
-            # Strip thinking tags and code fences
             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
             text = re.sub(r'^```(?:json)?\s*', '', text)
             text = re.sub(r'\s*```$', '', text)
-            # Try to extract JSON object if there's extra text around it
-            json_match = re.search(r'\{[^{}]*"subject"[^{}]*"body"[^{}]*\}', text, re.DOTALL)
-            if not json_match:
-                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
             if json_match:
                 text = json_match.group(0)
-
             parsed = json.loads(text)
             if parsed.get("subject"):
                 result["subject"] = parsed["subject"]
@@ -5873,7 +5888,7 @@ class SendEmailWidget(QWidget):
             logging.info(f"[SendEmailWidget] Compose OK: subject='{result.get('subject', '')[:50]}'")
         except Exception as e:
             logging.warning(f"[SendEmailWidget] AI compose failed: {e}")
-
+            result["error"] = str(e)
         return result
 
     def _on_compose_done(self, result):
@@ -5885,12 +5900,13 @@ class SendEmailWidget(QWidget):
         self._compose_done = True
         self.send_btn.setEnabled(True)
 
-        if result.get("error"):
-            logging.warning(f"[SendEmailWidget] Compose error: {result['error']}")
-            self.status_label.setText("Compose failed")
+        if result.get("error") or (not result.get("subject") and not result.get("body")):
+            logging.warning(f"[SendEmailWidget] Compose error: {result.get('error', 'empty result')}")
+            self.status_label.setText("Compose failed — type manually")
             self.status_label.setStyleSheet("color: #F59E0B;")
+            self.status_label.setVisible(True)
             self.body_edit.setPlaceholderText("Type your email...")
-            self.hint_label.setText("")
+            self.hint_label.setText("Enter to send")
         else:
             self.status_label.setText("Draft ready")
             is_dark = self.current_theme == "dark"

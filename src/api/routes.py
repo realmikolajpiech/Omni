@@ -265,7 +265,7 @@ def _parse_fast_action_output(
         "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
         "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
         "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:",
-        "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:"
+        "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:", "MEMORY:"
     ])
     if not has_command:
         # No recognized command — treat the raw text as an answer rather than searching
@@ -422,6 +422,19 @@ def _parse_fast_action_output(
             except Exception as e:
                 logging.error(f"Failed to execute EMAILS tool: {e}")
                 actions.append({"type": "emails", "emails_text": f"Error fetching emails: {e}"})
+
+        elif line.startswith("MEMORY:"):
+            mem_query = line[7:].strip() or query
+            try:
+                from src.services.memory.memvid_store import get_user_memory as _get_mem
+                mem_result = _get_mem(mem_query)
+                if mem_result and mem_result.strip() and "No personal memory" not in mem_result and "No general" not in mem_result:
+                    actions.append({"type": "answer", "text": mem_result.strip()})
+                else:
+                    actions.append({"type": "answer", "text": f"I couldn't find any info about '{mem_query}' in memory."})
+            except Exception as _me:
+                logging.warning(f"MEMORY command failed: {_me}")
+                actions.append({"type": "answer", "text": "Failed to search memory."})
 
         elif line.startswith("ANSWER:"):
             # Capture everything after ANSWER: including subsequent non-command lines
@@ -1167,6 +1180,74 @@ def ask_llm():
         response = process_chat_request(query, history, screenshot_b64, resume_session_id=resume_session_id)
         return jsonify(response)
 
+@api_bp.route('/compose_email', methods=['POST'])
+def compose_email_endpoint():
+    """Compose email subject + body via fast model. Returns JSON {subject, body}."""
+    import re as _re
+    req = request.json or {}
+    query = req.get('query', '').strip()
+    recipient = req.get('recipient', '').strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    compose_prompt = (
+        'You compose emails. Output ONLY valid JSON: {"subject":"...","body":"..."}\n'
+        "Rules:\n"
+        "- Specific subject line matching the topic\n"
+        "- Body: natural, concise (3-5 sentences), no filler phrases like 'I hope this finds you well'\n"
+        "- Sign off with 'Best,' or 'Thanks,' — no [Your Name] placeholder\n"
+        "- No markdown, no code fences, only the JSON object"
+    )
+    user_content = (f"Recipient name: {recipient}\nRequest: {query}" if recipient
+                    else f"Request: {query}")
+    messages = [
+        {"role": "system", "content": compose_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        import requests as _requests
+        from src.core import auth as _auth
+        from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID, FAST_MODEL_GROQ
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Omni-Secret": OMNI_SECRET,
+            "X-Device-ID": DEVICE_ID,
+        }
+        token = _auth.get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        resp = _requests.post(
+            f"{BACKEND_URL}/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": FAST_MODEL_GROQ,
+                "messages": messages,
+                "max_tokens": 400,
+                "temperature": 0.8,
+                "stream": False,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = (data["choices"][0]["message"].get("content") or "").strip()
+        logging.info(f"[/compose_email] raw: {text[:200]}")
+
+        text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
+        text = _re.sub(r'^```(?:json)?\s*', '', text)
+        text = _re.sub(r'\s*```$', '', text)
+        json_match = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if json_match:
+            text = json_match.group(0)
+        parsed = json.loads(text)
+        return jsonify({"subject": parsed.get("subject", ""), "body": parsed.get("body", "")})
+    except Exception as e:
+        logging.error(f"[/compose_email] error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @api_bp.route('/search', methods=['POST'])
 def search_endpoint():
     # Only ensure resources (DB/Embeddings) are loaded, NOT the main LLM
@@ -1833,8 +1914,14 @@ def action_endpoint():
         _to = ""
         _subject = ""
         _body = ""
-        # Try to extract recipient: "send mail to <name> about ..."
-        _to_match = _re.search(r'(?:to|do)\s+(.+?)(?:\s+(?:about|o|regarding|re|w sprawie)\s+|$)', _ql, _re.IGNORECASE)
+        # Try to extract recipient: "send mail to <name> asking/about ..."
+        # Stop before verbs/conjunctions so we don't swallow the intent
+        _to_match = _re.search(
+            r'(?:to|do)\s+(\w+(?:\s+\w+)?)(?=\s+(?:asking|saying|telling|about|regarding|and\b|if\b|that\b|whether\b|to\s+\w|w\s+sprawie|o\s+\w))',
+            _ql, _re.IGNORECASE)
+        if not _to_match:
+            # Fallback: grab 1-2 words after "to"
+            _to_match = _re.search(r'(?:to|do)\s+(\w+(?:\s+\w+)?)', _ql, _re.IGNORECASE)
         if _to_match:
             _to = _to_match.group(1).strip()
         # Try to extract subject: "about <topic>"
@@ -2029,6 +2116,7 @@ Other commands:
 - CALENDAR (show upcoming calendar events — use for queries like "my calendar", "upcoming events", "what meetings do I have")
 - EMAILS (show unread emails — use for queries like "my emails", "unread emails", "check inbox")
 - ORGANIZE:path (organize the specified folder — use for queries like "organize my desktop", "clean up downloads")
+- MEMORY:query — look up personal/contact info stored in memory. Use for ANY question about a specific person's email, phone number, address, or personal details (e.g. "jaki jest mail oskara" → MEMORY:Oskar email, "what is Anna's phone number" → MEMORY:Anna phone number, "email of Tomek" → MEMORY:Tomek email). The query MUST be in English and be a short, clean search phrase (person name + info type). NEVER refuse these.
 """
 
     system_prompt = base_system_prompt.replace(

@@ -351,6 +351,7 @@ INSTALL_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/install_plan"
 FIND_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/find_package"
 PICK_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/pick_package"
 VERIFY_PACKAGE_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/verify_package"
+COMPOSE_EMAIL_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/compose_email"
 
 # Billing (Dodo via Worker)
 CHECKOUT_SESSION_URL = f"{BACKEND_URL}/v1/billing/checkout_session"
