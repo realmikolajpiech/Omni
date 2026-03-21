@@ -3041,12 +3041,12 @@ class PersonActionWidget(QWidget):
         """)
 
         card_layout = QHBoxLayout(self.card)
-        card_layout.setContentsMargins(16, 16, 16, 16)
-        card_layout.setSpacing(28)
+        card_layout.setContentsMargins(12, 12, 12, 12)
+        card_layout.setSpacing(20)
 
         # Avatar - Portrait Style
         self.avatar = QLabel()
-        self.avatar.setFixedSize(110, 150)
+        self.avatar.setFixedSize(90, 120)
         self.avatar.setStyleSheet("""
             background-color: rgba(255, 255, 255, 0.5);
             border-radius: 8px;
@@ -3067,14 +3067,14 @@ class PersonActionWidget(QWidget):
         logging.info(f"[UI] Displaying Person Card: Name='{display_name}', Desc='{description[:50]}...'")
         
         self.name_label = QLabel(display_name)
-        self.name_label.setFont(QFont("Instrument Serif", 32, QFont.Weight.Normal))
+        self.name_label.setFont(QFont("Instrument Serif", 28, QFont.Weight.Normal))
         self.name_label.setStyleSheet("color: #111111;")
         self.name_label.setWordWrap(True)
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         self.desc_label = QLabel(description)
-        self.desc_label.setFont(QFont("Manrope", 14, QFont.Weight.Normal))
-        self.desc_label.setStyleSheet("color: #555555; line-height: 1.5;")
+        self.desc_label.setFont(QFont("Manrope", 13, QFont.Weight.Normal))
+        self.desc_label.setStyleSheet("color: #555555; line-height: 1.4;")
         self.desc_label.setWordWrap(True)
         self.desc_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
@@ -3086,9 +3086,40 @@ class PersonActionWidget(QWidget):
         if not url:
             self.link_label.hide()
 
+        self.hint_badges = []
+        self.hint_labels = []
+
+        self.hints_widget = QWidget()
+        hints_layout = QHBoxLayout(self.hints_widget)
+        hints_layout.setSpacing(12)
+        hints_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        hints_layout.setContentsMargins(0, 0, 0, 4) 
+        
+        def create_key_badge(text):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.hint_badges.append(lbl)
+            return lbl
+        
+        def create_action_label(text):
+            lbl = QLabel(text)
+            lbl.setFont(QFont("Manrope", 10, QFont.Weight.Medium))
+            self.hint_labels.append(lbl)
+            return lbl
+
+        if url and type(self) is PersonActionWidget:
+            hints_layout.addWidget(create_key_badge("⇥ Tab"))
+            hints_layout.addWidget(create_action_label("Open source"))
+
+        if type(self) is PersonActionWidget:
+            info_layout.addWidget(self.hints_widget)
+        else:
+            self.hints_widget.hide()
+
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.desc_label)
-        info_layout.addWidget(self.link_label)
+        if hasattr(self, 'link_label'):
+            self.link_label.hide()
 
         card_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
         card_layout.addLayout(info_layout)
@@ -3188,6 +3219,26 @@ class PersonActionWidget(QWidget):
         else:
             # Maintain transparent bg for image
             self.avatar.setStyleSheet("background-color: transparent;")
+
+        badge_bg = "rgba(255, 255, 255, 0.15)" if is_dark else "rgba(0, 0, 0, 0.15)"
+        badge_text = "#EEEEEE" if is_dark else "#333333"
+        badge_border = "rgba(255, 255, 255, 0.2)" if is_dark else "rgba(0, 0, 0, 0.2)"
+        action_text = "#AAAAAA" if is_dark else "#666666"
+
+        for badge in self.hint_badges:
+            badge.setStyleSheet(f"""
+                background-color: {badge_bg};
+                color: {badge_text};
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+                font-size: 10px;
+                font-weight: bold;
+                border: 1px solid {badge_border};
+            """)
+    
+        for lbl in self.hint_labels:
+            lbl.setStyleSheet(f"color: {action_text};")
 
     def _download_image(self):
         if not self.image_url or self.image_url.startswith("data:"): return

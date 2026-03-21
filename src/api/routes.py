@@ -182,7 +182,13 @@ def _heuristic_classify_search_results(query: str, results: list) -> Optional[di
         place_score = sum(1 for kw in place_signals if kw in combined)
         if place_score >= 2:
             logging.info(f"[HEURISTIC] Place detected (score={place_score}) for '{query}'")
-            return {"type": "place_pending", "name": query.strip()}
+            place_res = get_place_result(query, existing_results=results)
+            if place_res:
+                return place_res
+            else:
+                import urllib.parse
+                url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+                return {"type": "link", "url": url, "title": f"Search {query}", "description": "Web Search"}
 
     # --- Person detection via Knowledge Graph ---
     kg_result = next((r for r in results if r.get('is_knowledge_graph')), None)
@@ -894,6 +900,13 @@ Instructions:
                     # but the model already wrote a good description — use it directly.
                     logging.info(f"[PERSON] get_person_result returned None for '{target_name}', using model description as fallback")
                     actions.append({"type": "person", "name": target_name, "description": person_desc, "url": "", "image": None})
+                else:
+                    # get_person_result failed and the model did not provide a description.
+                    # Fallback to a skeleton Person card instead of Web Search Link so the UI stays consistent
+                    import urllib.parse
+                    logging.info(f"[PERSON] No description and get_person_result failed for '{target_name}', returning skeleton Person card")
+                    url = f"https://www.google.com/search?q={urllib.parse.quote_plus(target_name)}"
+                    actions.append({"type": "person", "name": target_name, "description": "No information retrieved.", "url": url, "image": None})
             
         elif "SEARCH:" in line:
             # If the model explicitly outputs SEARCH:query, it means it couldn't classify it as PERSON/PLACE.
@@ -918,12 +931,30 @@ Instructions:
                                  person_res['description'] = fallback_desc
                      actions.append(person_res)
                      continue # Skip adding the search action if we found a person card
+                 
+            # Fallback: check if it might be a place (only if very short query, to avoid making sentences into places)
+            if len(q_val.split()) <= 3 and not any(a.get('type') == 'place' for a in actions):
+                _heuristic_score = sum(1 for kw in ['capital', 'stolica', 'miasto', 'city', 'town', 'country', 'village', 'region'] if kw in " ".join(r.get('content', '') for r in search_results).lower())
+                # If we have a hint from search results OR no search results (fallback) but it's 1-2 words capitalized
+                if _heuristic_score >= 1 or (not search_results and q_val.istitle()):
+                    place_res = get_place_result(q_val, existing_results=search_results)
+                    if place_res:
+                        logging.info(f"Converted SEARCH action to PLACE card for '{q_val}'")
+                        actions.append(place_res)
+                        continue
 
             actions.append({"type": "link", "url": f"https://www.google.com/search?q={q_val}", "title": f"Search {q_val}", "description": "Web Search"})
 
         elif "PLACE:" in line:
             name = line.split("PLACE:")[1].strip()
-            actions.append({"type": "place_pending", "name": name})
+            place_res = get_place_result(name, existing_results=search_results)
+            if place_res:
+                actions.append(place_res)
+            else:
+                import urllib.parse
+                logging.info(f"[PLACE] get_place_result failed/empty for '{name}', returning skeleton Place card")
+                url = f"https://www.google.com/maps/search/{urllib.parse.quote_plus(name)}"
+                actions.append({"type": "place", "name": name, "description": "Location", "latitude": None, "longitude": None, "url": url})
 
         elif "UNINSTALL:" in line:
             app = line.split("UNINSTALL:")[1].strip()
@@ -1742,21 +1773,7 @@ def check_fast_regex_actions(query: str):
         logging.info(f"Regex shortcut Install: {app}")
         return [{"type": "install", "name": app}]
 
-    # Bare package name not installed — check catalog for a quick match
-    _bare = query.strip().lower()
-    if (len(_bare.split()) <= 2 and
-            not any(c in _bare for c in '.:/\\?') and
-            len(_bare) >= 3 and
-            get_package_metadata(_bare) is not None):
-        _cache = get_app_cache()
-        _installed = (
-            _bare in _cache or
-            any(k.startswith(_bare) for k in _cache) or
-            any(_bare in k for k in _cache)
-        )
-        if not _installed:
-            logging.info(f"Regex shortcut: known app '{_bare}' not installed → suggest install")
-            return [{"type": "install", "name": query.strip()}]
+    # Bare package name implicit install fallback removed because it hijacked natural queries like "Warsaw" or "Python" 
 
     # Implicit Calculation (pure math expression)
     if any(op in query for op in ['+', '-', '*', '/', '^', '%']):
@@ -1796,6 +1813,15 @@ def check_fast_regex_actions(query: str):
         title = url.replace("https://", "").replace("www.", "").split('/')[0]
         logging.info(f"Regex shortcut URL: {url}")
         return [{"type": "link", "url": url, "title": f"Open {title}", "description": "Open Website"}]
+
+    # Explicit Web Search
+    import urllib.parse
+    search_match = re.search(r"^(?:search|szukaj|google|wyszukaj)\s+(.+)$", query, re.IGNORECASE)
+    if search_match:
+        q = search_match.group(1).strip()
+        url = f"https://www.google.com/search?q={urllib.parse.quote_plus(q)}"
+        logging.info(f"Regex shortcut Web Search: {q}")
+        return [{"type": "link", "url": url, "title": f"Search {q}", "description": "Web Search"}]
 
     # Color Preview
     color_match = re.match(r"^(#([a-fA-F0-9]{3}|[a-fA-F0-9]{6}))|rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", query.strip(), re.IGNORECASE)
@@ -2488,7 +2514,7 @@ IMPORTANT — PERSON vs ANSWER:
 - When the query IS a person's name (e.g. "steve jobs", "elon musk", "taylor swift", "napoleon"), ALWAYS use PERSON: — never ANSWER:.
   Example: "steve jobs" → PERSON:Steve Jobs|Steve Jobs (1955–2011) co-founded Apple Inc. and revolutionized personal computing, music, and mobile phones.
   Example: "elon musk" → PERSON:Elon Musk|Elon Musk is a tech entrepreneur, CEO of Tesla and SpaceX, known for advancing electric vehicles and space exploration.
-- ANSWER:text — Use ONLY for questions (who, what, when, where, why, how) where the answer is NOT a single person's profile. Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences).
+- ANSWER:text — Use ONLY for questions (who, what, when, where, why, how) where the answer is NOT a single person's profile. Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences). MUST answer in the same language as the user's query.
 - For well-known factual questions, ALWAYS prefer ANSWER over web_search.
 - If the user asks for system info like "whats my ip", "uptime", ALWAYS use TERMINAL:command.
   Example: "whats my ip" → TERMINAL:curl -s ifconfig.me|Get public IP
@@ -2502,7 +2528,7 @@ Other commands:
 - CURRENCY:amount|from_unit|to_unit|converted_value
 - WEATHER:location|temp|condition
 - UNIT:amount|from_unit|to_unit|converted_value
-- INSTALL:name
+- INSTALL:name (NEVER output INSTALL for cities, countries, people, or proper nouns unless they are strictly software apps like 'spotify', 'chrome').
 - UNINSTALL:name
 - SEARCH:query (only if general topic and NO specific person/place found)
 - COLOR:hex|rgb|hsl
@@ -2697,7 +2723,7 @@ Other commands:
                             _answer_out = _safe_fast_completion(
                                 messages=[
                                     {"role": "system", "content": (
-                                        "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. "
+                                        "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. YOU MUST answer in the same language as the user's query. "
                                         "Output ONLY the answer text, no prefixes, no commands, no markdown."
                                     )},
                                     {"role": "user", "content": query},
@@ -2829,7 +2855,7 @@ Other commands:
                 _answer_out = _safe_fast_completion(
                     messages=[
                         {"role": "system", "content": (
-                            "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. "
+                            "You are a helpful assistant. Answer the user's question concisely in 1-3 sentences. YOU MUST answer in the same language as the user's query. "
                             "Output ONLY the answer text, no prefixes, no commands, no markdown."
                         )},
                         {"role": "user", "content": query},
@@ -2878,7 +2904,7 @@ Other commands:
                 "If the query is a question (who, what, when, where, why, how, is, are, was, were, do, does, did, can, could, will, would, etc.) "
                 "and the search results contain a clear answer, output ANSWER:text with a concise 1-3 sentence answer based on the search results.\n\n"
                 "Output one or more commands, one per line:\n"
-                "- ANSWER:text (for questions that can be answered from search results — concise 1-3 sentences)\n"
+                "- ANSWER:text (for questions that can be answered from search results — concise 1-3 sentences. YOU MUST answer in the same language as the user's query)\n"
                 "- PLACE:Name (for ANY physical location/institution)\n"
                 "- PERSON:Name|Description (Name MUST be the full person name, without suffixes like '| LinkedIn', '- Omni', '@handle'. Description MUST be 1-2 sentences synthesized from the search results: role + organization/school/company/location. NEVER omit the description — if you truly cannot write one, use SEARCH:query instead.)\n"
                 "- OPEN:url (for websites)\n"
@@ -3104,7 +3130,14 @@ def action_pending_endpoint():
             _place_score = sum(1 for kw in _place_signals if kw in _combined)
             if _place_score >= 2:
                 logging.info(f"[ACTION/PENDING] Heuristic: place detected (score={_place_score}) for '{query}', skipping LLM")
-                place_act = {"type": "place_pending", "name": query.strip()}
+                place_res = get_place_result(query, existing_results=tool_results)
+                if place_res:
+                    place_act = place_res
+                else:
+                    import urllib.parse
+                    url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+                    place_act = {"type": "link", "url": url, "title": f"Search {query}", "description": "Web Search"}
+                
                 _pending_actions_pop(pending_id)
                 return jsonify({"actions": [place_act], "action": place_act, "chips": []})
 

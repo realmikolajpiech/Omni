@@ -304,14 +304,14 @@ def perform_web_search(query):
             categories = 'videos'
             search_query = query
 
-        results = search_api(search_query, categories)
+        results = search_api(search_query, categories, fast=True)
 
         if not results and categories == 'map':
             logging.info("Map search returned 0 results. Fallback to GENERAL.")
-            results = search_api(search_query, 'general')
+            results = search_api(search_query, 'general', fast=True)
 
         if not results and categories == 'videos':
-            results = search_api(search_query, 'general')
+            results = search_api(search_query, 'general', fast=True)
 
         if not results:
             logging.warning(f"[PERFORM_SEARCH] NO RESULTS for {query!r} (category={categories!r})")
@@ -568,6 +568,13 @@ def get_place_result(query, existing_results=None):
              map_results = search_api(query, categories='map')
              if map_results:
                  results = map_results
+             
+             # Fallback: if map search gives nothing (often true for broad city names in Serper), try general search
+             if not results:
+                 logging.warning(f"Place search fallback: '{query}' map search failed, trying general")
+                 gen = search_api(query, categories='general')
+                 if gen:
+                     results = gen
 
         if results:
             best = results[0]
@@ -601,6 +608,8 @@ def get_place_result(query, existing_results=None):
                 "phone": best.get('phoneNumber'),
                 "hours": best.get('openingHours')
             }
+        else:
+            logging.warning(f"Place search failed: No results found at all for '{query}'")
     except Exception as e:
-        logging.error(f"Place search error: {e}")
+        logging.error(f"Place search error: {e}", exc_info=True)
     return None

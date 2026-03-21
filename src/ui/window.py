@@ -2630,9 +2630,9 @@ class OmniWindow(QWidget):
                 elif a.get('type') == 'place':
                     # Use PlaceActionWidget for rich place cards (images + map)
                     return PlaceActionWidget(
-                        a['name'], 
-                        a.get('address'), 
-                        a.get('image'), 
+                        a.get('name', ''), 
+                        a.get('address', a.get('description', '')), 
+                        a.get('image', ''), 
                         a.get('url'), 
                         a.get('latitude'), 
                         a.get('longitude'),
@@ -4209,7 +4209,9 @@ class OmniWindow(QWidget):
                             if not act.get('image'):
                                 w.fetch_image_for_name(act['name'])
                         elif act.get('type') == 'place':
-                            w = MapNavigationWidget(act['name'], act.get('address'))
+                            w = PlaceActionWidget(act.get('name', ''), act.get('address', act.get('description', '')), act.get('image', ''), act.get('url', ''), 
+                                                  act.get('latitude'), act.get('longitude'),
+                                                  rating=act.get('rating'), rating_count=act.get('rating_count'), category=act.get('category'), phone=act.get('phone'), hours=act.get('hours'))
                             self.insert_list_item(insert_pos, w, act, animation="pop")
                             insert_pos += 1
                         elif act.get('type') == 'install':
