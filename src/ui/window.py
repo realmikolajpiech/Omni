@@ -1419,14 +1419,14 @@ class OmniWindow(QWidget):
         
         # Geometry Animation
         anim_geo = QPropertyAnimation(self, b"geometry")
-        anim_geo.setDuration(350) # Slightly slower for elegance
+        anim_geo.setDuration(180) # Slightly slower for elegance
         anim_geo.setStartValue(start_geo)
         anim_geo.setEndValue(target_geo)
-        anim_geo.setEasingCurve(QEasingCurve.Type.OutBack) # The "Soul" - subtle pop
+        anim_geo.setEasingCurve(QEasingCurve.Type.OutCubic)
         
         # Opacity Animation
         anim_opa = QPropertyAnimation(self, b"windowOpacity")
-        anim_opa.setDuration(250) # Fade in faster than zoom
+        anim_opa.setDuration(130) # Fade in faster than zoom
         anim_opa.setStartValue(0.0)
         anim_opa.setEndValue(1.0)
         anim_opa.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -1852,30 +1852,29 @@ class OmniWindow(QWidget):
         
         self.anim_close_group = QParallelAnimationGroup()
         
-        # Smooth Zoom and Slide Down
+        # Symmetric zoom-out (mirrors the open animation)
         current_geo = self.geometry()
         center = current_geo.center()
-        
-        target_w = int(current_geo.width() * 0.98)
-        target_h = int(current_geo.height() * 0.98)
+
+        target_w = int(current_geo.width() * 0.92)
+        target_h = int(current_geo.height() * 0.92)
         target_x = center.x() - target_w // 2
-        # Slide down slightly
-        target_y = current_geo.y() + 15
-        
+        target_y = center.y() - target_h // 2
+
         target_geo = QRect(target_x, target_y, target_w, target_h)
-        
+
         anim_geo = QPropertyAnimation(self, b"geometry")
-        anim_geo.setDuration(220) # Slightly slower for smoother look
+        anim_geo.setDuration(180)
         anim_geo.setStartValue(current_geo)
         anim_geo.setEndValue(target_geo)
-        anim_geo.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        
+        anim_geo.setEasingCurve(QEasingCurve.Type.InCubic)
+
         # Opacity
         anim_opa = QPropertyAnimation(self, b"windowOpacity")
-        anim_opa.setDuration(200) # Match geo closely
+        anim_opa.setDuration(130)
         anim_opa.setStartValue(1.0)
         anim_opa.setEndValue(0.0)
-        anim_opa.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        anim_opa.setEasingCurve(QEasingCurve.Type.InCubic)
         
         def on_close_finished():
              self.hide()

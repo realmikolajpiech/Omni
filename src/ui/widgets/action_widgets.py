@@ -3057,7 +3057,7 @@ class PersonActionWidget(QWidget):
         # Info Layout
         info_layout = QVBoxLayout()
         info_layout.setSpacing(8)
-        info_layout.setContentsMargins(0, 6, 0, 6)
+        info_layout.setContentsMargins(0, 6, 0, 0)
 
         display_name = name.replace(" - Wikipedia", "").strip()
         # Ensure title case for display if it looks like a name (not already uppercase/mixed)
@@ -3083,10 +3083,11 @@ class PersonActionWidget(QWidget):
         self.link_label = QLabel(f"SOURCE: {domain}" if url else "")
         self.link_label.setFont(QFont("Manrope", 10, QFont.Weight.Bold))
         self.link_label.setStyleSheet("color: #999999; letter-spacing: 1px;")
+        if not url:
+            self.link_label.hide()
 
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.desc_label)
-        # info_layout.addStretch() # Removed stretch to reduce gap
         info_layout.addWidget(self.link_label)
 
         card_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
@@ -3102,22 +3103,14 @@ class PersonActionWidget(QWidget):
         
         self.nam = QNetworkAccessManager(self)
 
-        # Delayed image search/download
-        # If we have a URL, start download immediately.
-        # If not, we might want to trigger a search (but this widget doesn't have search logic).
-        # The user requested: "only once the card loads... then get it"
-        # We can simulate this by scheduling the download on the next event loop iteration
-        # or just trusting the async nature of QNAM.
-        # BUT, if image_url is missing, we can't download. The backend is supposed to provide it.
-        # If the user means "fetch image from web if missing", that logic belongs in the backend/worker, not UI.
-        # However, to prioritize "showing card first", we can use QTimer.singleShot(0, ...)
-        
         if self.image_url:
-            QTimer.singleShot(100, self._download_image)
+            QTimer.singleShot(500, self._download_image)
 
     def fetch_image_for_name(self, name: str):
         """Async: ask the brain for an image URL for this person, then download it."""
-        body = f'{{"name": "{name}"}}'.encode('utf-8')
+        logging.info(f"[PersonCard] fetch_image_for_name called for '{name}'")
+        import json as _json
+        body = _json.dumps({"name": name}).encode('utf-8')
         req = QNetworkRequest(QUrl("http://127.0.0.1:5555/person_image"))
         req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
         reply = self.nam.post(req, body)
@@ -3129,9 +3122,12 @@ class PersonActionWidget(QWidget):
                 import json as _json
                 data = _json.loads(bytes(reply.readAll()))
                 url = data.get('image_url')
+                logging.info(f"[PersonCard] person_image response: image_url={url!r}")
                 if url:
                     self.image_url = url
                     self._download_image()
+            else:
+                logging.warning(f"[PersonCard] person_image request failed: {reply.errorString()}")
         except Exception as e:
             logging.warning(f"PersonActionWidget image search reply error: {e}")
         finally:
@@ -3252,7 +3248,7 @@ class PersonActionWidget(QWidget):
         w = 600
         if self.layout():
             h = self.layout().heightForWidth(w)
-            if h > 0: return QSize(w, h + 35)
+            if h > 0: return QSize(w, h)
             return self.layout().sizeHint()
         return super().sizeHint()
 

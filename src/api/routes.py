@@ -859,6 +859,11 @@ Instructions:
                              if len(res['name']) < 5 or (llm_name.lower().startswith(res['name'].lower()) and len(llm_name) > len(res['name'])):
                                  res['name'] = llm_name
                     actions.append(res)
+                elif person_desc and len(person_desc) > 10:
+                    # get_person_result returned nothing (no web results / image not found),
+                    # but the model already wrote a good description — use it directly.
+                    logging.info(f"[PERSON] get_person_result returned None for '{target_name}', using model description as fallback")
+                    actions.append({"type": "person", "name": target_name, "description": person_desc, "url": "", "image": None})
             
         elif "SEARCH:" in line:
             # If the model explicitly outputs SEARCH:query, it means it couldn't classify it as PERSON/PLACE.
@@ -955,6 +960,30 @@ Instructions:
 
     chips = []
     logging.info(f"Chips ({len(chips)}): {[c['label'] for c in chips]}")
+
+    # Post-processing: Convert ANSWER to PERSON when query looks like a person name and answer describes a person
+    _question_words = {"who", "what", "when", "where", "why", "how", "which", "whose", "does", "did", "is", "are", "was", "were", "can", "could", "would", "should"}
+    _query_words = query.strip().lower().split()
+    _looks_like_name = (
+        1 <= len(_query_words) <= 4
+        and not any(w in _question_words for w in _query_words)
+        and not any(c in query for c in ['?', '!', '=', '+', '/', '\\', '@', '#'])
+        and all(w.isalpha() or "'" in w or "-" in w for w in _query_words)
+    )
+    if _looks_like_name and not any(a.get('type') == 'person' for a in actions):
+        for a in actions:
+            if a.get('type') == 'answer':
+                answer_text = a.get('text', '')
+                # Heuristic: if the answer text starts with the query name and describes a person (born, founder, etc.)
+                _person_signals = ['born', 'founder', 'co-founder', 'ceo', 'actor', 'musician', 'politician', 'president', 'director', 'scientist', 'author', 'artist', '(19', '(18', '(20']
+                if any(sig in answer_text.lower() for sig in _person_signals):
+                    logging.info(f"[POST] Converting ANSWER to PERSON for name-like query '{query}'")
+                    a['type'] = 'person'
+                    a['name'] = query.title()
+                    a['description'] = answer_text
+                    a['url'] = ''
+                    a['image'] = None
+                    break
 
     # Post-processing: Remove redundant or unwanted actions
     final_actions = []
@@ -1335,11 +1364,15 @@ def person_image_endpoint():
     try:
         from src.services.search.web_search import search_api
         results = search_api(name, categories='images', fast=True)
+        logging.info(f"[person_image] '{name}': got {len(results)} results")
+        if results:
+            logging.info(f"[person_image] first result keys: {list(results[0].keys())}, sample: {results[0]}")
         image_url = None
         for r in results:
             image_url = r.get('img_src') or r.get('thumbnail') or r.get('image')
             if image_url:
                 break
+        logging.info(f"[person_image] '{name}': resolved image_url={image_url!r}")
         return jsonify({"image_url": image_url})
     except Exception as e:
         logging.warning(f"[person_image] Failed for '{name}': {e}")
@@ -2341,13 +2374,16 @@ Every non-think line MUST start with a valid command prefix.
 Never output PERSON with an empty description.
 Never output trailing '|' without text after it.
 
-IMPORTANT — ANSWER command:
-- ANSWER:text — Use this for ANY question you can answer from your knowledge (who, what, when, where, why, how questions). Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences).
-- For well-known factual questions (famous people, companies, science, history, geography), ALWAYS prefer ANSWER over web_search.
+IMPORTANT — PERSON vs ANSWER:
+- When the query IS a person's name (e.g. "steve jobs", "elon musk", "taylor swift", "napoleon"), ALWAYS use PERSON: — never ANSWER:.
+  Example: "steve jobs" → PERSON:Steve Jobs|Steve Jobs (1955–2011) co-founded Apple Inc. and revolutionized personal computing, music, and mobile phones.
+  Example: "elon musk" → PERSON:Elon Musk|Elon Musk is a tech entrepreneur, CEO of Tesla and SpaceX, known for advancing electric vehicles and space exploration.
+- ANSWER:text — Use ONLY for questions (who, what, when, where, why, how) where the answer is NOT a single person's profile. Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences).
+- For well-known factual questions (companies, science, history, geography), ALWAYS prefer ANSWER over web_search.
 - Only use web_search for obscure/unknown/recent facts you genuinely don't know.
 
 Other commands:
-- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED.)
+- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED. Use for ANY direct person name lookup.)
 - PLACE:Name (results confirm location/city/school/institution)
 - OPEN:url (results show specific official website)
 - TRANSLATE:source_text|from_lang|to_lang|translated_text
@@ -2372,7 +2408,8 @@ Other commands:
         "{tool_instruction}",
         "Think first: only call `web_search` if you truly need external, real-world info that you don't know.\n"
         "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
-        "For common factual questions (who founded X, what is Y, when did Z happen), use ANSWER:text directly — do NOT search.\n"
+        "CRITICAL: If the query is a person's name (e.g. 'steve jobs', 'elon musk'), use PERSON:Name|Description — NEVER use ANSWER: for a person name lookup.\n"
+        "For general factual questions (who founded X, what is Y, when did Z happen), use ANSWER:text directly — do NOT search.\n"
         "If you can answer the query from your own knowledge, ALWAYS use ANSWER:text instead of searching."
     )
 
@@ -2501,7 +2538,15 @@ Other commands:
                                 _answer_text = _answer_out['choices'][0]['message']['content'].strip()
                                 _answer_text = re.sub(r'<think>.*?(?:</think>|$)', '', _answer_text, flags=re.DOTALL).strip()
                                 if _answer_text and len(_answer_text) > 5:
-                                    _act = {"type": "answer", "text": _answer_text}
+                                    # Check if this looks like a person name query and convert to person card
+                                    _qw = query.strip().lower().split()
+                                    _qwords = {"who", "what", "when", "where", "why", "how", "which", "does", "did", "is", "are", "was", "were", "can", "could", "would"}
+                                    _person_sigs = ['born', 'founder', 'co-founder', 'ceo', 'actor', 'musician', 'politician', 'president', 'director', 'scientist', 'author', 'artist', '(19', '(18', '(20']
+                                    _is_name_q = (1 <= len(_qw) <= 4 and not any(w in _qwords for w in _qw) and all(w.isalpha() or "'" in w or "-" in w for w in _qw))
+                                    if _is_name_q and any(sig in _answer_text.lower() for sig in _person_sigs):
+                                        _act = {"type": "person", "name": query.title(), "description": _answer_text, "url": "", "image": None}
+                                    else:
+                                        _act = {"type": "answer", "text": _answer_text}
                                     yield f'data: {json.dumps({"event": "done", "actions": [_act], "action": _act, "chips": []})}\n\n'
                                     return
 
