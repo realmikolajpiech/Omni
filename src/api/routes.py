@@ -53,7 +53,7 @@ def _pending_actions_get(pending_id: str) -> Optional[dict]:
         return _PENDING_ACTIONS.get(pending_id)
 
 
-def _llm_person_description(name: str, context: str, safe_fast_completion) -> Optional[tuple[str, str]]:
+def _llm_person_description(name: str, context: str, safe_fast_completion) -> Optional[tuple[Optional[str], str]]:
     """Ask the fast model to write a person description from search context.
     Returns (name, description), or None on failure."""
 
@@ -67,33 +67,34 @@ def _llm_person_description(name: str, context: str, safe_fast_completion) -> Op
     user_content = f"Search Context for '{name}':\n{context}\n\nGenerate the Person Card now. You must always write both NAME and DESCRIPTION lines:"
 
     def _parse_card_text(text):
+        """Parse NAME/DESCRIPTION card text. Returns (name_or_none, desc) tuple, or None."""
         if not text: return None
         # Handle cases where model adds markdown or preamble
         text = text.replace("```", "").replace("**", "")
-        
+
         name_found = None
         desc_found = None
-        
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line: continue
-            if line.upper().startswith("NAME:"):
-                name_found = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("DESCRIPTION:"):
-                desc_found = line.split(":", 1)[1].strip()
-        
+
+        for card_line in text.split("\n"):
+            card_line = card_line.strip()
+            if not card_line: continue
+            if card_line.upper().startswith("NAME:"):
+                name_found = card_line.split(":", 1)[1].strip()
+            elif card_line.upper().startswith("DESCRIPTION:"):
+                desc_found = card_line.split(":", 1)[1].strip()
+
         if desc_found:
             return name_found, desc_found
-            
+
         # Fallback: if no strict format, take the longest line that isn't the name
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        if not lines: return None
-        
+        all_lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if not all_lines: return None
+
         # If model just outputted the description without tags
-        longest = max(lines, key=len)
+        longest = max(all_lines, key=len)
         if len(longest) > 20 and "NAME:" not in longest.upper():
-            return None, longest
-            
+            return name_found, longest  # name_found may be None — caller handles this
+
         return None
 
     # Try Fast Model (with retry)
@@ -112,8 +113,10 @@ def _llm_person_description(name: str, context: str, safe_fast_completion) -> Op
                 card_text = out['choices'][0]['message']['content'].strip()
                 if card_text:
                     logging.info(f"[DEBUG] Fast Model person desc output (try {i+1}):\n{card_text}")
-                    parsed_name, parsed_desc = _parse_card_text(card_text)
-                    if parsed_desc: return parsed_name, parsed_desc
+                    _parsed = _parse_card_text(card_text)
+                    if _parsed is not None:
+                        parsed_name, parsed_desc = _parsed
+                        if parsed_desc: return parsed_name, parsed_desc
                 else:
                     logging.warning(f"[DEBUG] Fast Model returned empty text (try {i+1})")
         except Exception as e:
@@ -1125,7 +1128,7 @@ def ask_llm():
     try: req = request.get_json(force=True)
     except: return jsonify({"answer": "Error: Bad JSON"}), 400
 
-    query = req.get('query', ' '.strip())
+    query = req.get('query', '').strip()
     history = req.get('history', [])
     screenshot_b64 = req.get('screenshot')
     resume_session_id = req.get('resume_session_id')
@@ -1296,7 +1299,7 @@ def search_endpoint():
         results = []
         try:
             # Check if table exists before opening
-            if "files" not in model_manager.db_conn.table_names():
+            if "files" not in model_manager.db_conn.list_tables():
                 # logging.warning("Search endpoint: 'files' table not found (indexer may not have run yet).")
                 return jsonify({"results": []})
 
@@ -1386,7 +1389,6 @@ def _chip_site_name(url: str) -> str:
         "youtube": "YouTube",
         "youtu": "YouTube",
         "duckduckgo": "DuckDuckGo",
-        "google": "Google",
         "google": "Google",
         "github": "GitHub",
         "reddit": "Reddit",
@@ -2546,6 +2548,8 @@ Other commands:
     try:
         logging.info(f"Starting Fast Model inference for: '{query}' (request_id: {request_id})")
         start_t = time.time()
+        llm1_ms = 0.0
+        serper_ms = 0.0
 
         out = _safe_fast_completion(
             messages=messages, max_tokens=256, temperature=0.0,
