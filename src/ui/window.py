@@ -2910,9 +2910,19 @@ class OmniWindow(QWidget):
                         anim_w = SmoothEntryWidget(widget, animate=True)
                         self.list_widget.setItemWidget(new_item, anim_w)
 
-            # Always select the first item if there's a selection available
+            # Always select the first item if there's a selection available.
+            # NOTE: setCurrentRow(0) triggers scrollTo() internally in PyQt6, which
+            # causes the list to jump/scroll when fast actions arrive. Instead we
+            # select the item directly via the selection model — no scroll side-effect.
             if self.list_widget.count() > 0:
-                self.list_widget.setCurrentRow(0)
+                first_item = self.list_widget.item(0)
+                if first_item:
+                    from PyQt6.QtCore import QItemSelectionModel as _QISModel
+                    idx = self.list_widget.indexFromItem(first_item)
+                    self.list_widget.selectionModel().setCurrentIndex(
+                        idx,
+                        _QISModel.SelectionFlag.ClearAndSelect
+                    )
                 
         finally:
             self.list_widget.blockSignals(False)
