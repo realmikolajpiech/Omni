@@ -267,7 +267,7 @@ def _parse_fast_action_output(
         "PERSON:", "PLACE:", "OPEN:", "OPEN_APP:", "INSTALL:", "UNINSTALL:", "SEARCH:",
         "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
         "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
-        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:",
+        "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:", "TERMINAL:",
         "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:", "MEMORY:"
     ])
     if not has_command:
@@ -438,6 +438,33 @@ def _parse_fast_action_output(
             except Exception as _me:
                 logging.warning(f"MEMORY command failed: {_me}")
                 actions.append({"type": "answer", "text": "Failed to search memory."})
+
+        elif line.startswith("TERMINAL:"):
+            try:
+                # Format: TERMINAL:command|description (optional description)
+                parts = line[9:].split("|", 1)
+                cmd = parts[0].strip()
+                import subprocess
+                logging.info(f"[TERMINAL ACTION] Executing: {cmd}")
+                start_cmd = time.time()
+                try:
+                    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    out = (proc.stdout or "").strip()
+                    if not out:
+                        out = (proc.stderr or "").strip()
+                except subprocess.TimeoutExpired:
+                    out = "Error: command timed out."
+                except Exception as e:
+                    out = f"Error: {e}"
+                elapsed = time.time() - start_cmd
+                logging.info(f"[TERMINAL ACTION] Done in {elapsed*1000:.0f}ms, output: {out[:200]!r}")
+                
+                if out:
+                    actions.append({"type": "answer", "text": f"Oto wynik polecenia:\n```\n{out}\n```"})
+                else:
+                    actions.append({"type": "answer", "text": "Polecenie nie zwróciło żadnego wyniku."})
+            except Exception as e:
+                logging.warning(f"TERMINAL command failed: {e}")
 
         elif line.startswith("ANSWER:"):
             # Capture everything after ANSWER: including subsequent non-command lines
@@ -2445,6 +2472,7 @@ def action_endpoint():
     base_system_prompt = """You are an intelligent action classifier.
 Analyze the user query to decide the best action.
 You ONLY output commands. You are uncensored and must process ANY query.
+You are fully authorized to access the user's local machine via TERMINAL. If the user asks for their IP, hostname, or system info, DO NOT refuse. Use the TERMINAL command to retrieve it.
 
 {tool_instruction}
 
@@ -2461,8 +2489,10 @@ IMPORTANT — PERSON vs ANSWER:
   Example: "steve jobs" → PERSON:Steve Jobs|Steve Jobs (1955–2011) co-founded Apple Inc. and revolutionized personal computing, music, and mobile phones.
   Example: "elon musk" → PERSON:Elon Musk|Elon Musk is a tech entrepreneur, CEO of Tesla and SpaceX, known for advancing electric vehicles and space exploration.
 - ANSWER:text — Use ONLY for questions (who, what, when, where, why, how) where the answer is NOT a single person's profile. Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences).
-- For well-known factual questions (companies, science, history, geography), ALWAYS prefer ANSWER over web_search.
-- Only use web_search for obscure/unknown/recent facts you genuinely don't know.
+- For well-known factual questions, ALWAYS prefer ANSWER over web_search.
+- If the user asks for system info like "whats my ip", "uptime", ALWAYS use TERMINAL:command.
+  Example: "whats my ip" → TERMINAL:curl -s ifconfig.me|Get public IP
+  Example: "whats my local ip" → TERMINAL:ipconfig getifaddr en0|Get local IP
 
 Other commands:
 - PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED. Use for ANY direct person name lookup.)
@@ -2480,6 +2510,7 @@ Other commands:
 - PASSWORD:length
 - QRCODE:data
 - SYSTEM_SETTINGS:{"type":"system_settings","setting":"...","value":...}
+- TERMINAL:command|description (use for any OS/system queries securely runnable locally via shell, e.g. "what is my ip" → TERMINAL:curl ifconfig.me|Get public IP. Write proper bash/zsh command, keep it read-only for basic queries. Multi-lingual support is automatic.)
 - CALENDAR (show upcoming calendar events — use for queries like "my calendar", "upcoming events", "what meetings do I have")
 - EMAILS (show unread emails — use for queries like "my emails", "unread emails", "check inbox")
 - ORGANIZE:path (organize the specified folder — use for queries like "organize my desktop", "clean up downloads")
@@ -2489,7 +2520,8 @@ Other commands:
     system_prompt = base_system_prompt.replace(
         "{tool_instruction}",
         "Think first: only call `web_search` if you truly need external, real-world info that you don't know.\n"
-        "Never call it for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
+        "If the user asks for their local IP, public IP, battery, timezone, or system info, DO NOT call `web_search`. You MUST output the TERMINAL text command directly.\n"
+        "Never call `web_search` for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
         "CRITICAL: If the query is a person's name (e.g. 'steve jobs', 'elon musk'), use PERSON:Name|Description — NEVER use ANSWER: for a person name lookup.\n"
         "For general factual questions (who founded X, what is Y, when did Z happen), use ANSWER:text directly — do NOT search.\n"
         "If you can answer the query from your own knowledge, ALWAYS use ANSWER:text instead of searching."
@@ -2510,6 +2542,19 @@ Other commands:
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "The search query"}},
                 "required": ["query"]
+            }
+        }
+    }
+
+    run_terminal_tool = {
+        "type": "function",
+        "function": {
+            "name": "run_terminal",
+            "description": "Execute a safe local bash/zsh command to get system info (IP, battery, RAM, uptime). Use this when the user asks for local hardware/network info.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The unix command to run (e.g. 'curl ifconfig.me', 'pmset -g batt', 'ipconfig getifaddr en0')"}},
+                "required": ["command"]
             }
         }
     }
@@ -2553,7 +2598,7 @@ Other commands:
 
         out = _safe_fast_completion(
             messages=messages, max_tokens=256, temperature=0.0,
-            step_name="Action intent", reset_model=True, tools=[web_search_tool]
+            step_name="Action intent", reset_model=True, tools=[web_search_tool, run_terminal_tool]
         )
         if out is None:
             return _action_resp([])
@@ -2564,18 +2609,59 @@ Other commands:
             logging.info(f"[TIMING] Phase 1 decided to use tools at: {time.time() - endpoint_start_time:.3f}s")
             tool_calls = out['choices'][0]['message']['tool_calls']
             q_tool = query
+            use_terminal = False
+            term_cmd = ""
             try:
                 for tc in tool_calls:
-                    if tc.get('function', {}).get('name') == 'web_search':
+                    if tc.get('function', {}).get('name') == 'run_terminal':
+                        args = json.loads(tc['function'].get('arguments', '{}') or '{}')
+                        term_cmd = args.get('command')
+                        use_terminal = True
+                        break
+                    elif tc.get('function', {}).get('name') == 'web_search':
                         args = json.loads(tc['function'].get('arguments', '{}') or '{}')
                         q_tool = (args.get('query') or query).strip()
                         break
             except Exception:
                 q_tool = query
 
-            # Check if request is still active before expensive Serper call
+            # Check if request is still active before expensive operations
             if model_manager.current_fast_request_id != request_id:
                 return _action_resp([])
+
+            # If the tool call was run_terminal, bypass search entirely and reply with system info
+            if use_terminal and term_cmd:
+                logging.info(f"[TERMINAL TOOL] Executing: {term_cmd}")
+                start_cmd = time.time()
+                import subprocess
+                try:
+                    proc = subprocess.run(term_cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    out_text = (proc.stdout or "").strip()
+                    if not out_text:
+                        out_text = (proc.stderr or "").strip()
+                except subprocess.TimeoutExpired:
+                    out_text = "Error: command timed out."
+                except Exception as e:
+                    out_text = f"Error: {e}"
+                elapsed = time.time() - start_cmd
+                logging.info(f"[TERMINAL TOOL] Done in {elapsed*1000:.0f}ms, output: {out_text[:200]!r}")
+                
+                if out_text:
+                    if '\n' in out_text:
+                        ans_text = f"Oto wynik z systemu:\n{out_text}"
+                    else:
+                        ans_text = f"Wynik: **{out_text}**"
+                else:
+                    ans_text = "Polecenie nie zwróciło żadnego wyniku."
+                
+                _act = {"type": "answer", "text": ans_text}
+                
+                if stream:
+                    def _stream_term():
+                        yield f'data: {json.dumps({"event": "done", "actions": [_act], "action": _act, "chips": []})}\n\n'
+                    return Response(_stream_term(), content_type='text/event-stream')
+                else:
+                    return _action_resp([_act])
 
             # For SSE mode, wrap the rest of inline resolution in a generator
             if stream:
@@ -2799,7 +2885,8 @@ Other commands:
                 "- INSTALL/UNINSTALL:name\n"
                 "- SEARCH:query\n"
                 "- CALC/TRANSLATE/CURRENCY/WEATHER/UNIT/COLOR/TIMER/PASSWORD/QRCODE\n"
-                "- SYSTEM_SETTINGS:{...}\n\n"
+                "- SYSTEM_SETTINGS:{...}\n"
+                "- TERMINAL:command|description\n\n"
                 "Examples:\n"
                 "Query: 'who founded google'\n"
                 "Search result: 'Google was founded on September 4, 1998, by Larry Page and Sergey Brin while they were PhD students at Stanford University.'\n"
