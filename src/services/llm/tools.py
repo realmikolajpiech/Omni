@@ -704,6 +704,7 @@ def execute_tool(name: str, arguments: dict) -> str:
 DRAFT_TOOLS = {
     "set_reminder", "create_calendar_event", "create_file",
     "edit_file", "compress", "convert_file", "organize_folder",
+    "run_terminal",
 }
 
 
@@ -791,6 +792,21 @@ def execute_tool_draft(name: str, arguments: dict) -> str:
                 arguments.get("path", "").strip(),
                 arguments.get("strategy", "smart"),
             )
+
+        elif name == "run_terminal":
+            import subprocess
+            cmd = arguments.get("command", "").strip()
+            if not cmd:
+                return "Error: no command provided"
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=30
+            )
+            output = (result.stdout or "").strip()
+            err = (result.stderr or "").strip()
+            if result.returncode == 0:
+                return f"Done: {output}" if output else "Done"
+            else:
+                return f"Error: {err or output or 'command failed'}"
 
         else:
             return f"Error: unknown draft tool '{name}'"

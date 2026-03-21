@@ -6104,7 +6104,10 @@ def _tool_draft_description(tool_name: str, args: dict) -> str:
     if tool_name == "create_file":
         fn = args.get("filename", "")
         folder = args.get("folder", "~/Desktop")
-        return f'{fn} in {folder}'
+        # Show a clean human-readable path: "notes.txt  →  Desktop"
+        folder_display = folder.replace("~/", "").replace("~", "Home")
+        folder_display = folder_display.split("/")[-1] if "/" in folder_display else folder_display
+        return f'{fn}  →  {folder_display}'
     if tool_name == "edit_file":
         path = args.get("path", "")
         return os.path.basename(path) if path else "file"
@@ -6193,17 +6196,22 @@ class ToolDraftWidget(QWidget):
         self.detail_label = QLabel(detail)
         self.detail_label.setFont(QFont("Manrope", 10))
         self.detail_label.setWordWrap(True)
-        self.detail_label.setMaximumHeight(60)
-        if detail:
-            card_layout.addWidget(self.detail_label)
-        else:
+        self.detail_label.setMaximumHeight(100)
+        # Always add to layout — visibility toggled dynamically
+        card_layout.addWidget(self.detail_label)
+        if not detail:
             self.detail_label.setVisible(False)
 
-        # Bottom row: execute button
+        # Bottom row: hint label + execute button (side by side)
         btn_row = QWidget()
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(8)
+
+        self.hint_label = QLabel("")
+        self.hint_label.setFont(QFont("Manrope", 9))
+        self.hint_label.setObjectName("ToolDraftHint")
+        btn_layout.addWidget(self.hint_label)
         btn_layout.addStretch()
 
         self.exec_btn = QPushButton(meta["btn"])
@@ -6219,29 +6227,115 @@ class ToolDraftWidget(QWidget):
         layout.addWidget(self.card)
         self.update_style()
 
-        # Connect compose signal (compose starts on explicit user action, not on init)
+        # Connect compose signal
         self._compose_done.connect(self._on_compose_done)
-        self._needs_compose = (tool_name == "create_file" and not args.get("content") and bool(original_query))
+        self._needs_compose = False
+
+        # Auto-start compose for create_file — delayed so rapid typing
+        # doesn't spawn a thread per keystroke (widget may be deleted before timeout)
+        if tool_name == "create_file" and not args.get("content") and bool(original_query):
+            QTimer.singleShot(350, self._maybe_start_compose)
+
+    def _maybe_start_compose(self):
+        """Start compose only if widget still exists and wasn't cancelled."""
+        if self._cancelled:
+            return
+        try:
+            # Check widget is still valid
+            _ = self._tool_name
+        except RuntimeError:
+            return
+        self._start_compose(self._original_query)
 
     def _start_compose(self, query: str):
-        """Use fast model to generate file content from the user's query."""
+        """Use fast model to generate a short description of what the file will contain."""
         import threading
+        if self._cancelled:
+            return
         self._composing = True
+        self._description_ready = False
         self.exec_btn.setEnabled(False)
-        self.detail_label.setText("Generating content\u2026")
-        self.detail_label.setVisible(True)
+        self.hint_label.setText("Thinking\u2026")
+        is_dark_hint = self.current_theme == "dark"
+        self.hint_label.setStyleSheet(f"color: {'#60A5FA' if is_dark_hint else '#2563EB'}; background: transparent;")
 
         def _run():
             try:
-                import json, re, requests, logging
+                import re, requests, logging
+                from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID, FAST_MODEL_GROQ
+                from src.core import auth as _auth
+
+                if self._cancelled:
+                    return
+
+                filename = self._args.get("filename", "file.txt")
+                sys_prompt = (
+                    f"Describe in ONE short sentence what the file '{filename}' will contain, "
+                    "based on the user's request. Be specific and concise \u2014 mention key details like "
+                    "format, count, sorting etc. Output ONLY the description sentence, nothing else."
+                )
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-Omni-Secret": OMNI_SECRET,
+                    "X-Device-ID": DEVICE_ID,
+                }
+                token = _auth.get_access_token()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+
+                resp = requests.post(
+                    f"{BACKEND_URL}/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": FAST_MODEL_GROQ,
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": query},
+                        ],
+                        "max_tokens": 80,
+                        "temperature": 0.2,
+                    },
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                description = resp.json()["choices"][0]["message"]["content"].strip()
+                description = description.strip('"\'')
+                if not self._cancelled:
+                    self._compose_done.emit(description)
+            except RuntimeError:
+                pass  # widget was deleted — ignore silently
+            except Exception as e:
+                import logging
+                logging.warning(f"[ToolDraft] description error: {e}")
+                if not self._cancelled:
+                    try:
+                        self._compose_done.emit("")
+                    except RuntimeError:
+                        pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _generate_content(self, query: str):
+        """Generate actual file content, then trigger execution."""
+        import threading
+        self.exec_btn.setEnabled(False)
+        self.exec_btn.setText("Creating\u2026")
+        self.hint_label.setText("")
+
+        def _run():
+            try:
+                import re, requests, logging
                 from src.core.config import BACKEND_URL, OMNI_SECRET, DEVICE_ID, FAST_MODEL_GROQ
                 from src.core import auth as _auth
 
                 filename = self._args.get("filename", "file.txt")
                 sys_prompt = (
-                    f"Generate the content for a file named '{filename}'. "
+                    f"Generate the content for a file named '{filename}' based on the user's request. "
                     "Output ONLY the raw file content — no markdown fences, no explanation, no preamble. "
-                    "Just the exact text that should go inside the file."
+                    "Just the exact text that should go inside the file. "
+                    "Make the content genuinely useful and relevant to what the user asked for. "
+                    "Match the format to the file type: proper CSV for .csv files, "
+                    "clean markdown for .md, natural prose for .txt, etc."
                 )
                 headers = {
                     "Content-Type": "application/json",
@@ -6264,37 +6358,50 @@ class ToolDraftWidget(QWidget):
                         "max_tokens": 4096,
                         "temperature": 0.3,
                     },
-                    timeout=15,
+                    timeout=30,
                 )
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"].strip()
                 # Strip markdown code fences if model added them
                 content = re.sub(r'^```[\w]*\n?', '', content)
                 content = re.sub(r'\n?```$', '', content)
-                self._compose_done.emit(content)
+                self._args["content"] = content
+                self._executed = True
+                self.execute_requested.emit(self._tool_name, self._args)
             except Exception as e:
-                logging.error(f"[ToolDraft] compose error: {e}")
-                self._compose_done.emit("")  # empty = let user execute with no content
+                logging.error(f"[ToolDraft] content generation error: {e}")
+                # Fall back to empty content
+                self._args["content"] = ""
+                self._executed = True
+                self.execute_requested.emit(self._tool_name, self._args)
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _on_compose_done(self, content: str):
+    def _on_compose_done(self, description: str):
+        """Called when the short description is ready — show it in detail_label."""
         self._composing = False
-        if content:
-            self._args["content"] = content
-            preview = content if len(content) <= 120 else content[:117] + "\u2026"
-            self.detail_label.setText(preview)
+        self._description_ready = True
+        is_dark = self.current_theme == "dark"
+        if description:
+            self.detail_label.setText(description)
             self.detail_label.setVisible(True)
+            self.hint_label.setText("Press Enter to create")
+            self.hint_label.setStyleSheet(f"color: {'#6B7280' if is_dark else '#9CA3AF'}; background: transparent;")
         else:
-            self.detail_label.setText("")
             self.detail_label.setVisible(False)
-        # If compose was triggered by clicking Execute, proceed to execute now
+            self.hint_label.setText("")
+        # Trigger parent layout update
+        self.updateGeometry()
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'adjust_window_height'):
+                parent.adjust_window_height()
+                break
+            parent = parent.parent()
+        # If user already clicked Create while we were generating the description, proceed now
         if getattr(self, '_execute_after_compose', False):
             self._execute_after_compose = False
-            self._executed = True
-            self.exec_btn.setEnabled(False)
-            self.exec_btn.setText("Running\u2026")
-            self.execute_requested.emit(self._tool_name, self._args)
+            self._generate_content(self._original_query)
         else:
             self.exec_btn.setEnabled(True)
 
@@ -6322,18 +6429,22 @@ class ToolDraftWidget(QWidget):
         return ""
 
     def _on_execute(self):
-        if self._executed or self._composing:
+        if self._executed:
             return
-        # If content needs to be generated first, start compose and execute after
-        if self._needs_compose:
-            self._needs_compose = False
+        # If still generating description, wait and proceed after it's done
+        if self._composing:
             self._execute_after_compose = True
-            self._start_compose(self._original_query)
+            self.exec_btn.setText("Waiting\u2026")
             return
         self._executed = True
         self.exec_btn.setEnabled(False)
-        self.exec_btn.setText("Running\u2026")
-        self.execute_requested.emit(self._tool_name, self._args)
+        self.hint_label.setText("")
+        # For create_file: generate content now (description was already shown)
+        if self._tool_name == "create_file" and not self._args.get("content") and self._original_query:
+            self._generate_content(self._original_query)
+        else:
+            self.exec_btn.setText("Running\u2026")
+            self.execute_requested.emit(self._tool_name, self._args)
 
     def show_result(self, text: str, success: bool = True):
         """Called after execution to show the result."""
@@ -6343,9 +6454,33 @@ class ToolDraftWidget(QWidget):
         color = "#34D399" if success else "#F87171"
         self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
         self.exec_btn.setText("Done" if success else "Failed")
+        # Clear the hint label
+        if hasattr(self, 'hint_label'):
+            self.hint_label.setText("")
         if text:
-            self.detail_label.setText(text[:200])
+            # For create_file success, show a clean "Saved to <folder>" message
+            import os as _os
+            if self._tool_name == "create_file" and success and text.startswith("Created:"):
+                file_path = text[len("Created:"):].strip()
+                folder = _os.path.dirname(file_path)
+                # Get a friendly folder name
+                home = _os.path.expanduser("~")
+                if folder == _os.path.join(home, "Desktop"):
+                    folder_name = "Desktop"
+                elif folder == _os.path.join(home, "Downloads"):
+                    folder_name = "Downloads"
+                elif folder == _os.path.join(home, "Documents"):
+                    folder_name = "Documents"
+                elif folder.startswith(home):
+                    folder_name = folder[len(home):].lstrip("/") or "Home"
+                else:
+                    folder_name = _os.path.basename(folder) or folder
+                display = f"Saved to {folder_name}"
+            else:
+                display = text[:200]
+            self.detail_label.setText(display)
             self.detail_label.setVisible(True)
+
 
     def set_theme(self, theme):
         self.current_theme = theme
@@ -6371,7 +6506,12 @@ class ToolDraftWidget(QWidget):
         self.icon_label.setStyleSheet(f"background: transparent; color: {text_sec}; font-size: 14px;")
         self.action_label.setStyleSheet(f"color: {text_sec}; letter-spacing: 0.5px; background: transparent;")
         self.desc_label.setStyleSheet(f"color: {text_color}; background: transparent;")
-        self.detail_label.setStyleSheet(f"color: {text_sec}; background: transparent; font-size: 10px;")
+        self.detail_label.setStyleSheet(
+            f"color: {text_sec}; background: transparent; font-size: 10px; "
+            f"font-family: 'Manrope', sans-serif; line-height: 1.4;"
+        )
+        if hasattr(self, 'hint_label'):
+            self.hint_label.setStyleSheet(f"color: {text_sec}; background: transparent;")
         self.exec_btn.setStyleSheet(
             f"QPushButton#ToolDraftBtn {{ "
             f"  background: {btn_bg}; color: white; border: none; "
@@ -6382,5 +6522,10 @@ class ToolDraftWidget(QWidget):
         )
 
     def sizeHint(self):
-        return QSize(660, 120)
+        # Dynamic height based on content
+        base = 140
+        if hasattr(self, 'detail_label') and self.detail_label.isVisible():
+            lines = self.detail_label.text().count('\n') + 1
+            base += min(lines, 4) * 18
+        return QSize(660, base)
 

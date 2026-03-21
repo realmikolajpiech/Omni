@@ -1975,13 +1975,15 @@ def _parse_event_from_query(query: str) -> dict:
 
 
 def _parse_create_file_from_query(query: str) -> dict:
-    """Extract create_file args from a natural-language query."""
+    """Extract create_file args from a natural-language query.
+    Uses a fast heuristic to generate a sensible filename from keywords.
+    """
     import re as _re
     ql = query.lower()
 
-    # Extract filename: look for something.ext pattern
+    # Extract explicit filename: look for something.ext pattern
     filename = ""
-    m = _re.search(r'([\w\-]+\.[\w]+)', query)
+    m = _re.search(r'([\w\-]+\.[\w]{1,10})', query)
     if m:
         filename = m.group(1)
 
@@ -1998,8 +2000,46 @@ def _parse_create_file_from_query(query: str) -> dict:
             folder = path
             break
 
+    # If no explicit filename, derive one from query keywords
     if not filename:
-        filename = "file.txt"
+        # Guess extension based on content hints
+        ext = ".txt"
+        if any(w in ql for w in ["csv", "tabela", "table", "excel", "arkusz", "spreadsheet",
+                                   "kolumn", "column", "data", "dane", "baza", "database"]):
+            ext = ".csv"
+        elif any(w in ql for w in ["markdown", ".md", "readme", "dokumentacja", "documentation"]):
+            ext = ".md"
+        elif any(w in ql for w in ["json", "config", "konfiguracja", "settings", "ustawienia"]):
+            ext = ".json"
+        elif any(w in ql for w in ["html", "webpage", "strona", "website"]):
+            ext = ".html"
+        elif any(w in ql for w in ["python", "skrypt", "script", ".py", "kod", "code"]):
+            ext = ".py"
+        elif any(w in ql for w in ["log", "dziennik", "journal", "diary", "pamiętnik"]):
+            ext = ".log"
+
+        # Extract meaningful words for the filename stem (skip Polish/English stop words)
+        stop = {
+            "a", "an", "the", "in", "on", "at", "to", "of", "for", "with", "and",
+            "or", "by", "from", "that", "this", "is", "are", "was", "be", "do",
+            "plik", "file", "stworz", "create", "stwórz", "utwórz", "nowy", "nowe",
+            "new", "na", "ze", "z", "w", "i", "o", "do", "po", "za", "jak", "jakis",
+            "jakieś", "który", "która", "które", "który", "make", "me", "my", "please",
+            "mi", "proszę", "pulpit", "desktop", "dokumenty", "documents", "pobrane",
+            "downloads", "zawierający", "zawiera", "containing", "containing", "with",
+            "losowych", "losowy", "losowe", "random", "kilka", "some", "few", "wiele",
+            "many", "list", "lista", "listę", "danych",
+        }
+        words = _re.findall(r'[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+', ql)
+        stem_words = [w for w in words if w not in stop and len(w) > 2][:3]
+
+        if stem_words:
+            # Transliterate basic Polish chars for filename safety
+            _pl_map = str.maketrans("ąćęłńóśźż", "acelnoszy")
+            stem = "_".join(w.translate(_pl_map) for w in stem_words)
+            filename = f"{stem}{ext}"
+        else:
+            filename = f"file{ext}"
 
     return {
         "filename": filename,
@@ -2180,9 +2220,49 @@ def action_endpoint():
                 "original_query": query,
             }])
 
+    # ── Create folder / directory ─────────────────────────────────────────
+    _is_folder_request = (
+        any(w in _ql for w in ("create folder", "make folder", "new folder",
+                               "stworz folder", "stworz katalog",
+                               "nowy folder", "nowy katalog")) or
+        (_ql_words & {"folder", "katalog"} and
+         _ql_words & {"stworz", "stwórz", "utworz", "utwórz", "zrob", "zrób",
+                      "create", "make", "new", "nowy"})
+    )
+    if _is_folder_request:
+        import re as _re_fold
+        _fd_name = "new_folder"
+        _fd_dest = "~/Desktop"
+        if any(w in _ql for w in ("downloads", "pobrane", "pobranych")):
+            _fd_dest = "~/Downloads"
+        elif any(w in _ql for w in ("documents", "dokumenty", "dokumentach")):
+            _fd_dest = "~/Documents"
+        _fd_count_m = _re_fold.search(r"(\d+)\s*(?:losow\w*|random|plik\w*|file\w*)", _ql)
+        _fd_count = int(_fd_count_m.group(1)) if _fd_count_m else 0
+        if _fd_count > 0:
+            _n = min(_fd_count, 20)
+            _fd_cmd = (
+                f"mkdir -p {_fd_dest}/{_fd_name} && "
+                f"for i in $(seq 1 {_n}); do "
+                f"dd if=/dev/urandom bs=512 count=1 2>/dev/null | base64 > "
+                f"{_fd_dest}/{_fd_name}/file_$i.txt; done && "
+                f"echo 'Done: {_fd_dest}/{_fd_name} with {_n} files'"
+            )
+        else:
+            _fd_cmd = f"mkdir -p {_fd_dest}/{_fd_name} && echo 'Done: {_fd_dest}/{_fd_name}'"
+        logging.info(f"Create folder fast-path: {_fd_cmd}")
+        return _action_resp([{
+            "type": "tool_draft",
+            "tool_name": "run_terminal",
+            "args": {"command": _fd_cmd},
+            "original_query": query,
+        }])
+
     # ── Create file ────────────────────────────────────────────────────────
-    if ("create file" in _ql or "make file" in _ql or "write file" in _ql or "save file" in _ql or
-        ("plik" in _ql and _ql_words & {"stworz", "stwórz", "utworz", "utwórz", "zapisz", "napisz", "zrob"})):
+    if (("create file" in _ql or "make file" in _ql or "write file" in _ql or "save file" in _ql or
+         (("plik" in _ql or "file" in _ql) and
+          _ql_words & {"stworz", "stwórz", "utworz", "utwórz", "zapisz", "napisz", "zrob"})) and
+            not _is_folder_request):
         _cf_args = _parse_create_file_from_query(query)
         logging.info(f"Create file fast-path: {_cf_args}")
         return _action_resp([{
