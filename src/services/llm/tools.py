@@ -603,6 +603,65 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    # ── Context Engine tools ──────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "get_context",
+            "description": (
+                "Get the user's current work context — which app they're using, "
+                "recent files they've worked on, related entities (people, events, emails). "
+                "Use this to understand what the user is currently doing before answering "
+                "questions about their work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_work_sessions",
+            "description": (
+                "List the user's recent work sessions with summaries. Each session "
+                "includes which apps and files were used, duration, and a summary. "
+                "Use this when the user asks what they were working on, or wants to "
+                "resume a previous task."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of sessions to return (default 5).",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_session",
+            "description": (
+                "Resume a previous work session by reopening all files and apps "
+                "from that session. The user should specify which session to resume "
+                "(e.g., 'the one where I was working on the payment module')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The ID of the session to resume.",
+                    }
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
 ]
 
 
@@ -693,6 +752,12 @@ def execute_tool(name: str, arguments: dict) -> str:
             return _tool_list_reminders()
         elif name == "delete_reminder":
             return _tool_delete_reminder(arguments.get("query", ""))
+        elif name == "get_context":
+            return _tool_get_context()
+        elif name == "get_work_sessions":
+            return _tool_get_work_sessions(arguments.get("limit", 5))
+        elif name == "resume_session":
+            return _tool_resume_session(arguments.get("session_id", ""))
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -1705,3 +1770,100 @@ def _tool_delete_reminder(query: str) -> str:
         return f"No reminder matching '{query}'. Pending reminders: {labels}."
     delete_reminder(match["id"])
     return f"ok (cancelled '{match['label']}')"
+
+
+# ── Context Engine tools ─────────────────────────────────────────────────────
+
+def _tool_get_context() -> str:
+    """Get the user's current work context."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        from src.services.context.context_matcher import get_matcher
+        kg = get_knowledge_graph()
+        matcher = get_matcher()
+
+        # Active entities (what the user is working on right now)
+        active_ids = kg.get_active_entity_ids(window_seconds=300)
+        active_entities = [kg.get_entity(eid) for eid in active_ids if eid]
+        active_entities = [e for e in active_entities if e]
+
+        # Most relevant entities (scored by context + recency)
+        relevant = matcher.get_relevant_entities(limit=5)
+
+        # Recent activity summary
+        recent = kg.get_recent_activity(limit=10)
+
+        parts = []
+        if active_entities:
+            parts.append("Currently active:")
+            for e in active_entities[:5]:
+                uri = e.get("uri", "")
+                parts.append(f"  - {e['type']}: {e['name']}" + (f" ({uri})" if uri else ""))
+
+        if relevant:
+            parts.append("\nMost relevant entities:")
+            for e in relevant[:5]:
+                score = e.get("relevance_score", 0)
+                parts.append(f"  - {e['type']}: {e['name']} (relevance: {score:.2f})")
+
+        if recent:
+            parts.append("\nRecent activity:")
+            for a in recent[:5]:
+                app = a.get("app_name", "")
+                title = a.get("window_title", "")
+                dur = a.get("duration_s", 0)
+                parts.append(f"  - {app}: {title} ({int(dur)}s)")
+
+        stats = kg.get_stats()
+        parts.append(f"\nGraph stats: {stats['entities']} entities, {stats['relationships']} relationships")
+
+        return "\n".join(parts) if parts else "No context data available yet."
+    except Exception as e:
+        return f"Context engine not available: {e}"
+
+
+def _tool_get_work_sessions(limit: int = 5) -> str:
+    """List recent work sessions."""
+    try:
+        from src.services.context.session_manager import get_session_manager
+        mgr = get_session_manager()
+        sessions = mgr.get_recent_sessions(limit=limit)
+
+        if not sessions:
+            return "No work sessions recorded yet."
+
+        parts = []
+        for s in sessions:
+            import time as _time
+            start = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(s["start_time"]))
+            end = _time.strftime("%H:%M", _time.localtime(s["end_time"]))
+            duration_min = max(1, int((s["end_time"] - s["start_time"]) / 60))
+            summary = s.get("summary", "No summary")
+            resume = s.get("resume_state", {})
+            files = [ap.get("path", "") for ap in resume.get("app_paths", [])]
+            file_list = ", ".join(files[:3]) if files else "none"
+
+            parts.append(
+                f"Session {s['id']} ({start}–{end}, {duration_min} min):\n"
+                f"  Summary: {summary}\n"
+                f"  Files: {file_list}"
+            )
+
+        return "\n\n".join(parts)
+    except Exception as e:
+        return f"Session manager not available: {e}"
+
+
+def _tool_resume_session(session_id: str) -> str:
+    """Resume a work session by reopening its files/apps."""
+    if not session_id:
+        return "Error: session_id is required."
+    try:
+        from src.services.context.session_manager import get_session_manager, SessionManager
+        mgr = get_session_manager()
+        session = mgr.get_session(session_id)
+        if not session:
+            return f"Session '{session_id}' not found."
+        return SessionManager.resume_session(session)
+    except Exception as e:
+        return f"Failed to resume session: {e}"

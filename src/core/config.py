@@ -55,6 +55,13 @@ PERSONAL_MEM_PATH = os.path.join(PROJECT_ROOT, "data", "personal.mv2")
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "omni.log")
 INDEX_LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "indexing_history.log")
 
+# Context Engine
+CONTEXT_DB_PATH = os.path.join(HOME, ".config", "omni", "context.db")
+CONTEXT_POLL_INTERVAL = 5       # seconds between active-window polls
+CONTEXT_FLUSH_INTERVAL = 30     # seconds between batch writes to SQLite
+CONTEXT_PRUNE_DAYS = 30         # auto-delete activity_log entries older than this
+CONTEXT_MAX_SUGGESTIONS_PER_DAY = 5
+
 # Directories to skip during indexing / watching
 IGNORE_DIRS = {
     ".cache", ".git", ".npm", "node_modules", ".node_modules",

@@ -19,6 +19,50 @@ from src.services.system.installer import generate_install_plan, log_debug, get_
 api_bp = Blueprint('api', __name__)
 
 
+def _build_context_parts(recent: list, sessions: list) -> list:
+    """Build a rich context response from activity data and sessions."""
+    parts = []
+
+    if recent:
+        # Group by app, collect window titles and files
+        app_details = {}
+        for a in recent:
+            app = a.get('app_name', '')
+            if not app:
+                continue
+            if app not in app_details:
+                app_details[app] = {"titles": set(), "files": set(), "total_s": 0.0}
+            title = a.get('window_title') or ''
+            fp = a.get('file_path') or ''
+            if fp:
+                app_details[app]["files"].add(os.path.basename(fp))
+            elif title and len(title) > 2:
+                app_details[app]["titles"].add(title)
+            app_details[app]["total_s"] += a.get('duration_s', 0) or 0
+
+        for app, detail in app_details.items():
+            mins = max(1, int(detail["total_s"] / 60))
+            if detail["files"]:
+                files_str = ', '.join(list(detail["files"])[:4])
+                parts.append(f"**{app}** ({mins} min) — {files_str}")
+            elif detail["titles"]:
+                titles_list = list(detail["titles"])[:3]
+                meaningful = [t for t in titles_list if t.lower() != app.lower()]
+                if meaningful:
+                    parts.append(f"**{app}** ({mins} min) — {', '.join(meaningful)}")
+                else:
+                    parts.append(f"**{app}** ({mins} min)")
+            else:
+                parts.append(f"**{app}** ({mins} min)")
+
+    if sessions:
+        s = sessions[0]
+        if s.get('summary'):
+            parts.append(f"\nPrevious session: {s['summary']}")
+
+    return parts
+
+
 def _is_connected(host="8.8.8.8", port=53, timeout=1.5) -> bool:
     """Quick check for internet connectivity via DNS port."""
     try:
@@ -274,7 +318,7 @@ def _parse_fast_action_output(
         "IGNORE", "CALC:", "FA:", "UP:", "FORGET:", "BRIGHTNESS:",
         "CURRENCY:", "TRANSLATE:", "SYSTEM_SETTINGS:", "WEATHER:", "UNIT:",
         "COLOR:", "TIMER:", "PASSWORD:", "QRCODE:", "TERMINAL:",
-        "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:", "MEMORY:"
+        "CALENDAR", "EMAILS", "ANSWER:", "ORGANIZE:", "MEMORY:", "CONTEXT:"
     ])
     if not has_command:
         # No recognized command — treat the raw text as an answer rather than searching
@@ -431,6 +475,45 @@ def _parse_fast_action_output(
             except Exception as e:
                 logging.error(f"Failed to execute EMAILS tool: {e}")
                 actions.append({"type": "emails", "emails_text": f"Error fetching emails: {e}"})
+
+        elif line.startswith("CONTEXT:"):
+            ctx_query = line[8:].strip().lower()
+            logging.info(f"[ACTION] CONTEXT command: '{ctx_query}'")
+            try:
+                from src.services.context.knowledge_graph import get_knowledge_graph
+                kg = get_knowledge_graph()
+                parts = []
+
+                if "resume" in ctx_query:
+                    sessions = kg.get_recent_sessions(limit=1)
+                    if sessions:
+                        s = sessions[0]
+                        if s.get('resume_state'):
+                            from src.services.context.session_manager import get_session_manager
+                            get_session_manager().resume_session(s)
+                            parts.append(f"Resuming session: {s.get('summary', 'previous work')}")
+                        else:
+                            parts.append(f"Last session: {s.get('summary', 'No details')}. No files to reopen.")
+                    else:
+                        parts.append("No recent work sessions found to resume.")
+                elif "session" in ctx_query:
+                    sessions = kg.get_recent_sessions(limit=3)
+                    if sessions:
+                        for i, s in enumerate(sessions, 1):
+                            parts.append(f"**Session {i}**: {s.get('summary', 'No summary')}")
+                    else:
+                        parts.append("No work sessions recorded yet.")
+                else:
+                    recent = kg.get_recent_activity(limit=20)
+                    sessions = kg.get_recent_sessions(limit=3)
+                    parts = _build_context_parts(recent, sessions)
+
+                if not parts:
+                    parts.append("I've just started tracking your activity — give me a few more minutes to learn what you're working on.")
+                actions.append({"type": "answer", "text": "\n".join(parts)})
+            except Exception as e:
+                logging.error(f"Failed to execute CONTEXT command: {e}")
+                actions.append({"type": "answer", "text": "Context tracking is starting up — please try again in a moment."})
 
         elif line.startswith("MEMORY:"):
             mem_query = line[7:].strip() or query
@@ -1408,6 +1491,18 @@ def search_endpoint():
     except Exception as e:
         logging.error(f"Image search error: {e}")
 
+    # Context-aware re-ranking
+    if results:
+        try:
+            from src.services.context.context_matcher import get_matcher
+            matcher = get_matcher()
+            # Convert LanceDB distances to similarity scores for the matcher
+            for r in results:
+                r["score"] = max(0.0, 1.0 - r.get("score", 0.0))
+            results = matcher.rank_search_results(results, query)
+        except Exception as e:
+            logging.debug(f"Context re-ranking skipped: {e}")
+
     return jsonify({"results": results})
 
 @api_bp.route('/person_image', methods=['POST'])
@@ -2242,7 +2337,7 @@ def action_endpoint():
             "original_query": query,
         }])
 
-    # 1.5c–f Tool keywords: return tool_draft actions immediately (like send_email_draft)
+    # 1.5d–f Tool keywords: return tool_draft actions immediately (like send_email_draft)
     _ql = query.lower()
     _ql_words = set(_ql.split())
 
@@ -2541,6 +2636,7 @@ Other commands:
 - EMAILS (show unread emails — use for queries like "my emails", "unread emails", "check inbox")
 - ORGANIZE:path (organize the specified folder — use for queries like "organize my desktop", "clean up downloads")
 - MEMORY:query — look up personal/contact info stored in memory. Use for ANY question about a specific person's email, phone number, address, or personal details (e.g. "jaki jest mail oskara" → MEMORY:Oskar email, "what is Anna's phone number" → MEMORY:Anna phone number, "email of Tomek" → MEMORY:Tomek email). The query MUST be in English and be a short, clean search phrase (person name + info type). NEVER refuse these.
+- CONTEXT:query — retrieve user's current work context, recent activity, and work sessions. Use when the user asks about what they are currently working on, their recent activity, what they were doing, their work sessions, or wants to resume previous work. Examples: "what am I working on" → CONTEXT:current, "what was I doing today" → CONTEXT:today, "show my sessions" → CONTEXT:sessions, "resume where I left off" → CONTEXT:resume, "nad czym pracuję" → CONTEXT:current, "co robiłem" → CONTEXT:recent
 """
 
     system_prompt = base_system_prompt.replace(
@@ -2585,6 +2681,19 @@ Other commands:
         }
     }
 
+    get_context_tool = {
+        "type": "function",
+        "function": {
+            "name": "get_context",
+            "description": "Get the user's current work context — what apps and files they're using, recent activity, and work sessions. Use when the user asks what they are working on, their recent activity, what they were doing, their work sessions, or wants to resume previous work.",
+            "parameters": {
+                "type": "object",
+                "properties": {"mode": {"type": "string", "enum": ["current", "sessions", "resume"], "description": "What to retrieve: 'current' for active apps/files/activity, 'sessions' for work session history, 'resume' to resume last session"}},
+                "required": ["mode"]
+            }
+        }
+    }
+
     def _safe_fast_completion(messages, max_tokens, temperature, step_name, reset_model=False, tools=None, tool_choice=None):
         """Run fast model inference under lock with request-abort checks."""
         if model_manager.current_fast_request_id != request_id:
@@ -2624,7 +2733,7 @@ Other commands:
 
         out = _safe_fast_completion(
             messages=messages, max_tokens=256, temperature=0.0,
-            step_name="Action intent", reset_model=True, tools=[web_search_tool, run_terminal_tool]
+            step_name="Action intent", reset_model=True, tools=[web_search_tool, run_terminal_tool, get_context_tool]
         )
         if out is None:
             return _action_resp([])
@@ -2636,6 +2745,8 @@ Other commands:
             tool_calls = out['choices'][0]['message']['tool_calls']
             q_tool = query
             use_terminal = False
+            use_context = False
+            context_mode = "current"
             term_cmd = ""
             try:
                 for tc in tool_calls:
@@ -2643,6 +2754,11 @@ Other commands:
                         args = json.loads(tc['function'].get('arguments', '{}') or '{}')
                         term_cmd = args.get('command')
                         use_terminal = True
+                        break
+                    elif tc.get('function', {}).get('name') == 'get_context':
+                        args = json.loads(tc['function'].get('arguments', '{}') or '{}')
+                        context_mode = args.get('mode', 'current')
+                        use_context = True
                         break
                     elif tc.get('function', {}).get('name') == 'web_search':
                         args = json.loads(tc['function'].get('arguments', '{}') or '{}')
@@ -2686,6 +2802,54 @@ Other commands:
                     def _stream_term():
                         yield f'data: {json.dumps({"event": "done", "actions": [_act], "action": _act, "chips": []})}\n\n'
                     return Response(_stream_term(), content_type='text/event-stream')
+                else:
+                    return _action_resp([_act])
+
+            # If the tool call was get_context, query the Context Engine
+            if use_context:
+                logging.info(f"[CONTEXT TOOL] Mode: {context_mode}")
+                try:
+                    from src.services.context.knowledge_graph import get_knowledge_graph
+                    kg = get_knowledge_graph()
+
+                    parts = []
+                    if context_mode == "resume":
+                        sessions = kg.get_recent_sessions(limit=1)
+                        if sessions:
+                            s = sessions[0]
+                            if s.get('resume_state'):
+                                from src.services.context.session_manager import get_session_manager
+                                sm = get_session_manager()
+                                sm.resume_session(s)
+                                parts.append(f"Resuming session: {s.get('summary', 'previous work')}")
+                            else:
+                                parts.append(f"Last session: {s.get('summary', 'No details available')}. No files to reopen.")
+                        else:
+                            parts.append("No recent work sessions found to resume.")
+                    elif context_mode == "sessions":
+                        sessions = kg.get_recent_sessions(limit=3)
+                        if sessions:
+                            for i, s in enumerate(sessions, 1):
+                                parts.append(f"**Session {i}**: {s.get('summary', 'No summary')}")
+                        else:
+                            parts.append("No work sessions recorded yet.")
+                    else:
+                        recent = kg.get_recent_activity(limit=20)
+                        sessions = kg.get_recent_sessions(limit=3)
+                        parts = _build_context_parts(recent, sessions)
+
+                    if not parts:
+                        parts.append("I've just started tracking your activity — give me a few more minutes to learn what you're working on.")
+
+                    _act = {"type": "answer", "text": "\n".join(parts)}
+                except Exception as e:
+                    logging.error(f"[CONTEXT TOOL] Failed: {e}")
+                    _act = {"type": "answer", "text": "Context tracking is starting up — please try again in a moment."}
+
+                if stream:
+                    def _stream_ctx():
+                        yield f'data: {json.dumps({"event": "done", "actions": [_act], "action": _act, "chips": []})}\n\n'
+                    return Response(_stream_ctx(), content_type='text/event-stream')
                 else:
                     return _action_resp([_act])
 
@@ -3452,4 +3616,194 @@ def embed_endpoint():
         return jsonify({"vectors": vectors})
     except Exception as e:
         logging.error(f"Embed endpoint error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Context Engine endpoints
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/context', methods=['GET'])
+def context_endpoint():
+    """Return current context: recent entities, active entities, stats."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        from src.services.context.activity_observer import get_observer
+        kg = get_knowledge_graph()
+        obs = get_observer()
+
+        recent = kg.get_recent_entities(limit=20)
+        active_ids = kg.get_active_entity_ids(window_seconds=300)
+        active_entities = [kg.get_entity(eid) for eid in active_ids if eid]
+        active_entities = [e for e in active_entities if e]
+        stats = kg.get_stats()
+
+        return jsonify({
+            "recent_entities": recent,
+            "active_entities": active_entities,
+            "stats": stats,
+            "observer_paused": obs.is_paused,
+        })
+    except Exception as e:
+        logging.error(f"/context error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/entities', methods=['POST'])
+def context_entities_endpoint():
+    """Search or list entities.  Body: {"query": str, "type": str, "limit": int}"""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        data = request.get_json(silent=True) or {}
+        query = data.get("query", "")
+        entity_type = data.get("type")
+        limit = data.get("limit", 20)
+
+        if query:
+            results = kg.search_entities(query, entity_type=entity_type, limit=limit)
+        else:
+            results = kg.get_recent_entities(entity_type=entity_type, limit=limit)
+
+        return jsonify({"entities": results})
+    except Exception as e:
+        logging.error(f"/context/entities error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/entity/<entity_id>', methods=['GET'])
+def context_entity_detail(entity_id):
+    """Return full context for a single entity (relationships, activity)."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        ctx = kg.get_context_for_entity(entity_id)
+        if not ctx:
+            return jsonify({"error": "Entity not found"}), 404
+        return jsonify(ctx)
+    except Exception as e:
+        logging.error(f"/context/entity error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/pause', methods=['POST'])
+def context_pause_endpoint():
+    """Pause or resume the activity observer.  Body: {"paused": bool}"""
+    try:
+        from src.services.context.activity_observer import get_observer
+        obs = get_observer()
+        data = request.get_json(silent=True) or {}
+        should_pause = data.get("paused", True)
+
+        if should_pause:
+            obs.pause()
+        else:
+            obs.resume()
+
+        return jsonify({"paused": obs.is_paused})
+    except Exception as e:
+        logging.error(f"/context/pause error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/suggestions', methods=['GET'])
+def context_suggestions_endpoint():
+    """List recent suggestions."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        # Return recent suggestions (last 7 days)
+        cutoff = time.time() - 7 * 86400
+        with kg._lock:
+            rows = kg._conn.execute(
+                "SELECT id, type, content, created_at, shown_at, dismissed, acted_on "
+                "FROM suggestions WHERE created_at >= ? ORDER BY created_at DESC LIMIT 20",
+                (cutoff,),
+            ).fetchall()
+        results = [
+            {
+                "id": r[0], "type": r[1], "content": json.loads(r[2]),
+                "created_at": r[3], "shown_at": r[4],
+                "dismissed": bool(r[5]), "acted_on": bool(r[6]),
+            }
+            for r in rows
+        ]
+        return jsonify({"suggestions": results})
+    except Exception as e:
+        logging.error(f"/context/suggestions error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/suggestion/dismiss', methods=['POST'])
+def context_suggestion_dismiss():
+    """Mark a suggestion as dismissed."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        data = request.get_json(silent=True) or {}
+        sid = data.get("suggestion_id", "")
+        if sid:
+            kg.mark_suggestion_dismissed(sid)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logging.error(f"/context/suggestion/dismiss error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/suggestion/accept', methods=['POST'])
+def context_suggestion_accept():
+    """Mark a suggestion as acted on."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        data = request.get_json(silent=True) or {}
+        sid = data.get("suggestion_id", "")
+        if sid:
+            kg.mark_suggestion_acted(sid)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logging.error(f"/context/suggestion/accept error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/sessions', methods=['GET'])
+def context_sessions_endpoint():
+    """List recent work sessions."""
+    try:
+        from src.services.context.session_manager import get_session_manager
+        mgr = get_session_manager()
+        limit = request.args.get("limit", 10, type=int)
+        sessions = mgr.get_recent_sessions(limit=limit)
+        return jsonify({"sessions": sessions})
+    except Exception as e:
+        logging.error(f"/context/sessions error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/sessions/<session_id>/resume', methods=['POST'])
+def context_session_resume(session_id):
+    """Resume a work session (reopen files/apps)."""
+    try:
+        from src.services.context.session_manager import get_session_manager, SessionManager
+        mgr = get_session_manager()
+        session = mgr.get_session(session_id)
+        if not session:
+            return jsonify({"error": "Session not found"}), 404
+        result = SessionManager.resume_session(session)
+        return jsonify({"status": result})
+    except Exception as e:
+        logging.error(f"/context/sessions/resume error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@api_bp.route('/context/clear', methods=['POST'])
+def context_clear_endpoint():
+    """Delete all context data (privacy wipe)."""
+    try:
+        from src.services.context.knowledge_graph import get_knowledge_graph
+        kg = get_knowledge_graph()
+        kg.clear_all()
+        return jsonify({"status": "cleared"})
+    except Exception as e:
+        logging.error(f"/context/clear error: {e}")
         return jsonify({"error": str(e)}), 500

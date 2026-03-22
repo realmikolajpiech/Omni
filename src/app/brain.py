@@ -21,6 +21,25 @@ def create_app():
     from src.services.reminders.reminder_service import get_service as _get_reminder_svc
     _get_reminder_svc().start()
 
+    # Start Context Engine — activity observer + suggestion engine (background threads)
+    try:
+        from src.services.context.activity_observer import get_observer as _get_observer
+        _observer = _get_observer()
+        _observer.start()
+        logging.info("Context Engine: Activity Observer started")
+
+        from src.services.context.suggestion_engine import get_engine as _get_suggestion_engine
+        _suggestion_engine = _get_suggestion_engine()
+        _suggestion_engine.start()
+        logging.info("Context Engine: Suggestion Engine started")
+
+        from src.services.context.session_manager import get_session_manager as _get_session_mgr
+        _session_mgr = _get_session_mgr()
+        _session_mgr.start()
+        logging.info("Context Engine: Session Manager started")
+    except Exception as e:
+        logging.warning(f"Context Engine failed to start: {e}")
+
     return app
 
 def load_models_background():

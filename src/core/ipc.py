@@ -11,6 +11,7 @@ class IPCWorker(QThread):
     partial_update = pyqtSignal(str)
     show_requested = pyqtSignal()
     transcribe_file_requested = pyqtSignal(str)  # path to WAV file
+    suggestion_received = pyqtSignal(str)  # JSON payload from Context Engine
 
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -46,6 +47,12 @@ class IPCWorker(QThread):
                         self.transcribe_file_requested.emit(path)
                     except Exception as e:
                         logging.error(f"IPC TranscribeFile Decode Error: {e}")
+                elif data.startswith(b"SUGGESTION:"):
+                    try:
+                        payload = data[11:].decode('utf-8')
+                        self.suggestion_received.emit(payload)
+                    except Exception as e:
+                        logging.error(f"IPC Suggestion Decode Error: {e}")
                 elif data.startswith(b"STATUS:"):
                     try:
                         status = data[7:].decode('utf-8')
@@ -95,5 +102,8 @@ def start_ipc_listener(window_instance):
 
     if hasattr(window_instance, 'handle_transcribe_file'):
         ipc_thread.transcribe_file_requested.connect(window_instance.handle_transcribe_file)
+
+    if hasattr(window_instance, 'handle_suggestion'):
+        ipc_thread.suggestion_received.connect(window_instance.handle_suggestion)
 
     ipc_thread.start()

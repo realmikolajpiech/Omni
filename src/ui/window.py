@@ -1383,6 +1383,58 @@ class OmniWindow(QWidget):
         if is_voice:
             self.voice_triggered_query = True
 
+    def handle_suggestion(self, payload_json: str):
+        """Handle a proactive suggestion from the Context Engine."""
+        try:
+            import json as _json
+            suggestion = _json.loads(payload_json)
+            logging.info(f"[context] Received suggestion: {suggestion.get('type', 'unknown')}")
+
+            from src.ui.widgets.suggestion_widget import SuggestionNotificationWidget
+            widget = SuggestionNotificationWidget(suggestion, parent=self)
+            if hasattr(self, 'current_theme'):
+                widget.set_theme(self.current_theme)
+
+            def on_dismissed(sid):
+                try:
+                    import requests
+                    requests.post(
+                        "http://127.0.0.1:5555/context/suggestion/dismiss",
+                        json={"suggestion_id": sid}, timeout=2
+                    )
+                except Exception:
+                    pass
+
+            def on_accepted(sid):
+                try:
+                    import requests
+                    requests.post(
+                        "http://127.0.0.1:5555/context/suggestion/accept",
+                        json={"suggestion_id": sid}, timeout=2
+                    )
+                except Exception:
+                    pass
+
+            widget.dismissed.connect(on_dismissed)
+            widget.accepted.connect(on_accepted)
+
+            # Show the suggestion as a widget in the list
+            if not self.isVisible():
+                self.show()
+                self.center()
+                self.setWindowOpacity(1.0)
+                self.is_entry_animating = False
+                self.raise_()
+                self.activateWindow()
+
+            self.list_widget.add_widget(widget)
+            self.divider.show()
+            self.list_widget.show()
+            self.adjust_window_height(animate=True)
+
+        except Exception as e:
+            logging.warning(f"[context] Failed to handle suggestion: {e}")
+
     def animate_entry(self):
         self.is_entry_animating = True
         self.frame.boost_speed()

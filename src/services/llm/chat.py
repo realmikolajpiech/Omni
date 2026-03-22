@@ -49,6 +49,9 @@ _TOOL_META = {
     "create_calendar_event": {"icon": "📅", "label": "Create event"},
     "get_unread_emails":     {"icon": "📬", "label": "Emails"},
     "send_email":            {"icon": "📧", "label": "Send email"},
+    "get_context":           {"icon": "🔮", "label": "Work context"},
+    "get_work_sessions":     {"icon": "📋", "label": "Sessions"},
+    "resume_session":        {"icon": "▶️", "label": "Resume session"},
 }
 
 
@@ -879,6 +882,9 @@ Location: {user_loc} | Date: {current_date} | Current datetime (ISO): {current_d
 - **set_reminder** — schedule a macOS notification reminder; use for any "remind me in X / remind me at Y" request; fire_at_iso must be computed from Current datetime above; ALWAYS use this for reminders instead of calendar events or run_terminal
 - **list_reminders** — list all pending reminders the user has set
 - **delete_reminder** — cancel a pending reminder by natural language description
+- **get_context** — get the user's CURRENT work context: which app is active, recent files opened, related entities. Call this FIRST whenever the user asks "what am I working on?", "what was I doing?", "what have I been doing?", or any question about their current/recent activity on the computer
+- **get_work_sessions** — list recent work sessions with summaries (which apps/files were used, for how long). Call this when user asks about past work, e.g. "what did I do yesterday?", "show my recent sessions", "what was I working on earlier?"
+- **resume_session** — reopen all files and apps from a past work session. Call this when user asks to "resume", "continue", or "pick up where I left off"
 
 Memory usage rules:
 - Call **memory_recall** proactively when the answer might depend on something the user told you before.
@@ -890,6 +896,8 @@ Memory usage rules:
 - RELEVANCE FILTER: Only use user context facts that directly pertain to answering the current query. Do NOT mention unrelated personal details.
 
 File search heuristic: If the user mentions a specific document type (certificate, invoice, contract, resume, tax form, etc.) or uses words implying they want to find/locate something on their computer, call search_files FIRST before answering. This applies regardless of query language.
+
+Context heuristic: Call **get_context** IMMEDIATELY (without asking) when the user asks what they are working on, what their current task is, or any variation of "what am I doing?". Call **get_work_sessions** when they ask about past/recent work. Never say "I don't have enough context" without first calling get_context.
 
 Use tools proactively. Do NOT pretend to search or recall — actually call the tool.
 IMPORTANT efficiency rules:
