@@ -19,40 +19,84 @@ from src.services.system.installer import generate_install_plan, log_debug, get_
 api_bp = Blueprint('api', __name__)
 
 
+_BROWSER_APPS = {"safari", "chrome", "google chrome", "firefox", "arc", "brave", "edge", "microsoft edge"}
+_OS_NOISE_TITLES = {"spotlight", "control center", "notification center",
+                    "login window", "screen saver"}
+
+
 def _build_context_parts(recent: list, sessions: list) -> list:
     """Build a rich context response from activity data and sessions."""
     parts = []
+    _sep_re = re.compile(r'\s+[—–-]\s+')
 
     if recent:
-        # Group by app, collect window titles and files
-        app_details = {}
+        # Per-app accumulator
+        app_data = {}  # {app: {"project": str|None, "files": set, "pages": set, "total_s": float}}
         for a in recent:
-            app = a.get('app_name', '')
+            app = a.get('app_name') or ''
             if not app:
                 continue
-            if app not in app_details:
-                app_details[app] = {"titles": set(), "files": set(), "total_s": 0.0}
             title = a.get('window_title') or ''
-            fp = a.get('file_path') or ''
-            if fp:
-                app_details[app]["files"].add(os.path.basename(fp))
-            elif title and len(title) > 2:
-                app_details[app]["titles"].add(title)
-            app_details[app]["total_s"] += a.get('duration_s', 0) or 0
+            dur = a.get('duration_s') or 0
+            app_lower = app.lower()
 
-        for app, detail in app_details.items():
-            mins = max(1, int(detail["total_s"] / 60))
-            if detail["files"]:
-                files_str = ', '.join(list(detail["files"])[:4])
-                parts.append(f"**{app}** ({mins} min) — {files_str}")
-            elif detail["titles"]:
-                titles_list = list(detail["titles"])[:3]
-                meaningful = [t for t in titles_list if t.lower() != app.lower()]
-                if meaningful:
-                    parts.append(f"**{app}** ({mins} min) — {', '.join(meaningful)}")
-                else:
+            # Skip OS chrome noise
+            if title.strip().lower() in _OS_NOISE_TITLES:
+                continue
+
+            if app not in app_data:
+                app_data[app] = {"project": None, "files": set(), "pages": set(), "total_s": 0.0}
+
+            app_data[app]["total_s"] += dur
+
+            if not title:
+                continue
+
+            # Browser apps: collect page titles
+            if app_lower in _BROWSER_APPS:
+                page = title.strip()
+                if page and len(page) > 1:
+                    app_data[app]["pages"].add(page)
+                continue
+
+            # IDE / other apps: parse "file — Project" format
+            segments = _sep_re.split(title)
+            segments = [s.strip() for s in segments if s.strip().lower() != app_lower]
+
+            if len(segments) >= 2 and '.' in segments[0]:
+                # "brain.log — OmniApp" → file + project
+                app_data[app]["files"].add(segments[0])
+                if not app_data[app]["project"]:
+                    app_data[app]["project"] = segments[1]
+            elif len(segments) >= 2:
+                # "SomeTab — OmniApp" → just project
+                if not app_data[app]["project"]:
+                    app_data[app]["project"] = segments[-1]
+            elif len(segments) == 1:
+                seg = segments[0]
+                if '.' in seg and not seg.startswith('http'):
+                    app_data[app]["files"].add(seg)
+
+        # Format one line per app
+        for app, data in app_data.items():
+            mins = max(1, int(data["total_s"] / 60))
+            app_lower = app.lower()
+
+            if app_lower in _BROWSER_APPS:
+                pages = sorted(data["pages"])[:3]
+                if pages:
+                    parts.append(f"**{app}** ({mins} min) — {', '.join(pages)}")
+                elif mins >= 2:
                     parts.append(f"**{app}** ({mins} min)")
-            else:
+            elif data["project"]:
+                files = sorted(data["files"])[:4]
+                if files:
+                    parts.append(f"**{data['project']}** project in {app} ({mins} min) — editing {', '.join(files)}")
+                else:
+                    parts.append(f"**{data['project']}** project in {app} ({mins} min)")
+            elif data["files"]:
+                parts.append(f"**{app}** ({mins} min) — {', '.join(sorted(data['files'])[:4])}")
+            elif mins >= 1:
                 parts.append(f"**{app}** ({mins} min)")
 
     if sessions:

@@ -149,7 +149,7 @@ class ActivityObserver(threading.Thread):
             # Record duration on the *previous* state
             duration = now - self._last_change_time
             if self._last_app and duration < _IDLE_THRESHOLD_S:
-                file_path = self._extract_file_path(self._last_app, self._last_title)
+                file_path, _ = self._extract_file_and_project(self._last_app, self._last_title)
                 entity_id = self._ensure_entities(self._last_app, self._last_title, file_path)
                 self._buffer.append({
                     "timestamp": self._last_change_time,
@@ -165,107 +165,155 @@ class ActivityObserver(threading.Thread):
             self._last_change_time = now
 
     def _get_active_window(self) -> tuple[str, str]:
-        """Return (app_name, window_title).  macOS only for now."""
+        """Return (app_name, window_title).  macOS only for now.
+
+        Uses a single AX API call chain so that the app name and window
+        title always come from the same focused application — eliminates
+        the TOCTOU race between NSWorkspace and AXFocusedApplication.
+        """
         if platform.system() != "Darwin":
             return "", ""
 
-        app_name = ""
-        window_title = ""
+        # Primary: AX API — single source of truth for both app + title
+        try:
+            app_name, window_title = self._get_active_window_ax()
+            if app_name:
+                return app_name, window_title
+        except Exception:
+            pass
 
+        # Fallback: NSWorkspace (app name only, no window title)
         try:
             from AppKit import NSWorkspace
             active_app = NSWorkspace.sharedWorkspace().frontmostApplication()
             if active_app:
-                app_name = active_app.localizedName() or ""
+                return active_app.localizedName() or "", ""
         except ImportError:
             pass
 
-        if not app_name:
+        return "", ""
+
+    @staticmethod
+    def _get_active_window_ax() -> tuple[str, str]:
+        """Get both app name and window title from the AX API in one call.
+
+        By reading app name from the *same* AXFocusedApplication element
+        that provides the window title, we guarantee they refer to the
+        same application at the same instant.
+        """
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide,
+            AXUIElementCopyAttributeValue,
+        )
+
+        system_wide = AXUIElementCreateSystemWide()
+
+        # 1. Get the focused application element
+        err, focused_app = AXUIElementCopyAttributeValue(
+            system_wide, "AXFocusedApplication", None
+        )
+        if err or not focused_app:
             return "", ""
 
-        # Try Accessibility API for window title
-        try:
-            window_title = self._get_window_title_ax()
-        except Exception:
-            pass
+        # 2. Read the app name from that same element
+        err, ax_title = AXUIElementCopyAttributeValue(focused_app, "AXTitle", None)
+        app_name = str(ax_title) if not err and ax_title else ""
 
-        return app_name, window_title
-
-    def _get_window_title_ax(self) -> str:
-        """Read the window title of the frontmost app via macOS Accessibility API."""
-        try:
-            import Quartz
-            from ApplicationServices import (
-                AXUIElementCreateSystemWide,
-                AXUIElementCopyAttributeValue,
-            )
-            from CoreFoundation import kCFAllocatorDefault
-
-            system_wide = AXUIElementCreateSystemWide()
-            err, focused_app = AXUIElementCopyAttributeValue(
-                system_wide, "AXFocusedApplication", None
-            )
-            if err or not focused_app:
-                return ""
-
-            err, focused_window = AXUIElementCopyAttributeValue(
-                focused_app, "AXFocusedWindow", None
-            )
-            if err or not focused_window:
-                return ""
-
+        # 3. Read the window title from the element's focused window
+        window_title = ""
+        err, focused_window = AXUIElementCopyAttributeValue(
+            focused_app, "AXFocusedWindow", None
+        )
+        if not err and focused_window:
             err, title = AXUIElementCopyAttributeValue(
                 focused_window, "AXTitle", None
             )
-            if err or not title:
-                return ""
+            if not err and title:
+                window_title = str(title)
 
-            return str(title)
-        except Exception:
-            return ""
+        return app_name, window_title
 
     # ------------------------------------------------------------------
     # Entity extraction
     # ------------------------------------------------------------------
 
-    def _extract_file_path(self, app_name: str, window_title: str) -> str | None:
-        """Try to extract a file path or filename from the window title."""
+    def _extract_file_and_project(self, app_name: str, window_title: str) -> tuple[str | None, str | None]:
+        """Extract (file_path_or_name, project_name) from the window title.
+
+        For IDEs like Cursor/VS Code with titles like "file.py — ProjectName",
+        returns both parts.  For single-segment titles like "ProjectName",
+        returns (None, project_name).
+        """
         if not window_title:
-            return None
+            return None, None
 
         app_lower = app_name.lower()
+        is_ide = any(ide in app_lower for ide in _IDE_APPS)
 
-        # Try app-specific extractors
+        # IDE separator pattern: "file — Project" or "file — Project — AppName"
+        _SEP = re.compile(r'\s+[—–-]\s+')
+
+        if is_ide:
+            segments = _SEP.split(window_title.strip())
+            # Filter out the app name itself from segments
+            segments = [s.strip() for s in segments if s.strip().lower() not in (app_lower, app_name.lower())]
+
+            if len(segments) >= 2:
+                # "brain.log — OmniApp" → file="brain.log", project="OmniApp"
+                file_name = segments[0]
+                project_name = segments[1]
+                # Validate file has an extension
+                if "." in file_name and not file_name.startswith("http"):
+                    return file_name, project_name
+                else:
+                    # First segment isn't a file, treat both as project context
+                    return None, segments[0]
+            elif len(segments) == 1:
+                seg = segments[0]
+                # Single segment with extension = file; without = NOT a project
+                # (single-segment titles are often transient: Safari tabs, OS chrome)
+                if "." in seg and not seg.startswith("http"):
+                    return seg, None
+                else:
+                    return None, None
+            return None, None
+
+        # Non-IDE apps: try standard extractors for file path
         for key, pattern in _FILE_EXTRACTORS.items():
             if key in app_lower:
                 m = pattern.match(window_title)
                 if m:
                     candidate = m.group(1).strip()
-                    # If it looks like a path, expand it
                     if candidate.startswith("~") or candidate.startswith("/"):
                         expanded = os.path.expanduser(candidate)
                         if os.path.exists(expanded):
-                            return expanded
-                    # If it has a file extension, it's likely a filename
+                            return expanded, None
                     if "." in candidate and not candidate.startswith("http"):
-                        return candidate
+                        return candidate, None
                 break
 
-        # For IDEs: if the extractor didn't match (single-segment title = project name),
-        # still check if the raw title has a file extension
-        if any(ide in app_lower for ide in _IDE_APPS):
-            title = window_title.strip()
-            if title and "." in title and not title.startswith("http"):
-                return title
-
-        return None
+        return None, None
 
     def _ensure_entities(self, app_name: str, window_title: str, file_path: str | None) -> str | None:
-        """Create or update entities for the observed app/file.  Returns the
-        primary entity ID (file if available, otherwise app)."""
+        """Create or update entities for the observed app/file/project.
+        Returns the primary entity ID."""
 
-        # Always track the app
         app_id = self._kg.upsert_entity("app", app_name, uri=f"app:{app_name}")
+        app_lower = app_name.lower()
+
+        # Extract project name from the window title
+        _, project_name = self._extract_file_and_project(app_name, window_title)
+
+        # Track the project if we found one
+        proj_id = None
+        if project_name:
+            proj_id = self._kg.upsert_entity(
+                "file",
+                project_name,
+                uri=f"project:{app_name}:{project_name}",
+                metadata={"app": app_name, "type": "project"},
+            )
+            self._kg.add_relationship(proj_id, app_id, "opened_in")
 
         # Track file if we extracted one
         if file_path:
@@ -273,33 +321,22 @@ class ActivityObserver(threading.Thread):
                 "file",
                 os.path.basename(file_path),
                 uri=file_path,
-                metadata={"app": app_name, "window_title": window_title},
+                metadata={"app": app_name, "project": project_name or ""},
             )
-            # Relationship: file was opened in this app
             self._kg.add_relationship(file_id, app_id, "opened_in")
+            if proj_id:
+                self._kg.add_relationship(file_id, proj_id, "part_of")
             return file_id
 
-        # For IDEs without a file path, track the window title as a project
-        app_lower = app_name.lower()
-        if window_title and any(ide in app_lower for ide in _IDE_APPS):
-            title = window_title.strip()
-            if title and len(title) > 1:
-                proj_id = self._kg.upsert_entity(
-                    "file",
-                    title,
-                    uri=f"project:{app_name}:{title}",
-                    metadata={"app": app_name, "type": "project"},
-                )
-                self._kg.add_relationship(proj_id, app_id, "opened_in")
-                return proj_id
+        if proj_id:
+            return proj_id
 
         # For browsers, track the page title
         if window_title and any(b in app_lower for b in ("safari", "chrome", "firefox", "arc", "brave", "edge")):
             title = window_title.strip()
             if title and len(title) > 2:
                 page_id = self._kg.upsert_entity(
-                    "url",
-                    title,
+                    "url", title,
                     uri=f"page:{app_name}:{title}",
                     metadata={"app": app_name},
                 )

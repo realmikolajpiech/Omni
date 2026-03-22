@@ -5611,16 +5611,31 @@ class AnswerActionWidget(QWidget):
         top_layout.addWidget(self.action_label)
         top_layout.addStretch()
 
-        # Answer text
-        self.text_label = QLabel(self.answer_text)
+        # Answer text (render markdown bold/italic via HTML)
+        self.text_label = QLabel()
         self.text_label.setFont(QFont("Manrope", 13))
         self.text_label.setWordWrap(True)
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._set_markdown_text(self.answer_text)
 
         card_layout.addWidget(top_row)
         card_layout.addWidget(self.text_label)
         layout.addWidget(self.card)
         self.update_style()
+
+    def _set_markdown_text(self, text: str):
+        """Convert basic markdown (bold, italic) to HTML for QLabel."""
+        import re as _re
+        html = text
+        html = html.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        # **bold** → <b>bold</b>
+        html = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html)
+        # *italic* → <i>italic</i>
+        html = _re.sub(r'\*(.+?)\*', r'<i>\1</i>', html)
+        # Newlines → <br>
+        html = html.replace('\n', '<br>')
+        self.text_label.setText(html)
 
     def set_theme(self, theme):
         self.current_theme = theme
