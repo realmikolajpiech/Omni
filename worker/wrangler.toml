@@ -25,8 +25,7 @@ id      = "a855aebfb1c84020b402e99cef0791e7"
 #   wrangler secret put OMNI_SECRET
 #   wrangler secret put XAI_API_KEY
 #   wrangler secret put GROQ_API_KEY
-#   wrangler secret put SERPER_MAIN_API_KEY
-#   wrangler secret put SERPER_FAST_API_KEY
+#   wrangler secret put TAVILY_API_KEY
 #   wrangler secret put PAYMENT_WEBHOOK_SECRET
 #   wrangler secret put DODO_PAYMENTS_API_KEY
 #   wrangler secret put GITHUB_TOKEN

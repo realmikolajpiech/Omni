@@ -988,10 +988,43 @@ Instructions:
                     except Exception as e:
                         logging.error(f"Failed to fetch fallback results for person card: {e}")
 
+                # --- Check if this is actually a PLACE, not a PERSON ---
+                # The LLM sometimes outputs PERSON for cities/places. Detect and redirect.
+                _place_signals = ['capital', 'stolica', 'miasto', 'city', 'town', 'country',
+                                  'province', 'located in', 'population', 'region', 'district',
+                                  'municipality', 'village', 'island', 'river', 'continent',
+                                  'województw', 'gmina', 'powiat', 'county', 'landmark']
+                _combined_text = ''
+                if person_desc:
+                    _combined_text += person_desc.lower() + ' '
+                if search_results:
+                    _combined_text += ' '.join(
+                        (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
+                        for r in search_results[:3]
+                    ).lower()
+                _place_score = sum(1 for kw in _place_signals if kw in _combined_text)
+                _person_signals = ['born', 'actor', 'actress', 'singer', 'musician', 'politician',
+                                   'director', 'ceo', 'founder', 'president', 'professor',
+                                   'author', 'athlete', 'player', 'coach', 'scientist',
+                                   'entrepreneur', 'artist', 'writer', 'composer']
+                _person_score = sum(1 for kw in _person_signals if kw in _combined_text)
+
+                if _place_score >= 2 and _place_score > _person_score:
+                    logging.info(f"[PERSON→PLACE] Redirecting '{name}' to PLACE (place_score={_place_score}, person_score={_person_score})")
+                    place_res = get_place_result(name, existing_results=search_results)
+                    if place_res:
+                        actions.append(place_res)
+                        continue
+                    else:
+                        import urllib.parse
+                        url = f"https://www.google.com/maps/search/{urllib.parse.quote_plus(name)}"
+                        actions.append({"type": "place", "name": name, "description": person_desc or "Location", "latitude": None, "longitude": None, "url": url})
+                        continue
+
                 # If we have a valid name, try to use it.
-                # BUT, if the name is just a fragment (like "Miko"), 
+                # BUT, if the name is just a fragment (like "Miko"),
                 # we should try to recover the full name from the search results context if possible.
-                
+
                 target_name = name
                 if len(target_name) < 5:
                     # Heuristic: LLM truncated the name. Use the user's query or first result.
@@ -2633,6 +2666,150 @@ def action_endpoint():
     search_results = []
     logging.info(f"[TIMING] Pre-emptive search + context prep took: {time.time() - endpoint_start_time:.3f}s")
 
+    # 1.9 Heuristic: should we offer web_search tool to the LLM?
+    def _should_offer_web_search(q: str) -> bool:
+        """
+        Decide whether the fast LLM should have access to web_search.
+        Returns False for queries that clearly don't need search,
+        True for queries that likely need real-time/external info.
+        """
+        ql = q.lower().strip()
+        words = ql.split()
+        n_words = len(words)
+
+        # -- NEVER search for these --
+
+        # Very short / single char queries (just opening apps or typing)
+        if n_words == 0 or (n_words == 1 and len(ql) <= 2):
+            return False
+
+        # Math expressions: contains digits + operators
+        if re.match(r'^[\d\s\+\-\*/\.\(\)\^%=,]+$', ql):
+            return False
+
+        # Explicit app/system commands
+        _no_search_prefixes = [
+            "open ", "launch ", "start ", "quit ", "close ", "kill ",
+            "set ", "toggle ", "turn on", "turn off", "enable ", "disable ",
+            "otwórz ", "otworz ", "uruchom ", "zamknij ", "wlacz ", "włącz ", "wylacz ", "wyłącz ",
+        ]
+        if any(ql.startswith(p) for p in _no_search_prefixes):
+            return False
+
+        # Timer, password, QR, color — purely local
+        _local_keywords = [
+            "timer", "stopwatch", "password", "qr code", "qrcode",
+            "color ", "colour ", "#", "rgb(", "hsl(",
+            "organize", "posprzątaj", "uporządkuj",
+        ]
+        if any(k in ql for k in _local_keywords):
+            return False
+
+        # Calendar/email/memory/context queries
+        _local_intents = [
+            "my calendar", "my emails", "my inbox", "unread",
+            "upcoming events", "my meetings",
+            "remind me", "set reminder",
+            "what am i working on", "my sessions",
+        ]
+        if any(k in ql for k in _local_intents):
+            return False
+
+        # System info queries (should use terminal, not web)
+        _system_keywords = [
+            "my ip", "battery", "uptime", "hostname", "disk space",
+            "ram usage", "cpu usage", "storage", "free space",
+            "system info", "os version",
+        ]
+        if any(k in ql for k in _system_keywords):
+            return False
+
+        # -- ALWAYS search for these --
+
+        # Explicit search intent
+        _search_intents = [
+            "search ", "google ", "look up ", "find info",
+            "szukaj ", "wyszukaj ", "znajdź ",
+        ]
+        if any(ql.startswith(p) for p in _search_intents):
+            return True
+
+        # Time-sensitive / current info keywords
+        _timely_keywords = [
+            "today", "latest", "current", "recent", "new ",
+            "price", "stock", "weather", "forecast", "score",
+            "news", "update", "release", "announced",
+            "2024", "2025", "2026", "yesterday", "this week",
+            "dzisiaj", "najnowsz", "aktualn", "pogoda", "cena",
+            "ile kosztuje", "wynik",
+        ]
+        if any(k in ql for k in _timely_keywords):
+            return True
+
+        # Questions that likely need real-world info
+        _question_words = ["who is", "who was", "what is", "what are", "what was",
+                           "where is", "when did", "when was", "when is",
+                           "how much", "how many", "how old", "how tall",
+                           "kto to", "co to", "gdzie jest", "kiedy",
+                           "ile ma", "ile waży", "ile kosztuje"]
+        if any(ql.startswith(qw) or f" {qw}" in ql for qw in _question_words):
+            # But NOT for things the model can answer from knowledge
+            _known_concepts = ["photosynthesis", "gravity", "dna", "algorithm",
+                               "python", "javascript", "html", "css"]
+            if any(k in ql for k in _known_concepts):
+                return False
+            return True
+
+        # Queries that look like a person/entity name (2-4 capitalized words, no question words)
+        _q_stripped = q.strip()
+        _name_words = _q_stripped.split()
+        if 2 <= len(_name_words) <= 4:
+            _question_starts = {"who", "what", "when", "where", "why", "how", "which",
+                                "does", "did", "is", "are", "was", "were", "can", "could",
+                                "would", "will", "do", "should"}
+            if (_name_words[0].lower() not in _question_starts and
+                all(w[0].isupper() or w.lower() in {"de", "von", "van", "al", "el", "la", "di", "du", "le"} for w in _name_words)):
+                return True
+
+        # Single-word queries
+        if n_words == 1:
+            # Known apps / very short fragments → no search
+            from src.services.search.web_search import COMMON_APPS
+            _known_no_search = set(COMMON_APPS.keys()) | {
+                "settings", "preferences", "finder", "safari", "chrome", "firefox",
+                "vscode", "code", "terminal", "notes", "photos", "mail", "messages",
+                "maps", "calendar", "reminders", "music", "tv", "books", "news",
+                "weather", "calculator", "clock", "files", "store", "steam",
+                "word", "excel", "powerpoint", "teams", "outlook", "zoom",
+                "hello", "hi", "hey", "thanks", "ok", "yes", "no", "help",
+            }
+            if ql in _known_no_search:
+                return False
+            # Very short (1-3 chars) → probably typing / abbreviation → no search
+            if len(ql) <= 3:
+                return False
+            # Longer single words (4+ chars) that aren't known apps → could be
+            # a city, person, concept that needs search (e.g. "warsaw", "kraków", "bitcoin")
+            return True
+
+        # 2-word queries: could be a person name typed lowercase (e.g. "elon musk")
+        if n_words == 2:
+            _cmd_words = {"open", "close", "launch", "start", "quit", "kill", "set",
+                          "run", "show", "hide", "play", "stop", "find", "get",
+                          "install", "uninstall", "delete", "remove", "create", "make"}
+            if words[0] in _cmd_words:
+                return False
+            # Two alpha words that aren't commands → likely a name/entity
+            if all(w.isalpha() for w in words):
+                return True
+            return False
+
+        # For 3+ word queries, offer search as the model might need it
+        return True
+
+    offer_web_search = _should_offer_web_search(query)
+    logging.info(f"[SEARCH_HEURISTIC] offer_web_search={offer_web_search} for query={query!r}")
+
     # 2. LLM Inference
     base_system_prompt = """You are an intelligent action classifier.
 Analyze the user query to decide the best action.
@@ -2683,15 +2860,23 @@ Other commands:
 - CONTEXT:query — retrieve user's current work context, recent activity, and work sessions. Use when the user asks about what they are currently working on, their recent activity, what they were doing, their work sessions, or wants to resume previous work. Examples: "what am I working on" → CONTEXT:current, "what was I doing today" → CONTEXT:today, "show my sessions" → CONTEXT:sessions, "resume where I left off" → CONTEXT:resume, "nad czym pracuję" → CONTEXT:current, "co robiłem" → CONTEXT:recent
 """
 
-    system_prompt = base_system_prompt.replace(
-        "{tool_instruction}",
-        "Think first: only call `web_search` if you truly need external, real-world info that you don't know.\n"
-        "If the user asks for their local IP, public IP, battery, timezone, or system info, DO NOT call `web_search`. You MUST output the TERMINAL text command directly.\n"
-        "Never call `web_search` for nonsense text, generic sentences, calc/translate, open/app/settings.\n"
-        "CRITICAL: If the query is a person's name (e.g. 'steve jobs', 'elon musk'), use PERSON:Name|Description — NEVER use ANSWER: for a person name lookup.\n"
-        "For general factual questions (who founded X, what is Y, when did Z happen), use ANSWER:text directly — do NOT search.\n"
-        "If you can answer the query from your own knowledge, ALWAYS use ANSWER:text instead of searching."
-    )
+    if offer_web_search:
+        _tool_instruction = (
+            "You have a `web_search` tool available. Use it ONLY when the query requires real-time or external info you don't know:\n"
+            "- Current events, news, prices, stock quotes, weather, scores\n"
+            "- People/places/companies you're unsure about or that need up-to-date info\n"
+            "- Anything with time-sensitive keywords (today, latest, current, 2025, 2026)\n"
+            "Do NOT search for: things you can answer from knowledge, calc, translate, open/app/settings, system info.\n"
+            "If you can answer confidently, use ANSWER:text or PERSON:Name|Description instead of searching."
+        )
+    else:
+        _tool_instruction = (
+            "You do NOT have web search available for this query. Classify using your own knowledge.\n"
+            "Use ANSWER:text for factual questions you can answer.\n"
+            "Use PERSON:Name|Description for person name lookups (description is REQUIRED).\n"
+            "If the user asks for system info (IP, battery, etc.), use TERMINAL:command|description."
+        )
+    system_prompt = base_system_prompt.replace("{tool_instruction}", _tool_instruction)
 
     user_prompt = f"Query: {query}\n\n{search_context}"
     messages = [
@@ -2775,9 +2960,14 @@ Other commands:
         llm1_ms = 0.0
         serper_ms = 0.0
 
+        # Build tool list based on heuristic — only offer web_search when likely needed
+        _action_tools = [run_terminal_tool, get_context_tool]
+        if offer_web_search:
+            _action_tools.insert(0, web_search_tool)
+
         out = _safe_fast_completion(
             messages=messages, max_tokens=256, temperature=0.0,
-            step_name="Action intent", reset_model=True, tools=[web_search_tool, run_terminal_tool, get_context_tool]
+            step_name="Action intent", reset_model=True, tools=_action_tools
         )
         if out is None:
             return _action_resp([])

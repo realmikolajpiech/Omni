@@ -363,9 +363,8 @@ COMPOSE_EMAIL_URL = f"http://{BRAIN_HOST}:{BRAIN_PORT}/compose_email"
 # Billing (Dodo via Worker)
 CHECKOUT_SESSION_URL = f"{BACKEND_URL}/v1/billing/checkout_session"
 
-# Search API (Serper.dev -- fast Google results)
-SERPER_MAIN_API_KEY = os.environ.get("SERPER_MAIN_API_KEY", "")  # used by main LLM tool calls
-SERPER_FAST_API_KEY = os.environ.get("SERPER_FAST_API_KEY", "")  # used by fast action classifier
+# Search API (Tavily — proxied through Omni Worker backend)
+# API key lives on the Worker, not in the app.
 
 # IPC
 IPC_PORT = 5556

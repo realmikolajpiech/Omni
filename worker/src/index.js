@@ -4,7 +4,7 @@
  * Routes:
  *   POST /v1/chat/completions   AI chat proxy (xAI Grok or Groq, rate-limited for free tier)
  *   POST /v1/audio/transcriptions  Groq Whisper transcription proxy
- *   POST /v1/search             Serper web search proxy
+ *   POST /v1/search             Tavily web search proxy
  *   GET  /v1/status             Subscription status + daily usage
  *   POST /v1/webhook/payment    Generic payment provider webhook
  *
@@ -27,8 +27,7 @@
  *   OMNI_SECRET            shared secret between app binary and this worker
  *   XAI_API_KEY            xAI Grok API key
  *   GROQ_API_KEY           Groq API key
- *   SERPER_MAIN_API_KEY    Serper.dev key for main model tool calls
- *   SERPER_FAST_API_KEY    Serper.dev key for fast action classifier
+ *   TAVILY_API_KEY         Tavily search API key
  *   SUPABASE_URL           Your Supabase project URL  (https://xxxx.supabase.co)
  *   SUPABASE_ANON_KEY      Supabase anon/publishable key
  *   SUPABASE_SERVICE_KEY   Supabase service role key (for Admin API in webhook)
@@ -300,16 +299,18 @@ async function handleTranscription(request, env) {
   });
 }
 
-// ── Search proxy ──────────────────────────────────────────────────────────────
+// ── Search proxy (Tavily) ─────────────────────────────────────────────────────
 
 async function handleSearch(request, env) {
   const body = await request.json();
-  const endpoint = body._endpoint || "/search";
+  const endpoint = body._endpoint || "/search";   // e.g. /search, /images, /maps, /videos
   const fast = !!body._fast;
+  const query = body.q || "";
+  const numResults = body.num || 5;
   delete body._endpoint;
   delete body._fast;
 
-  const apiKey = fast ? env.SERPER_FAST_API_KEY : env.SERPER_MAIN_API_KEY;
+  const apiKey = env.TAVILY_API_KEY;
   if (!apiKey) {
     return resp({ error: "Search API key not configured", code: "missing_api_key" }, 500);
   }
@@ -322,21 +323,73 @@ async function handleSearch(request, env) {
     }, env)
   );
 
+  const isImages = endpoint === "/images";
+  const isMaps   = endpoint === "/maps" || endpoint === "/places";
+
+  const tavilyBody = {
+    query,
+    search_depth: fast ? "basic" : "advanced",
+    max_results: numResults,
+    include_images: isImages,
+    include_answer: false,
+  };
+
   let upstream;
   try {
-    upstream = await fetch(`https://google.serper.dev${endpoint}`, {
+    upstream = await fetch("https://api.tavily.com/search", {
       method: "POST",
-      headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(tavilyBody),
     });
   } catch (e) {
     return resp({ error: `Search request failed: ${e.message}`, code: "fetch_error" }, 502);
   }
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  if (!upstream.ok) {
+    const errText = await upstream.text();
+    return resp({ error: `Tavily error: ${errText}`, code: "upstream_error" }, upstream.status);
+  }
+
+  // Transform Tavily response → Serper-compatible format so the Python client
+  // can parse it without changes.
+  let tavily;
+  try {
+    tavily = await upstream.json();
+  } catch (e) {
+    return resp({ error: "Failed to parse Tavily response", code: "parse_error" }, 502);
+  }
+
+  const serperCompat = { searchParameters: { q: query } };
+
+  if (isImages && tavily.images) {
+    serperCompat.images = tavily.images.map(url => ({
+      title: "",
+      link: typeof url === "string" ? url : (url.url || ""),
+      imageUrl: typeof url === "string" ? url : (url.url || ""),
+      thumbnailUrl: typeof url === "string" ? url : (url.url || ""),
+    }));
+  } else if (isMaps) {
+    // Tavily doesn't have a maps endpoint — return organic results so Python
+    // falls through to its general-search fallback.
+    serperCompat.places = [];
+    serperCompat.organic = (tavily.results || []).map(r => ({
+      title: r.title || "",
+      link: r.url || "",
+      snippet: r.content || "",
+    }));
+  } else {
+    // General / news / videos → organic results
+    serperCompat.organic = (tavily.results || []).map(r => ({
+      title: r.title || "",
+      link: r.url || "",
+      snippet: r.content || "",
+    }));
+  }
+
+  return resp(serperCompat);
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────

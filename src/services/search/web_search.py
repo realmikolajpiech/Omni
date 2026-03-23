@@ -21,9 +21,6 @@ _backend_client = httpx.Client(
     },
 )
 
-# Keep a slow alias for non-fast calls (same client, different timeout passed per-call)
-_serper_main_client = _backend_client
-_serper_fast_client = _backend_client
 
 _local_client = httpx.Client(
     timeout=3.0,
@@ -113,76 +110,71 @@ def _set_cache_nav(query, result, fast=False):
 
 
 # ---------------------------------------------------------------------------
-# Serper.dev search (primary -- fast Google results)
+# Web search via Omni Worker backend (Tavily)
 # ---------------------------------------------------------------------------
-_SERPER_TYPE_MAP = {
+_SEARCH_TYPE_MAP = {
     'general': '/search',
     'images': '/images',
     'videos': '/videos',
     'news': '/news',
-    'map': '/maps', # Changed from /places to /maps for richer data (thumbnail, rating, etc.)
+    'map': '/maps',
 }
 
-def _serper_search(query: str, categories: str = 'general', count: int = 5, fast: bool = False) -> list:
+_MAX_RETRIES = 2  # total attempts = _MAX_RETRIES (first try + 1 retry)
+
+def _web_search(query: str, categories: str = 'general', count: int = 5, fast: bool = False) -> list:
     """
-    Search via the Omni Worker backend (which forwards to Serper.dev).
-    The real Serper API key lives on the Worker — never in the app binary.
+    Search via the Omni Worker backend (which forwards to Tavily).
+    The real API key lives on the Worker — never in the app binary.
     """
-    endpoint = _SERPER_TYPE_MAP.get(categories, '/search')
+    endpoint = _SEARCH_TYPE_MAP.get(categories, '/search')
     loc      = get_search_locale()
-    timeout  = 2.0 if fast else 4.0
+    timeout  = 3.0 if fast else 5.0
 
     payload = {
-        "_endpoint": endpoint,   # tells the Worker which Serper endpoint to hit
-        "_fast":     fast,       # tells the Worker which API key to use
+        "_endpoint": endpoint,
+        "_fast":     fast,
         "q":   query,
         "num": count,
         "gl":  loc.split('-')[-1].lower() if loc and '-' in loc else "us",
         "hl":  loc.split('-')[0].lower() if loc and '-' in loc else (loc[:2] if loc else "en"),
     }
 
+    extra_headers = {}
     try:
-        # Attach JWT if user is logged in (backend requires it for authenticated endpoints)
-        extra_headers = {}
+        from src.core import auth as _auth
+        token = _auth.get_access_token()
+        if token:
+            extra_headers["Authorization"] = f"Bearer {token}"
+    except Exception:
+        pass
+
+    data = None
+    last_err = None
+    for attempt in range(_MAX_RETRIES):
         try:
-            from src.core import auth as _auth
-            token = _auth.get_access_token()
-            if token:
-                extra_headers["Authorization"] = f"Bearer {token}"
-        except Exception:
-            pass
+            target_url = f"{_backend_client.base_url}v1/search"
+            logging.warning(f"[SEARCH] >>> POST {target_url}  q={payload['q']!r}  fast={fast}  attempt={attempt+1}/{_MAX_RETRIES}")
+            r = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
+            logging.warning(f"[SEARCH] <<< status={r.status_code}  body_len={len(r.text)}")
+            r.raise_for_status()
+            data = r.json()
+            logging.warning(f"[SEARCH] JSON keys={list(data.keys())}  organic_count={len(data.get('organic', []))}")
 
-        target_url = f"{_backend_client.base_url}v1/search"
-        logging.warning(f"[SEARCH] >>> POST {target_url}  q={payload['q']!r}  fast={fast}  timeout={timeout}s")
-        r = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
-        logging.warning(f"[SEARCH] <<< status={r.status_code}  body_len={len(r.text)}  body={r.text!r}")
-        r.raise_for_status()
-        data = r.json()
-        logging.warning(f"[SEARCH] JSON keys={list(data.keys())}  organic_count={len(data.get('organic', []))}")
+            # If we got results, break out of retry loop
+            if data.get('organic') or data.get('places') or data.get('images'):
+                break
+            # Empty result — retry if we have attempts left
+            logging.warning(f"[SEARCH] Empty results on attempt {attempt+1}, retrying...")
+        except Exception as e:
+            last_err = e
+            logging.warning(f"[SEARCH] Attempt {attempt+1} failed ({type(e).__name__}): {e}")
 
-        # Validate that Serper actually searched for the right query.
-        # Sometimes the response contains results for a truncated/different query.
-        returned_q = (data.get('searchParameters', {}).get('q') or '').strip().lower()
-        sent_q = query.strip().lower()
-        if returned_q and sent_q and returned_q != sent_q and not sent_q.startswith(returned_q[:3]):
-            # Mismatch but the returned query is a prefix of what we sent — Serper truncated it.
-            # Only retry if the returned query is significantly shorter (not just a minor normalization).
-            pass  # fall through, check below
-        if returned_q and sent_q and len(returned_q) < len(sent_q) * 0.6 and returned_q != sent_q:
-            logging.warning(f"[SEARCH] Query mismatch! Sent q={sent_q!r} but got results for q={returned_q!r}. Retrying...")
-            # Retry once with a fresh request
-            r2 = _backend_client.post("/v1/search", json=payload, timeout=timeout, headers=extra_headers)
-            r2.raise_for_status()
-            data2 = r2.json()
-            returned_q2 = (data2.get('searchParameters', {}).get('q') or '').strip().lower()
-            logging.warning(f"[SEARCH] Retry got q={returned_q2!r}")
-            if returned_q2 and len(returned_q2) >= len(returned_q):
-                data = data2  # Use retry result if it's at least as good
-    except Exception as e:
-        logging.warning(f"[SEARCH] !!! FAILED ({type(e).__name__}): {e}")
+    if data is None:
+        logging.warning(f"[SEARCH] !!! ALL ATTEMPTS FAILED: {last_err}")
         return []
 
-    # Normalize different Serper response shapes into uniform dicts
+    # Normalize response into uniform dicts
     results = []
 
     if categories == 'map':
@@ -247,11 +239,11 @@ def _serper_search(query: str, categories: str = 'general', count: int = 5, fast
 
 
 # ---------------------------------------------------------------------------
-# Unified search_api -- Serper only, with cache
+# Unified search_api -- Tavily via Worker, with cache
 # ---------------------------------------------------------------------------
 def search_api(query: str, categories: str = 'general', fast: bool = False) -> list:
     """
-    Performs a web search via Serper.dev (fast Google results).
+    Performs a web search via the Omni Worker backend (Tavily).
     """
     cached = _get_cached(query, categories)
     if cached is not None:
@@ -260,12 +252,12 @@ def search_api(query: str, categories: str = 'general', fast: bool = False) -> l
 
     t0 = time.time()
 
-    results = _serper_search(query, categories, fast=fast)
+    results = _web_search(query, categories, fast=fast)
     dt = time.time() - t0
-    logging.info(f"Serper ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
+    logging.info(f"Search ({'fast' if fast else 'main'}): {len(results)} results for '{query}' in {dt:.3f}s")
 
     if not results:
-        logging.warning(f"Serper returned 0 results for '{query}'")
+        logging.warning(f"Search returned 0 results for '{query}'")
 
     _set_cached(query, categories, results)
     return results
@@ -569,7 +561,7 @@ def get_place_result(query, existing_results=None):
              if map_results:
                  results = map_results
              
-             # Fallback: if map search gives nothing (often true for broad city names in Serper), try general search
+             # Fallback: if map search gives nothing, try general search
              if not results:
                  logging.warning(f"Place search fallback: '{query}' map search failed, trying general")
                  gen = search_api(query, categories='general')
