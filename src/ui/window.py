@@ -1418,16 +1418,16 @@ class OmniWindow(QWidget):
             widget.dismissed.connect(on_dismissed)
             widget.accepted.connect(on_accepted)
 
-            # Show the suggestion as a widget in the list
+            # Only show suggestion if the window is already visible — never force it open
             if not self.isVisible():
-                self.show()
-                self.center()
-                self.setWindowOpacity(1.0)
-                self.is_entry_animating = False
-                self.raise_()
-                self.activateWindow()
+                logging.info("[context] Window hidden, skipping suggestion display")
+                return
 
-            self.list_widget.add_widget(widget)
+            item = QListWidgetItem()
+            item.setSizeHint(widget.sizeHint())
+            self.list_widget.addItem(item)
+            anim_w = SmoothEntryWidget(widget, animate=True)
+            self.list_widget.setItemWidget(item, anim_w)
             self.divider.show()
             self.list_widget.show()
             self.adjust_window_height(animate=True)

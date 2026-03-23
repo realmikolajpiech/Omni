@@ -31,7 +31,7 @@ _local_client = httpx.Client(
 # Result cache -- avoids duplicate API calls for the same query
 # ---------------------------------------------------------------------------
 _search_cache: dict[str, tuple[list, float]] = {}
-_SEARCH_CACHE_TTL = 300  # seconds (increased from 120 for better reuse)
+_SEARCH_CACHE_TTL = 600  # seconds — 10 min reuse window
 
 def _cache_key(query: str, categories: str) -> str:
     return f"{query.lower().strip()}|{categories}"
@@ -47,7 +47,8 @@ def _get_cached(query: str, categories: str):
             return results
         del _search_cache[key]
 
-    # Prefix match: "apple" cached → "apple stock" reuses if within 10 chars
+    # Prefix match: "apple stock" reuses cached "apple" results — but only if the cached
+    # key is long enough (≥5 chars) to avoid false matches like "bar" → "barcelona".
     q_lower = query.lower().strip()
     for cached_key, (results, ts) in list(_search_cache.items()):
         if now - ts >= _SEARCH_CACHE_TTL:
@@ -55,7 +56,9 @@ def _get_cached(query: str, categories: str):
         cached_q, _, cached_cat = cached_key.partition("|")
         if cached_cat != categories:
             continue
-        if q_lower.startswith(cached_q) and 0 < len(q_lower) - len(cached_q) <= 10:
+        if (q_lower.startswith(cached_q)
+                and len(cached_q) >= 5
+                and 0 < len(q_lower) - len(cached_q) <= 10):
             logging.info(f"Search cache prefix hit: '{q_lower}' matched cached '{cached_q}'")
             return results
 
@@ -543,55 +546,141 @@ def get_person_result(name, existing_results=None):
     return None
 
 
+def _geocode_nominatim(query: str):
+    """Get lat/lon from Nominatim (OpenStreetMap) — free, no API key needed."""
+    try:
+        import urllib.parse
+        r = _local_client.get(
+            f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote_plus(query)}&format=json&limit=1",
+            headers={"User-Agent": "OmniApp/1.0 (contact@omni.app)"},
+            timeout=3.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data:
+                return float(data[0]['lat']), float(data[0]['lon'])
+    except Exception as e:
+        logging.debug(f"Nominatim geocoding failed for '{query}': {e}")
+    return None, None
+
+
 def get_place_result(query, existing_results=None):
     try:
         results = []
         if existing_results:
-            # Filter existing results for place-like content if possible, 
-            # but usually 'map' category is better for coordinates.
-            # If we have existing results, they are likely 'general'.
-            # We might want to re-search with 'map' to get lat/lon if missing.
             results = existing_results
-        
-        # If no results or existing results don't look like places (no address/lat/lon),
-        # force a map search.
+
         has_geo = any(r.get('latitude') for r in results)
-        if not results or not has_geo:
-             map_results = search_api(query, categories='map')
-             if map_results:
-                 results = map_results
-             
-             # Fallback: if map search gives nothing, try general search
-             if not results:
-                 logging.warning(f"Place search fallback: '{query}' map search failed, trying general")
-                 gen = search_api(query, categories='general')
-                 if gen:
-                     results = gen
+
+        if not results:
+            # No existing results — run Nominatim + general search in parallel
+            # (faster than a sequential map search which goes through the backend)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _pool:
+                _nom_f = _pool.submit(_geocode_nominatim, query)
+                _gen_f = _pool.submit(search_api, query, 'general', True)
+                try:
+                    nom_lat, nom_lon = _nom_f.result(timeout=4.0)
+                except Exception:
+                    nom_lat, nom_lon = None, None
+                try:
+                    gen_results = _gen_f.result(timeout=4.0)
+                except Exception:
+                    gen_results = []
+
+            if nom_lat and nom_lon and gen_results:
+                best = gen_results[0]
+                raw_desc = best.get('content', '') or ''
+                if isinstance(raw_desc, str) and len(raw_desc) > 160:
+                    cut = raw_desc[:160]
+                    last_dot = max(cut.rfind('. '), cut.rfind('! '), cut.rfind('? '))
+                    raw_desc = (cut[:last_dot + 1] if last_dot > 40 else cut).rstrip(' ,;')
+                logging.info(f"[PLACE] Parallel fast-path for '{query}': lat={nom_lat}, lon={nom_lon}")
+                return {
+                    "type": "place",
+                    "name": best.get('title', query),
+                    "address": raw_desc,
+                    "latitude": nom_lat,
+                    "longitude": nom_lon,
+                    "url": best.get('url'),
+                    "rating": None,
+                    "rating_count": None,
+                    "image": best.get('img_src') or best.get('thumbnail'),
+                    "category": None,
+                    "phone": None,
+                    "hours": None,
+                }
+            elif gen_results:
+                results = gen_results
+            else:
+                # Both failed — fall back to map search
+                map_results = search_api(query, categories='map')
+                if map_results:
+                    results = map_results
+        elif not has_geo:
+            # We already have general results but no coordinates.
+            # Try Nominatim first (~300ms) to get coordinates without a full map search.
+            nom_lat, nom_lon = _geocode_nominatim(query)
+            if nom_lat and nom_lon:
+                logging.info(f"[PLACE] Nominatim fast-path for '{query}': lat={nom_lat}, lon={nom_lon}")
+                best = results[0]
+                raw_desc = best.get('content', '') or ''
+                if isinstance(raw_desc, str) and len(raw_desc) > 160:
+                    cut = raw_desc[:160]
+                    last_dot = max(cut.rfind('. '), cut.rfind('! '), cut.rfind('? '))
+                    raw_desc = (cut[:last_dot + 1] if last_dot > 40 else cut).rstrip(' ,;')
+                return {
+                    "type": "place",
+                    "name": best.get('title', query),
+                    "address": raw_desc,
+                    "latitude": nom_lat,
+                    "longitude": nom_lon,
+                    "url": best.get('url'),
+                    "rating": None,
+                    "rating_count": None,
+                    "image": best.get('img_src') or best.get('thumbnail'),
+                    "category": None,
+                    "phone": None,
+                    "hours": None,
+                }
+            else:
+                # Nominatim failed — fall back to map search for rich data
+                map_results = search_api(query, categories='map')
+                if map_results:
+                    results = map_results
 
         if results:
             best = results[0]
-            # Try to find one with coordinates if the first doesn't have them
+            # Prefer a result that already has coordinates
             for r in results:
                 if r.get('latitude') and r.get('longitude'):
                     best = r
                     break
-            
-            # Use thumbnail from map result if available, otherwise try image search
+
+            lat = best.get('latitude')
+            lon = best.get('longitude')
+
+            # If still no coordinates, try Nominatim geocoding as a last resort
+            if not lat or not lon:
+                lat, lon = _geocode_nominatim(query)
+                logging.info(f"[PLACE] Nominatim geocoding for '{query}': lat={lat}, lon={lon}")
+
+            # Image: prefer map thumbnail (skip separate image search to save API calls)
             image_url = best.get('thumbnail')
-            if not image_url:
-                try:
-                    # Quick image search
-                    img_results = search_api(query, categories='images')
-                    if img_results:
-                         image_url = img_results[0].get('img_src') or img_results[0].get('thumbnail')
-                except: pass
+
+            # Keep address/description short — 1-2 sentences max
+            raw_desc = best.get('content', '') or best.get('address', {}).get('road', '') or ''
+            if isinstance(raw_desc, str) and len(raw_desc) > 160:
+                # Cut at sentence boundary within first 160 chars
+                cut = raw_desc[:160]
+                last_dot = max(cut.rfind('. '), cut.rfind('! '), cut.rfind('? '))
+                raw_desc = (cut[:last_dot + 1] if last_dot > 40 else cut).rstrip(' ,;')
 
             return {
                 "type": "place",
                 "name": best.get('title', query),
-                "address": best.get('content', '') or best.get('address', {}).get('road', ''),
-                "latitude": best.get('latitude'),
-                "longitude": best.get('longitude'),
+                "address": raw_desc,
+                "latitude": lat,
+                "longitude": lon,
                 "url": best.get('url'),
                 "rating": best.get('rating'),
                 "rating_count": best.get('ratingCount'),

@@ -266,9 +266,15 @@ def _heuristic_classify_search_results(query: str, results: list) -> Optional[di
                          'province', 'województw', 'located in', 'population',
                          'gmina', 'powiat', 'region', 'district', 'county',
                          'municipality', 'village', 'commune', 'landmark',
-                         'monument', 'continent', 'island', 'river']
+                         'monument', 'continent', 'island', 'river',
+                         'situated', 'km²', 'km2', 'inhabitants', 'residents',
+                         'metropolitan', 'urban', 'founded in', 'established in',
+                         'geography', 'administrative']
         place_score = sum(1 for kw in place_signals if kw in combined)
-        if place_score >= 2:
+        # Also check if none of the top results look like person pages
+        person_signals_check = ['biography', 'born ', 'actor', 'singer', 'ceo', 'founder', 'politician']
+        person_score_check = sum(1 for kw in person_signals_check if kw in combined)
+        if place_score >= 1 and place_score > person_score_check:
             logging.info(f"[HEURISTIC] Place detected (score={place_score}) for '{query}'")
             place_res = get_place_result(query, existing_results=results)
             if place_res:
@@ -593,9 +599,9 @@ def _parse_fast_action_output(
                 logging.info(f"[TERMINAL ACTION] Done in {elapsed*1000:.0f}ms, output: {out[:200]!r}")
                 
                 if out:
-                    actions.append({"type": "answer", "text": f"Oto wynik polecenia:\n```\n{out}\n```"})
+                    actions.append({"type": "answer", "text": f"```\n{out}\n```"})
                 else:
-                    actions.append({"type": "answer", "text": "Polecenie nie zwróciło żadnego wyniku."})
+                    actions.append({"type": "answer", "text": "Command returned no output."})
             except Exception as e:
                 logging.warning(f"TERMINAL command failed: {e}")
 
@@ -656,19 +662,10 @@ def _parse_fast_action_output(
                 from src.services.search.web_search import search_api
                 results = search_api(q, categories='general', fast=True)
                 logging.warning(f"[ACTION/SEARCH] search_api({q!r}, fast=True) → {len(results)} results")
-                # Retry with original query or partial words if no results
+                # Retry with original query if the sanitized query differs and got no results
                 if not results and q.lower() != query.lower():
                     results = search_api(query, categories='general', fast=True)
                     logging.warning(f"[ACTION/SEARCH] retry search_api({query!r}, fast=True) → {len(results)} results")
-                if not results:
-                    words = query.strip().split()
-                    if len(words) >= 2:
-                        for word in words:
-                            if len(word) >= 3:
-                                results = search_api(word, categories='general', fast=True)
-                                if results:
-                                    logging.warning(f"[ACTION/SEARCH] partial search_api({word!r}, fast=True) → {len(results)} results")
-                                    break
 
             if results:
                 # Build rich context from top results
@@ -848,34 +845,6 @@ Instructions:
                             context = "\n\n".join(text_res)
                     except Exception: pass
 
-                # If results exist but don't mention the person's name, retry with intitle: to
-                # surface biography/Wikipedia pages where the name appears in the page title.
-                if results:
-                    _results_combined = ' '.join(
-                        (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', '')))
-                        for r in results[:3]
-                    ).lower()
-                    _person_in_results = person_candidate.lower() in _results_combined
-
-                    if not _person_in_results:
-                        logging.info(f"[DEBUG] Results don't mention '{person_candidate}', retrying with intitle:")
-                        try:
-                            from src.services.search.web_search import search_api
-                            intitle_results = search_api(f'intitle:"{person_candidate}"', categories='general', fast=True)
-                            if intitle_results:
-                                results = intitle_results
-                                text_res = []
-                                for i, r in enumerate(results[:3]):
-                                    text_res.append(
-                                        f"Title: {r.get('title')}\n"
-                                        f"Description: {r.get('content') or r.get('snippet')}\n"
-                                        f"URL: {r.get('url')}"
-                                    )
-                                context = "\n\n".join(text_res)
-                                logging.info(f"[DEBUG] intitle: retry returned {len(intitle_results)} results")
-                        except Exception as e:
-                            logging.warning(f"[DEBUG] intitle: retry failed: {e}")
-
                 person_result = get_person_result(person_candidate, existing_results=results if results else None)
                 if person_result:
                     logging.info(f"[DEBUG] Heuristic person card fallback for: {person_candidate}")
@@ -993,7 +962,10 @@ Instructions:
                 _place_signals = ['capital', 'stolica', 'miasto', 'city', 'town', 'country',
                                   'province', 'located in', 'population', 'region', 'district',
                                   'municipality', 'village', 'island', 'river', 'continent',
-                                  'województw', 'gmina', 'powiat', 'county', 'landmark']
+                                  'województw', 'gmina', 'powiat', 'county', 'landmark',
+                                  'situated', 'km²', 'km2', 'square km', 'sq km',
+                                  'inhabitants', 'residents', 'metropolitan', 'urban',
+                                  'founded in', 'established in', 'located', 'geography']
                 _combined_text = ''
                 if person_desc:
                     _combined_text += person_desc.lower() + ' '
@@ -1009,7 +981,7 @@ Instructions:
                                    'entrepreneur', 'artist', 'writer', 'composer']
                 _person_score = sum(1 for kw in _person_signals if kw in _combined_text)
 
-                if _place_score >= 2 and _place_score > _person_score:
+                if _place_score >= 1 and _place_score > _person_score:
                     logging.info(f"[PERSON→PLACE] Redirecting '{name}' to PLACE (place_score={_place_score}, person_score={_person_score})")
                     place_res = get_place_result(name, existing_results=search_results)
                     if place_res:
@@ -1068,43 +1040,6 @@ Instructions:
                     url = f"https://www.google.com/search?q={urllib.parse.quote_plus(target_name)}"
                     actions.append({"type": "person", "name": target_name, "description": "No information retrieved.", "url": url, "image": None})
             
-        elif "SEARCH:" in line:
-            # If the model explicitly outputs SEARCH:query, it means it couldn't classify it as PERSON/PLACE.
-            # But sometimes it outputs SEARCH even for people if it's unsure.
-            # We can try a heuristic fallback here too.
-            q_val = line.split("SEARCH:")[1].strip()
-            
-            # Check if we already have a person card (unlikely if we are here)
-            if not any(a.get('type') == 'person' for a in actions):
-                # Try to see if it looks like a person anyway using our helper
-                person_res = get_person_result(q_val, existing_results=search_results)
-                if person_res:
-                     logging.info(f"Converted SEARCH action to PERSON card for '{q_val}'")
-                     if search_context:
-                         llm_desc = _llm_person_description(q_val, search_context, safe_fast_completion)
-                         if llm_desc:
-                             person_res['description'] = llm_desc[1] if isinstance(llm_desc, tuple) else llm_desc
-                         else:
-                             # LLM description failed — always try snippet fallback regardless of existing length
-                             fallback_desc = _build_person_desc_from_snippets(q_val, search_results or [])
-                             if fallback_desc:
-                                 person_res['description'] = fallback_desc
-                     actions.append(person_res)
-                     continue # Skip adding the search action if we found a person card
-                 
-            # Fallback: check if it might be a place (only if very short query, to avoid making sentences into places)
-            if len(q_val.split()) <= 3 and not any(a.get('type') == 'place' for a in actions):
-                _heuristic_score = sum(1 for kw in ['capital', 'stolica', 'miasto', 'city', 'town', 'country', 'village', 'region'] if kw in " ".join(r.get('content', '') for r in search_results).lower())
-                # If we have a hint from search results OR no search results (fallback) but it's 1-2 words capitalized
-                if _heuristic_score >= 1 or (not search_results and q_val.istitle()):
-                    place_res = get_place_result(q_val, existing_results=search_results)
-                    if place_res:
-                        logging.info(f"Converted SEARCH action to PLACE card for '{q_val}'")
-                        actions.append(place_res)
-                        continue
-
-            actions.append({"type": "link", "url": f"https://www.google.com/search?q={q_val}", "title": f"Search {q_val}", "description": "Web Search"})
-
         elif "PLACE:" in line:
             name = line.split("PLACE:")[1].strip()
             place_res = get_place_result(name, existing_results=search_results)
@@ -1245,6 +1180,40 @@ Instructions:
                     continue
 
         final_actions.append(a)
+
+    # Post-processing: PERSON → PLACE safety net.
+    # If the description or search context contains strong place signals and no person signals,
+    # convert the person card to a place card. This catches cases where the inline redirect
+    # didn't fire (e.g. empty search results at parse time).
+    _pp_place_signals = ['capital', 'capital city', 'city of', 'largest city', 'city in',
+                         'stolica', 'miasto', 'town in', 'country in', 'located in',
+                         'population of', 'municipality', 'situated in', 'inhabitants',
+                         'founded in', 'province of', 'region of', 'district of']
+    _pp_person_signals = ['born in', 'born on', 'is a actor', 'is an actor', 'is a singer',
+                          'is a musician', 'is a politician', 'is a director', 'is a ceo',
+                          'is a founder', 'co-founded', 'founded by']
+    for a in final_actions:
+        if a.get('type') == 'person':
+            _text = (a.get('description', '') + ' ' + a.get('name', '')).lower()
+            _pp_place = sum(1 for kw in _pp_place_signals if kw in _text)
+            _pp_person = sum(1 for kw in _pp_person_signals if kw in _text)
+            if _pp_place >= 1 and _pp_place > _pp_person:
+                logging.info(f"[POST→PLACE] Converting person→place: name={a.get('name')!r} (place={_pp_place}, person={_pp_person})")
+                place_name = a.get('name', query)
+                place_res = get_place_result(place_name, existing_results=search_results)
+                if place_res:
+                    a.clear()
+                    a.update(place_res)
+                else:
+                    a['type'] = 'place'
+                    _raw = a.get('description', '')
+                    if len(_raw) > 160:
+                        _cut = _raw[:160]
+                        _dot = max(_cut.rfind('. '), _cut.rfind('! '))
+                        _raw = (_cut[:_dot + 1] if _dot > 40 else _cut).rstrip(' ,;')
+                    a['address'] = _raw
+                    a['latitude'] = None
+                    a['longitude'] = None
 
     return final_actions, chips
 
@@ -2804,8 +2773,27 @@ def action_endpoint():
                 return True
             return False
 
+        # Queries the model can answer from knowledge (no search needed)
+        _no_search_patterns = [
+            "how to ", "how do i ", "how does ", "how can i ",
+            "explain ", "what is the difference", "what does ",
+            "define ", "definition of", "meaning of",
+            "jak ", "co oznacza", "jak działa", "jak można",
+        ]
+        if any(ql.startswith(p) or p in ql for p in _no_search_patterns):
+            # Only skip if not asking about current events
+            _timely = ["today", "current", "latest", "2024", "2025", "2026", "price", "news", "score", "weather"]
+            if not any(t in ql for t in _timely):
+                return False
+
         # For 3+ word queries, offer search as the model might need it
         return True
+
+    # Skip LLM for short single-word queries (≤3 chars, not a shortcut).
+    # They can't be meaningfully classified and holding fast_lock delays the real query.
+    # (web search is already skipped for ≤3 chars, so the LLM has nothing useful to work with)
+    if len(query.strip()) <= 3 and ' ' not in query.strip():
+        return _action_resp([])
 
     offer_web_search = _should_offer_web_search(query)
     logging.info(f"[SEARCH_HEURISTIC] offer_web_search={offer_web_search} for query={query!r}")
@@ -2826,19 +2814,25 @@ Every non-think line MUST start with a valid command prefix.
 Never output PERSON with an empty description.
 Never output trailing '|' without text after it.
 
-IMPORTANT — PERSON vs ANSWER:
-- When the query IS a person's name (e.g. "steve jobs", "elon musk", "taylor swift", "napoleon"), ALWAYS use PERSON: — never ANSWER:.
-  Example: "steve jobs" → PERSON:Steve Jobs|Steve Jobs (1955–2011) co-founded Apple Inc. and revolutionized personal computing, music, and mobile phones.
-  Example: "elon musk" → PERSON:Elon Musk|Elon Musk is a tech entrepreneur, CEO of Tesla and SpaceX, known for advancing electric vehicles and space exploration.
-- ANSWER:text — Use ONLY for questions (who, what, when, where, why, how) where the answer is NOT a single person's profile. Examples: "who founded google" → ANSWER:Google was founded by Larry Page and Sergey Brin in 1998. "what is photosynthesis" → ANSWER:Photosynthesis is the process by which plants convert sunlight into energy. Keep answers concise (1-3 sentences). MUST answer in the same language as the user's query.
-- For well-known factual questions, ALWAYS prefer ANSWER over web_search.
-- If the user asks for system info like "whats my ip", "uptime", ALWAYS use TERMINAL:command.
+CRITICAL — PLACE vs PERSON vs ANSWER:
+- PLACE:Name — Use for ANY city, town, country, region, landmark, building, street. NEVER use PERSON for a city or location.
+  Example: "warsaw" → PLACE:Warsaw
+  Example: "kraków" → PLACE:Kraków
+  Example: "paris" → PLACE:Paris
+  Example: "new york" → PLACE:New York
+  Example: "eiffel tower" → PLACE:Eiffel Tower
+- PERSON:Name|Description — Use ONLY for real human beings (not cities, companies, or concepts).
+  Example: "steve jobs" → PERSON:Steve Jobs|Steve Jobs (1955–2011) co-founded Apple Inc. and revolutionized personal computing.
+  Example: "elon musk" → PERSON:Elon Musk|Elon Musk is CEO of Tesla and SpaceX, known for advancing electric vehicles and space exploration.
+  Description is REQUIRED. Name MUST be a human name, never a place or thing.
+- ANSWER:text — Use for factual questions (who, what, when, where, why, how) with a direct answer. Keep 1-3 sentences. MUST answer in the same language as the query.
+- For system info like "whats my ip", "uptime", ALWAYS use TERMINAL:command.
   Example: "whats my ip" → TERMINAL:curl -s ifconfig.me|Get public IP
   Example: "whats my local ip" → TERMINAL:ipconfig getifaddr en0|Get local IP
 
 Other commands:
-- PERSON:Name|Description (Name MUST be full real person name, never one-word fragments. Description is REQUIRED. Use for ANY direct person name lookup.)
-- PLACE:Name (results confirm location/city/school/institution)
+- PERSON:Name|Description (ONLY for human beings. Name must be the full person name. Description REQUIRED.)
+- PLACE:Name (cities, towns, countries, regions, landmarks, buildings — anything geographic)
 - OPEN:url (results show specific official website)
 - TRANSLATE:source_text|from_lang|to_lang|translated_text
 - CURRENCY:amount|from_unit|to_unit|converted_value
@@ -3024,11 +3018,11 @@ Other commands:
                 
                 if out_text:
                     if '\n' in out_text:
-                        ans_text = f"Oto wynik z systemu:\n{out_text}"
+                        ans_text = f"```\n{out_text}\n```"
                     else:
-                        ans_text = f"Wynik: **{out_text}**"
+                        ans_text = f"**{out_text}**"
                 else:
-                    ans_text = "Polecenie nie zwróciło żadnego wyniku."
+                    ans_text = "Command returned no output."
                 
                 _act = {"type": "answer", "text": ans_text}
                 
@@ -3099,14 +3093,6 @@ Other commands:
                         _tool_results = search_api(q_tool, categories='general', fast=True)
                         if not _tool_results and q_tool != query:
                             _tool_results = search_api(query, categories='general', fast=True)
-                        if not _tool_results:
-                            _words = query.strip().split()
-                            if len(_words) >= 2:
-                                for _w in _words:
-                                    if len(_w) >= 3:
-                                        _tool_results = search_api(_w, categories='general', fast=True)
-                                        if _tool_results:
-                                            break
                         _serper_ms = (time.time() - _serper_t0) * 1000
 
                         if model_manager.current_fast_request_id != request_id:
@@ -3132,12 +3118,15 @@ Other commands:
                                 _answer_text = _answer_out['choices'][0]['message']['content'].strip()
                                 _answer_text = re.sub(r'<think>.*?(?:</think>|$)', '', _answer_text, flags=re.DOTALL).strip()
                                 if _answer_text and len(_answer_text) > 5:
-                                    # Check if this looks like a person name query and convert to person card
                                     _qw = query.strip().lower().split()
                                     _qwords = {"who", "what", "when", "where", "why", "how", "which", "does", "did", "is", "are", "was", "were", "can", "could", "would"}
-                                    _person_sigs = ['born', 'founder', 'co-founder', 'ceo', 'actor', 'musician', 'politician', 'president', 'director', 'scientist', 'author', 'artist', '(19', '(18', '(20']
                                     _is_name_q = (1 <= len(_qw) <= 4 and not any(w in _qwords for w in _qw) and all(w.isalpha() or "'" in w or "-" in w for w in _qw))
-                                    if _is_name_q and any(sig in _answer_text.lower() for sig in _person_sigs):
+                                    _place_sigs = ['city', 'capital', 'country', 'town', 'village', 'located', 'population', 'municipality', 'situated', 'province', 'region', 'district']
+                                    _person_sigs = ['born', 'founder', 'co-founder', 'ceo', 'actor', 'musician', 'politician', 'president', 'director', 'scientist', 'author', 'artist', '(19', '(18', '(20']
+                                    _ans_lower = _answer_text.lower()
+                                    if _is_name_q and any(sig in _ans_lower for sig in _place_sigs):
+                                        _act = {"type": "place", "name": query.title(), "address": _answer_text[:120].rsplit(' ', 1)[0] if len(_answer_text) > 120 else _answer_text, "latitude": None, "longitude": None, "url": "", "image": None}
+                                    elif _is_name_q and any(sig in _ans_lower for sig in _person_sigs):
                                         _act = {"type": "person", "name": query.title(), "description": _answer_text, "url": "", "image": None}
                                     else:
                                         _act = {"type": "answer", "text": _answer_text}
@@ -3210,39 +3199,11 @@ Other commands:
                 logging.info(f"[ACTION/INLINE] Retrying search with original query: {query!r}")
                 tool_results = search_api(query, categories='general', fast=True)
 
-            # If still no results, try individual words
-            if not tool_results:
-                words = query.strip().split()
-                if len(words) >= 2:
-                    for word in words:
-                        if len(word) >= 3:
-                            tool_results = search_api(word, categories='general', fast=True)
-                            if tool_results:
-                                break
-
             serper_ms = (time.time() - serper_t0) * 1000
 
             # Check again after Serper (user may have typed something new)
             if model_manager.current_fast_request_id != request_id:
                 return _action_resp([])
-
-            # Validate result relevance
-            if tool_results and q_tool:
-                _q_lower = q_tool.lower().strip()
-                _any_relevant = any(
-                    _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
-                    for r in tool_results[:3]
-                )
-                if not _any_relevant and len(_q_lower) >= 3:
-                    logging.warning(f"[ACTION/INLINE] Results don't mention '{q_tool}' — retrying non-fast...")
-                    retry_results = search_api(q_tool, categories='general', fast=False)
-                    if retry_results:
-                        _any_relevant2 = any(
-                            _q_lower in (r.get('title', '') + ' ' + (r.get('content') or r.get('snippet', ''))).lower()
-                            for r in retry_results[:3]
-                        )
-                        if _any_relevant2:
-                            tool_results = retry_results
 
             if tool_results:
                 search_results.extend(tool_results)
@@ -3266,6 +3227,16 @@ Other commands:
                     if _answer_text and len(_answer_text) > 5:
                         total_ms = (time.time() - endpoint_start_time) * 1000
                         logging.info(f"[TIMING] LLM1={llm1_ms:.0f}ms Serper={serper_ms:.0f}ms direct_answer=True total={total_ms:.0f}ms")
+                        _qw = query.strip().lower().split()
+                        _qwords = {"who", "what", "when", "where", "why", "how", "which", "does", "did", "is", "are", "was", "were", "can", "could", "would"}
+                        _is_name_q = (1 <= len(_qw) <= 4 and not any(w in _qwords for w in _qw) and all(w.isalpha() or "'" in w or "-" in w for w in _qw))
+                        _ans_lower = _answer_text.lower()
+                        _place_sigs = ['city', 'capital', 'country', 'town', 'village', 'located', 'population', 'municipality', 'situated', 'province', 'region', 'district']
+                        _person_sigs = ['born', 'founder', 'co-founder', 'ceo', 'actor', 'musician', 'politician', 'director', 'scientist', 'author', 'artist']
+                        if _is_name_q and any(sig in _ans_lower for sig in _place_sigs):
+                            return _action_resp([{"type": "place", "name": query.title(), "address": _answer_text[:120].rsplit(' ', 1)[0] if len(_answer_text) > 120 else _answer_text, "latitude": None, "longitude": None, "url": "", "image": None}])
+                        elif _is_name_q and any(sig in _ans_lower for sig in _person_sigs):
+                            return _action_resp([{"type": "person", "name": query.title(), "description": _answer_text, "url": "", "image": None}])
                         return _action_resp([{"type": "answer", "text": _answer_text}])
 
             tool_content = "No results found."

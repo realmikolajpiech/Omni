@@ -3064,8 +3064,9 @@ class PersonActionWidget(QWidget):
         if display_name.islower():
             display_name = display_name.title()
             
-        logging.info(f"[UI] Displaying Person Card: Name='{display_name}', Desc='{description[:50]}...'")
-        
+        if type(self) is PersonActionWidget:
+            logging.info(f"[UI] Displaying Person Card: Name='{display_name}', Desc='{description[:50]}...'")
+
         self.name_label = QLabel(display_name)
         self.name_label.setFont(QFont("Instrument Serif", 28, QFont.Weight.Normal))
         self.name_label.setStyleSheet("color: #111111;")
@@ -3327,10 +3328,9 @@ class PlaceActionWidget(PersonActionWidget):
         self.avatar.setFixedSize(80, 100)
         self.avatar.setStyleSheet("background-color: #F0F0F0; border-radius: 6px; border: 1px solid #E0E0E0;")
         
-        if not image_url and lat and lon:
-            # Styled map fetch with smaller size
-            self.image_url = f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lon}&zoom=14&size=160x200&markers={lat},{lon},red-pushpin"
-            self._download_image()
+        if not lat and name:
+            # No coordinates yet — geocode via Nominatim for directions support
+            self._geocode_and_fetch_map(name)
 
         # Update description with category/address
         full_desc = ""
@@ -3496,6 +3496,38 @@ class PlaceActionWidget(PersonActionWidget):
             
         if getattr(self, 'hours_label', None):
             self.hours_label.setStyleSheet(f"color: {hours_text}; margin-top: 4px;")
+
+    def _geocode_and_fetch_map(self, place_name: str):
+        """Geocode place_name via Nominatim and then show a static map."""
+        from PyQt6.QtCore import QThread
+
+        class _GeoWorker(QThread):
+            done = pyqtSignal(float, float)
+
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+
+            def run(self):
+                try:
+                    import json, urllib.parse
+                    url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote_plus(self.name)}&format=json&limit=1"
+                    req = urllib.request.Request(url, headers={"User-Agent": "OmniApp/1.0"})
+                    with urllib.request.urlopen(req, timeout=4) as r:
+                        data = json.loads(r.read())
+                    if data:
+                        self.done.emit(float(data[0]['lat']), float(data[0]['lon']))
+                except Exception:
+                    pass
+
+        def _on_geo(lat, lon):
+            self.lat = lat
+            self.lon = lon
+            # Static map image skipped — openstreetmap.de is unreliable
+
+        self._geo_worker = _GeoWorker(place_name)
+        self._geo_worker.done.connect(_on_geo)
+        self._geo_worker.start()
 
     def execute(self):
         # Default action when pressing Enter: Open Google Maps

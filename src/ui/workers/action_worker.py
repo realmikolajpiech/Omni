@@ -47,6 +47,12 @@ class ActionWorker(QThread):
         - If the endpoint returns application/json (fast path like calc/translate/etc):
           parse JSON directly and emit result.
         """
+        # Emit skeleton immediately — before the HTTP round-trip — so the UI
+        # always shows feedback during LLM inference (1-4 seconds).
+        # Fast-path responses (shortcuts, calc, etc.) arrive in < 50 ms and
+        # replace it before it's even visually noticed.
+        self.searching.emit(self.query, self.query)
+
         try:
             with requests.post(
                 ACTION_URL,
